@@ -497,7 +497,7 @@ radius; this is the trigger.
     fatigue is named residual (§10), not silently exempted. Endorsement is the ONLY tainted→trusted
     flip, so it is itself an authority-increasing act (trusted-path/grant ceremony, never a casual
     inline ack — else "please endorse this file" is the next injection payload); its concrete class
-    is deferred to the grant-protocol.md propagation (§9, pending item d).
+    is defined in grant-protocol.md D2/D5 (persistent grant, provenance-store target).
 
   This is the dual-LLM / CaMeL discipline (quarantined parser returns data-only; taint metadata
   keeps untrusted data out of the control path) applied to Shrek.
@@ -545,12 +545,14 @@ consequences the model prices honestly:
 These have been **propagated** into the sibling docs (architecture.md §1/§5/§6/§9,
 isolation.md §7/§9, base-selection.md), each carrying a pointer back here as the controlling
 source. The `swamp.md` / `update-model.md` rows will be honored when those docs are authored. The
-**§8b grant-protocol.md propagation is PENDING**: grant-protocol.md today has the reason-as-untrusted-text
-legibility rule but needs, added there before §8b is fully propagated — (a) the `untrusted-read + network`
-**trifecta warning**; (b) a **tainted-origin D2 ceremony** (human ack for an in-profile tainted action);
-(c) a **Rung-0 exclusion** (a tainted-origin authority-increasing proposal must not auto-satisfy from the
-pre-baked cap-sets grant-protocol.md's headless policy would otherwise grant); (d) the **endorsement
-ceremony** (§8b — the tainted→trusted flip is authority-increasing).
+**§8b is now PROPAGATED into grant-protocol.md** (alongside the pre-existing reason-as-untrusted-text
+legibility rule): (a) the `untrusted-read + network` **trifecta warning** (Legibility); (b) the
+**tainted-origin D2 ceremony** — `agentd` holds the action and forwards an empty-cap-delta
+action-descriptor proposal, requiring an explicit human ack even in-profile, tagged at session
+granularity (deterministic floor) with the tripwire residual named; (c) the **Rung-0 exclusion**
+(tainted-origin proposals never auto-satisfy pre-baked cap-sets; endorsement never pre-bakeable);
+(d) **endorsement** defined as a persistent (D5) grant class — provenance-store target, TPM NV-counter
+bump, revocation = re-taint. Coalescing now carries the taint bit (no tainted-rides-clean smuggling).
 
 | # | Amends | Change |
 |---|---|---|
@@ -563,7 +565,7 @@ ceremony** (§8b — the tainted→trusted flip is authority-increasing).
 | §8/C1 | base-selection.md | monotonic **anti-rollback** SVN (TPM NV counter); floor **advances only on greenboot-healthy commit**; recovery repairs to **≥ current SVN**, never below |
 | §8/A5-disc | architecture.md §6 | scope `discover:false` honestly to A1 bytes+own-metadata; reference leakage is accepted residual |
 | §8/AS3 | base-selection.md | specify **PCR sealing** targets + TPM-absent documented-degrade (never silent) |
-| §8b | agents.md §8 (done); grant-protocol.md (**pending**) | **untrusted content is not instruction**: tag `untrusted-instruction-source` on context ingest (fail-high on unlabeled; agent-authored stays tainted), **demote-to-propose** — deny self-service route 2, require a human ack even in-profile (TP1 if escalating); tripwire-grade not wall-grade (missed tag → in-profile baseline, not silent breach). Pending in grant-protocol.md (§9 preamble a–d): **trifecta warning** (`untrusted-read + network`) + tainted-origin D2 ceremony + Rung-0 exclusion + endorsement ceremony. Cites architecture.md §7 as the tripwire class (no change there). Instruction-hijack half only; ranking-integrity stays open |
+| §8b | agents.md §8 (done); grant-protocol.md (**done**) | **untrusted content is not instruction**: tag `untrusted-instruction-source` on context ingest (fail-high on unlabeled; agent-authored stays tainted), **demote-to-propose** — deny self-service route 2, require a human ack even in-profile (TP1 if escalating); tripwire-grade not wall-grade (missed tag → in-profile baseline, not silent breach). Propagated to grant-protocol.md: **trifecta warning** (`untrusted-read + network`) + tainted-origin D2 ceremony (agentd holds action → action-descriptor proposal) + Rung-0 exclusion + endorsement as persistent (D5) grant class + taint bit in coalescing key. Cites architecture.md §7 as the tripwire class (no change there). Instruction-hijack half only; ranking-integrity stays open |
 | §8/B5,F1,F2 | (new detail in swamp.md / update-model.md) | pool reset by (band,caps); log head TPM-anchored; log read-ACL + Theorem-1 content rule |
 
 ---

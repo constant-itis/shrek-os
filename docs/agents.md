@@ -259,7 +259,7 @@ bytes-in-context.** Three consequences the design must state plainly:
   `network: [docs.python.org]` is still a channel. Real-world: the EchoLeak Copilot exfiltration and
   the Supabase MCP leak were both legitimate-read chained to legitimate-egress, zero
   protected-capability abuse. So **`untrusted-read + network` surfaces in the grant UI as a trifecta
-  warning** ([`grant-protocol.md`](grant-protocol.md) — *rule pending propagation, security-model §9*)
+  warning** ([`grant-protocol.md`](grant-protocol.md) Legibility)
   — never routine merely because each capability is individually in-policy.
 - **Index poisoning is partly live now, not only in SWAMP LIVING.** The deferred living-graph tier
   earns its own threat pass ([`filesystem-intelligence.md`](filesystem-intelligence.md) §8) — but the

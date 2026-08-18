@@ -248,9 +248,8 @@ how Shrek-specific (vs generic) the threat is.
   from "subverted operator" into "remotely triggerable." Combined with ADV-7 (evade DLP) and
   the allowed-egress channel (§7.5), a single poisoned document an agent reads can exfiltrate
   everything else that agent can read — the **lethal trifecta** (`untrusted-read + any network`)
-  is a presumptive exfil channel, to be surfaced in the grant UI as such (grant-UI rule pending,
-  security-model §9), never routine merely because each capability is individually in-policy
-  (§6.9, grant-protocol.md). The taint tag is itself
+  is a presumptive exfil channel, surfaced in the grant UI as such (grant-protocol.md Legibility),
+  never routine merely because each capability is individually in-policy (§6.9, grant-protocol.md). The taint tag is itself
   best-effort: a source mislabeled trusted, or an injection that drafts a *plausible grant reason*
   ("fetch the changelog for a compat check"), defeats it — **content fatigue, distinct from
   volume fatigue** (grant-protocol.md rate-limits proposal *volume*, not proposal *text*). This is
@@ -477,8 +476,8 @@ Concrete. Each: the move, the control that must stop it, the layer, and the resi
   (**content fatigue**, ADV-9). A **missed** tag (B mislabeled trusted, or the model not linking
   the commit to B) executes in-profile with **no human** — the pre-§8b baseline (§6.5), bounded
   by the wall's radius, never a silent wall breach. The lethal trifecta
-  (`untrusted-read + any network`, §6.5) is the sharpest instance — to be surfaced in the grant UI
-  (rule pending, security-model §9), not routine.
+  (`untrusted-read + any network`, §6.5) is the sharpest instance — surfaced in the grant UI
+  (grant-protocol.md Legibility), not routine.
 
 ---
 
