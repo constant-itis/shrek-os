@@ -103,6 +103,12 @@ identity. Borrow ergonomics from Universal Blue / Vanilla OS (reference only). D
 stable channel here (Debian Stable vs Trixie for hardware freshness).
 **Milestone:** a non-developer can install and use Shrek.
 
+Design-of-record: `shell-architecture.md` (**Shrek Shell** — roles as swappable systemd user
+services, delivered as Onion layers). It adds a **three-rung ladder** the original single "Wayland
+desktop" line did not capture: Rung 0 bare (no shell layer), **Rung 1 a terminal-native TUI shell**
+(new — zellij-based, no Wayland, runs over SSH), Rung 2 the graphical Wayland shell. The agent
+permission UI is the one trusted-path role and couples forward to Phase 4 (`gatekeeperd`).
+
 ---
 
 ## Benchmark profiles (measured from Phase 1 on)
