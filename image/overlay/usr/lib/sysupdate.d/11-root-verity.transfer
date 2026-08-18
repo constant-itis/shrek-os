@@ -1,0 +1,20 @@
+# Shrek OS Phase-1 — S7: sysupdate transfer for the root VERITY (hash) partition (A/B).
+# Adapted from particleos mkosi.sysupdate/11-usr-verity.transfer, retargeted usr→root. Installs the
+# new version's hash tree into the inactive verity slot, paired with the data transfer (10-root).
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/
+PathRelativeTo=explicit
+# VERIFY the split filename against `ls out/` after the first build.
+MatchPattern=%M_@v_%a.root-%a-verity.@u.raw
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=%M_@v_verity
+MatchPartitionType=root-verity
+PartitionFlags=0
+ReadOnly=1

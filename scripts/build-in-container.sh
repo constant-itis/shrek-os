@@ -13,6 +13,14 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 
+# S7: build a specific version (default 1). mkosi reads image/mkosi.version for the %v in Output/UKI
+# names, so v1 and v2 produce distinct, versioned split artifacts that systemd-sysupdate can A/B
+# between (docs/phase1-s7-sysupdate.md). image/mkosi.version is gitignored (a build input, not source).
+VERSION="${1:-1}"
+echo "$VERSION" > image/mkosi.version
+RAW="out/shrek_${VERSION}_x86-64.raw"
+echo "=== building Shrek OS version ${VERSION} → ${RAW} ==="
+
 echo "=== STAGE 1 (host): build binaries + stage the image overlay ==="
 cargo build --release
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
@@ -52,4 +60,7 @@ docker run --rm --privileged \
     chown -R "${HOST_UID}:${HOST_GID}" /work/out
   '
 
-echo "=== done — artifacts in out/ (dm-verity SEALED root + sbsigned UKI; S7 bootc still to wire) ==="
+echo "=== done — version ${VERSION} in out/ ==="
+echo "    disk: ${RAW}   (A/B: root slot A populated, slot B empty; /var volatile)"
+echo "    split artifacts (systemd-sysupdate [Source]):"
+ls -1 "out/shrek_${VERSION}_"* 2>/dev/null | sed 's/^/      /' || true

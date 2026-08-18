@@ -11,3 +11,7 @@
 # Generated every build; the tracked source under image/overlay/ is only the systemd unit files.
 /image/overlay/usr/libexec/
 /image/overlay/usr/share/
+# S7: per-build version input (build-in-container.sh writes it), and mkosi's local cache/output dirs.
+/image/mkosi.version
+/image/mkosi.cache/
+/image/mkosi.output/

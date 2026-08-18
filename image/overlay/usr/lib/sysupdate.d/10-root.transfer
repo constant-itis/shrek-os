@@ -1,0 +1,21 @@
+# Shrek OS Phase-1 — S7: sysupdate transfer for the root DATA partition (A/B).
+# Adapted from particleos mkosi.sysupdate/12-usr.transfer, retargeted usr→root (we seal the whole
+# root, not just /usr — docs/phase1-s7-sysupdate.md). Source = the mkosi output dir (the split .raw);
+# target = the inactive on-disk root slot. ProtectVersion=%A never overwrites the running version.
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/
+PathRelativeTo=explicit
+# VERIFY the split filename against `ls out/` after the first build; correct if %t renders differently.
+MatchPattern=%M_@v_%a.root-%a.@u.raw
+
+[Target]
+Type=partition
+Path=auto
+MatchPattern=%M_@v
+MatchPartitionType=root
+PartitionFlags=0
+ReadOnly=1

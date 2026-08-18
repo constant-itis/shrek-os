@@ -13,8 +13,11 @@
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
-RAW=out/shrek-phase1.raw
-[ -f "$RAW" ] || { echo "missing $RAW — run scripts/build-in-container.sh first" >&2; exit 1; }
+# S7: images are versioned (out/shrek_<v>_x86-64.raw). Default to the newest built raw; override with
+# RAW=out/shrek_2_x86-64.raw scripts/boot-vm.sh to boot a specific version (e.g. the A/B-updated disk).
+RAW="${RAW:-$(ls -t out/shrek_*_x86-64.raw 2>/dev/null | head -1)}"
+[ -n "$RAW" ] && [ -f "$RAW" ] || { echo "no out/shrek_*_x86-64.raw — run scripts/build-in-container.sh first" >&2; exit 1; }
+echo "=== booting $RAW ==="
 QEMU_SECONDS="${1:-150}"     # wall-clock budget for the two-boot cycle
 LOG=out/vm-console.log
 : > "$LOG"

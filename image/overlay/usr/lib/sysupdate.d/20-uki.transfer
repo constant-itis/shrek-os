@@ -1,0 +1,27 @@
+# Shrek OS Phase-1 — S7: sysupdate transfer for the UKI in the ESP, WITH boot counting (the S8 lever).
+# Adapted from particleos mkosi.sysupdate/20-uki.transfer. The new version's signed UKI is installed
+# into /EFI/Linux as shrek_<v>_x86-64+3.efi; systemd-boot decrements the +tries on each boot attempt
+# and, on a good boot, systemd-bless-boot strips the counter. An update that never boots-good exhausts
+# its tries (+0-N) and the loader falls back to the previous UKI = automatic rollback (docs §S8).
+# The multi-line MatchPattern lists every counter state so sysupdate recognizes the UKI whatever name
+# systemd-boot has renamed it to. TriesLeft/TriesDone set the INITIAL counter only.
+[Transfer]
+ProtectVersion=%A
+
+[Source]
+Type=regular-file
+Path=/
+PathRelativeTo=explicit
+MatchPattern=%M_@v_%a.efi
+
+[Target]
+Type=regular-file
+Path=/EFI/Linux
+PathRelativeTo=boot
+MatchPattern=%M_@v_%a+@l-@d.efi \
+             %M_@v_%a+@l.efi \
+             %M_@v_%a.efi
+Mode=0444
+TriesLeft=3
+TriesDone=0
+InstancesMax=2
