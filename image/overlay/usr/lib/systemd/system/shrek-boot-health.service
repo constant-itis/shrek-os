@@ -1,0 +1,36 @@
+# shrek-boot-health — Phase-1 S8: the boot health gate that arms automatic A/B rollback.
+#
+# WIRING (verbatim pattern from systemd's own systemd-boot-check-no-failures.service):
+#   Before=boot-complete.target  +  [Install] RequiredBy=boot-complete.target
+# systemd's boot-assessment chain: on a boot-counted boot systemd-bless-boot-generator sees the
+# LoaderBootCountPath EFI variable and pulls systemd-bless-boot.service, which has
+# Requires=/After=boot-complete.target — so the entry is only blessed (its +tries counter stripped,
+# making the update permanent) once boot-complete.target is REACHED. Because this unit is ordered
+# Before that target and the target Requires it, an unhealthy boot (ExecStart exits non-zero) fails
+# the target's job => bless never runs => the counter is not stripped.
+#
+# FailureAction=reboot then reboots the box, so systemd-boot decrements the entry's tries on the
+# next attempt; after the tries are exhausted (+0-N) the loader marks the entry bad and falls back
+# to the previous known-good UKI (the non-counted shrek_1 entry) = automatic rollback. This mirrors
+# greenboot's reboot-on-failed-healthcheck. See docs/phase1-s8-rollback.md.
+#
+# NOTE: boot-complete.target is only pulled into the transaction on a *counted* boot, so this gate
+# runs ONLY on a freshly-installed (boot-counted) update — never on the already-good fallback entry.
+[Unit]
+Description=Shrek boot health gate (Phase-1 S8 rollback proof)
+Documentation=file:///usr/share/doc/shrek/phase1-s8-rollback.md
+After=default.target graphical.target multi-user.target
+Before=boot-complete.target
+# Unhealthy boot => reboot so the loader decrements this entry's boot counter toward rollback.
+FailureAction=reboot
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/boot-health-check
+# Mirror the gate's verdict onto the serial console so the S8 VM proof is legible in vm-console.log.
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+RequiredBy=boot-complete.target

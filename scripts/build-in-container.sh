@@ -26,6 +26,20 @@ cargo build --release
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
 install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl} image/overlay/usr/libexec/shrek/
 install -m0644 docs/*.md image/overlay/usr/share/doc/shrek/
+
+# S8: deliberately-broken build. BREAK=1 stages a poison marker into the sealed image; the boot
+# health gate (shrek-boot-health.service → /usr/lib/shrek/boot-health-check) fails on any version
+# carrying it, forcing an automatic A/B rollback to the last-good UKI. The marker is gitignored and
+# removed on every normal build, so `build-in-container.sh <v>` (no BREAK) is always a healthy build.
+POISON=image/overlay/usr/lib/shrek/boot-poison
+if [ "${BREAK:-0}" = "1" ]; then
+  echo "!!! BREAK=1: staging poison marker — version ${VERSION} is a DELIBERATELY BROKEN update (S8) !!!"
+  install -d image/overlay/usr/lib/shrek
+  printf 'shrek-os S8 poison: version %s built with BREAK=1 — boot health gate fails on purpose.\n' "$VERSION" > "$POISON"
+else
+  rm -f "$POISON"
+fi
+
 mkdir -p out    # must exist before the bind-mount, or docker creates it root-owned
 
 # S5: throwaway Shrek Secure Boot signing key (keys/ is gitignored, never shipped). Idempotent —

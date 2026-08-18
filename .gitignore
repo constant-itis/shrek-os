@@ -15,3 +15,5 @@
 /image/mkosi.version
 /image/mkosi.cache/
 /image/mkosi.output/
+# S8: deliberately-broken build marker, staged only for BREAK=1 builds (never committed).
+/image/overlay/usr/lib/shrek/boot-poison

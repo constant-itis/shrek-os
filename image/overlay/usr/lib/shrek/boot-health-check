@@ -1,0 +1,27 @@
+#!/bin/sh
+# Shrek OS Phase-1 — S8: the boot health gate.
+#
+# Runs on a boot-counted boot, ordered Before=boot-complete.target and RequiredBy it (see
+# shrek-boot-health.service). Exit 0 => the boot is healthy => boot-complete.target is reached =>
+# systemd-bless-boot marks the entry good (strips the +tries counter, making the update permanent).
+# Exit non-zero => the unit fails => boot-complete.target is NOT reached => the entry is never
+# blessed; its tries decrement on each attempt and, once exhausted (+0-N), systemd-boot falls back
+# to the previous known-good UKI. That is the S8 automatic rollback.
+#
+# In production this is where Shrek's real greenboot-style checks live (control-plane liveness,
+# verity intact, network reachable, etc). For the Phase-1 spike the ONLY check is a deliberate
+# poison marker: a broken update is built with `BREAK=1 scripts/build-in-container.sh <v>`, which
+# stages /usr/lib/shrek/boot-poison into the sealed image. Its presence => this check fails => the
+# update rolls back. A normal build has no poison file => the check passes => the update sticks.
+set -eu
+
+POISON=/usr/lib/shrek/boot-poison
+
+if [ -e "$POISON" ]; then
+    echo "shrek-boot-health: POISON marker present ($POISON) — reporting boot UNHEALTHY" >&2
+    echo "shrek-boot-health: boot-complete.target will not be reached; this update will roll back" >&2
+    exit 1
+fi
+
+echo "shrek-boot-health: no poison marker — boot healthy, blessing this entry"
+exit 0
