@@ -292,17 +292,22 @@ agentd (unprivileged resolver)
           { tier, mount-set, net-set, resource-limits, provenance-id }
 
 gatekeeperd (privileged broker — the ONLY thing that builds sandboxes)
-  step 3: RE-CHECK the floor + caps⊆profile independently (never trust agentd blindly)
+  step 3: RE-CHECK floor + caps⊆profile independently, reading matrix/floor/profile from the
+          SEALED POLICY PLANE (security-model.md §4), NOT from agentd or any writable state
   step 4: refuse if tier < max(matrix, floor)             → audited rejection, not a warning
   step 5: refuse if mount-set/net-set exceed the granted profile
-  step 6: construct: tier runtime + virtio-fs/bind mounts + tap+nftables + limits
+  step 6: construct: tier runtime + mounts + tap+nftables + limits. Mounts PIN the granted
+          subtree-root fd and RESOLVE BENEATH it (no pathname re-resolution) so a symlink/rename
+          swap cannot land protected bytes (security-model.md §6)
   step 7: emit provenance (architecture.md §8): tier, caps, network, actor, model, reason
 ```
 
 Two independent checks (agentd resolves, gatekeeperd re-verifies) means a bug or compromise in
 the unprivileged resolver **cannot** widen a sandbox: gatekeeperd is the wall and refuses
-anything exceeding `max(matrix, floor)` or the granted profile. gatekeeperd is small,
-privileged, and auditable precisely so this recheck is the single trusted chokepoint.
+anything exceeding `max(matrix, floor)` or the granted profile. The independence is **real only
+because the recheck reads sealed policy** (security-model.md §4), not the same mutable source
+agentd could influence. gatekeeperd is small, privileged, and auditable precisely so this
+recheck is the single trusted chokepoint.
 
 ## 8. Worked examples
 
@@ -346,6 +351,10 @@ practice: the strong wall does not excuse a wide radius.
   Landlock ruleset (belt-and-suspenders) by default, or only on request.
 - **Trust-band inference.** How `agentd` derives the trust band for a given invocation (signed
   manifest? provenance DB lookup? explicit `--trust`?) — a policy question owed to agents.md,
-  but it gates the matrix, so it must be pinned before Phase 8.
+  but it gates the matrix, so it must be pinned before Phase 8. **Security constraint already
+  fixed** (security-model.md §6/B1): whatever agents.md chooses, the band MUST come from an
+  integrity-checked source (a trusted signature or a measured provenance record, never an
+  attacker-writable label), and **unknown/unverifiable provenance ⇒ `T-hostile`** — fail-high, so
+  provenance spoofing can only ever *raise* the wall, never lower it.
 ```
 

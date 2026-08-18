@@ -464,8 +464,9 @@ what happens when it is absent.
 
 ## 9. Amendment summary (for review before propagation)
 
-These are proposed here and **not yet propagated** into the sibling docs — awaiting review.
-Once approved, patch each target:
+These have been **propagated** into the sibling docs (architecture.md §1/§5/§6/§9,
+isolation.md §7/§9, base-selection.md), each carrying a pointer back here as the controlling
+source. The `swamp.md` / `update-model.md` rows will be honored when those docs are authored.
 
 | # | Amends | Change |
 |---|---|---|

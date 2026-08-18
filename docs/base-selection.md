@@ -115,6 +115,15 @@ hatch and the Debian decision is low-risk:
   upgrade — not a blocker.
 - First milestone = "hardened Debian mkosi/bootc image boots sealed under MOK with an empty
   control-plane scaffold" (Phase 1 acceptance test above).
+- **Security-model amendments incorporated** (see [`security-model.md`](security-model.md) §4,
+  §8): (a) **TPM PCR sealing** targets are specified for the boot measurement, the mutable-policy
+  digest root, and the image SVN; (b) **anti-rollback** — a monotonic **security version counter
+  (SVN)** in a TPM NV index; boot refuses any image below the floor, the floor advances **only on
+  greenboot-healthy commit** (so bootc A/B rollback never bricks), and recovery lands ≥ the
+  current SVN; (c) **static policy is baked into the image** under the dm-verity root (it is
+  security-critical + version-static, per the §3 routing rule), while per-machine grants are
+  anchored to a **separate** TPM NV monotonic counter checked every load. TPM-absent ⇒ documented
+  lower-assurance degrade (software counter), never a silent claim of a guarantee it can't back.
 
 ## Open questions
 
@@ -122,6 +131,10 @@ hatch and the Debian decision is low-risk:
 - Exact bootc-on-Debian maturity — the Phase-1 spike is the test.
 - When/if composefs replaces dm-verity; when/if a custom kernel is worth stepping off the
   signed chain (treat as late/expensive/opt-in).
+- **⚠ Live-verify on target TPMs** (security-model.md §8/AS3): the anti-rollback rests on the
+  TPM 2.0 property that a (re)created NV counter initializes to ≥ the max any counter has ever
+  held (defeats destroy-and-recreate) — confirm on real hardware at the Phase-1 spike, and pin
+  the NV-index owner/policy auth custody.
 
 ## Sources
 

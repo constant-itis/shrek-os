@@ -39,6 +39,19 @@ Everything from "immutable base" down is **borrowed and upstream-maintained**. E
 in the "Shrek control plane" and "AI/agent" bands is **ours to build**. That boundary is
 the whole point of the two-track decision.
 
+Two refinements the stack diagram elides (both in [`security-model.md`](security-model.md)):
+
+- **Policy is authority, not writable state — it is sealed with the base, not left in `/var`.**
+  Static policy (the matrix, floor, Landlock/AppArmor templates, oniond trust roots) is **baked
+  into the bootc image** under the dm-verity root; per-machine grants are **counter-anchored**
+  (fs-verity + a TPM NV monotonic counter checked every load), mutated only through the
+  privileged, trusted-path-gated grant API (§4). The *definition* of every wall must be at least
+  as protected as the walls it defines.
+- **"Trusted native" means signed, not unconfined.** A native app in the Applications band runs
+  only under a mandatory capability profile + at least a Tier-0 Landlock/seccomp sandbox; the
+  signature is what's trusted, not the code's restraint. **There is no unconfined execution path
+  on Shrek** (§8/D1).
+
 ## 2. The base — Debian + bootc, not LFS
 
 Decision recorded in [`base-selection.md`](base-selection.md) (ADR-001, committed). Summary:
@@ -192,17 +205,23 @@ Therefore the invariant `semantic authority ≤ data authority` is enforced **st
 by making swampd a *subject* of the deterministic policy, not an exception to it:**
 
 ```
-Landlock the swampd daemon itself so it CANNOT open the human-only domains.
+Landlock the swampd daemon itself, DEFAULT-DENY, so it can open ONLY an explicit allow-set of
+indexable trees — and therefore CANNOT open the human-only domains, or any directory created
+later, or anything not on the allow-set.
 Not "swampd is trusted to skip ~/Vault" — swampd is physically incapable of reading it.
 
 Consequence: a swampd compromise leaks NOTHING from those domains,
 because the protected bytes never entered its address space.
 ```
 
-This is stronger than a "don't index these paths" config (which can be misconfigured):
-swampd's own read scope == the union of what it is allowed to expose, enforced by the
-kernel on the daemon. Enforce authorization **before** retrieval — never global-search →
-retrieve-secret → filter-after.
+This is stronger than a "don't index these paths" config (which can be misconfigured): the
+generated Landlock ruleset is a **default-deny allow-list**, so swampd's own read scope == the
+union of what it is allowed to expose, enforced by the kernel on the daemon. A newly-created
+`~/NewSecrets/` is unreadable to swampd the instant it exists, with no config change. Enforce
+authorization **before** retrieval — never global-search → retrieve-secret → filter-after. *(The
+allow-set template + the never-indexable human-only exclusion are sealed static policy; per-machine
+additions go through the counter-anchored grant path — see [`security-model.md`](security-model.md)
+§5 and §4.)*
 
 ## 6. AI capability security — vocabulary beyond rwx
 
@@ -224,6 +243,14 @@ commands:[ cargo, git, cmake, ninja ]
 denied:  [ ~/.ssh/**, ~/.gnupg/**, ~/Private/**, /boot/**, /etc/**, /usr/** ]
 ```
 
+The `denied:` list is human-readable **intent**; it COMPILES to a **default-deny** Landlock
+ruleset (grant `read`/`write`, deny everything else), so a path in neither list is denied, not
+allowed — same default-deny principle as swampd (§5). Two scoping honesties (see
+[`security-model.md`](security-model.md) §8): `discover: false` is guaranteed for protected
+material's own bytes and its own metadata within swampd's scope, but **not** against a *readable*
+file that merely names it; and these are the deterministic **wall**, distinct from the semantic
+**tripwire** below (§7) which is advisory only.
+
 ## 7. Two-layer security model — deterministic wall + semantic tripwire
 
 Never reverse these:
@@ -231,7 +258,7 @@ Never reverse these:
 ```
 DETERMINISTIC SECURITY  — the WALL
   "Agent can NEVER read this."
-  Landlock / SELinux / namespaces / mounts   →  HARD, kernel-enforced
+  Landlock / AppArmor / namespaces / mounts   →  HARD, kernel-enforced
     ~/Identity/**   agents = DENY
     ~/Vault/**      agents = DENY
     ~/.ssh/**       agents = DENY
@@ -254,7 +281,7 @@ Every agent action is auditable: `artifact`, `previous_hash → new_hash`, `acto
 `shrek history <path>` and `shrek audit --agent <id>`, including "Protected data accessed:
 NO / Secrets accessed: NO / External network: <hosts>".
 
-## 9. Critical failure test (unchanged, load-bearing)
+## 9. Critical failure test (load-bearing) — two planes
 
 ```
 systemctl stop swampd
@@ -265,6 +292,19 @@ Boot, login, desktop, filesystem, networking, applications, layers, shell, and d
 must **all still function.** Only enhanced capabilities (semantic search, relationships,
 AI assistants, provenance enrichment, auto-embeddings) disappear. This is what prevents
 Shrek from becoming an AI appliance pretending to be an OS.
+
+But this is the **availability plane**, and it fails **open** by design (the OS survives the
+agent stack dying). It must not be read as license for the *agent-execution* plane to fail open
+too. Those are two separate guarantees (see [`security-model.md`](security-model.md) §7):
+
+```
+AVAILABILITY PLANE      fails OPEN   — boot/login/desktop/FS/net/apps/shell/dev survive
+                                       swampd/agentd/gatekeeperd being down (the test above).
+AGENT-EXECUTION PLANE   fails CLOSED — `shrek run` / sandbox construction REQUIRES a live,
+                                       systemd-supervised gatekeeperd serving sealed policy.
+                                       gatekeeperd down ⇒ agents CANNOT run. No unconfined
+                                       fallback, ever. Degrading features must never degrade the wall.
+```
 
 ## 10. Development priority (when forced to choose)
 
