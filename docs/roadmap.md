@@ -37,9 +37,10 @@ Freeze invariants before implementation. `architecture.md`, `base-selection.md`,
 `threat-model.md` (assets, adversary catalog, trust boundaries, attack narratives),
 `security-model.md` (threat→primitive mapping + the OPEN-resolving amendments) done.
 `filesystem-intelligence.md` (three maps, logical domains, escalation ladder, modular tiers),
-`swamp.md` (swampd component, object record, confinement, event pipeline), and
-`update-model.md` (sysupdate A/B transport, rollback vs anti-rollback) done.
-Still to write: `agents.md`.
+`swamp.md` (swampd component, object record, confinement, event pipeline),
+`update-model.md` (sysupdate A/B transport, rollback vs anti-rollback), and
+`agents.md` (identity, capability profile, trust band, lifecycle, untrusted-content-is-not-instruction)
+done. **All Phase-0 docs written.**
 **Milestone:** Shrek Architecture v0.1 frozen.
 
 ### Phase 1 — Hardened Debian sealed base (+ base acceptance test)
