@@ -6,6 +6,8 @@
 #
 #   scripts/build-layers.sh good      signed-verity sysext + signed-verity confext  → should MERGE (L1/L2/L4, O1)
 #   scripts/build-layers.sh select    TWO signed sysext (hello+extra) + signed confext → only ENABLED merge (O2)
+#   scripts/build-layers.sh inject    like select + an oniond-inject marker naming shrek-extra → the
+#                                     wall must refuse the compromised-brain request (G3, phase4-gatekeeperd)
 #   scripts/build-layers.sh unsigned  sysext with verity but NO signature           → should be REFUSED (L3a, O3)
 #   scripts/build-layers.sh tamper    signed sysext with a flipped byte (verity fails) → should be REFUSED (L3b, O3)
 #
@@ -16,7 +18,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 MODE="${1:-good}"
-case "$MODE" in good|select|unsigned|tamper) ;; *) echo "usage: $0 [good|select|unsigned|tamper]" >&2; exit 1 ;; esac
+case "$MODE" in good|select|inject|unsigned|tamper) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper]" >&2; exit 1 ;; esac
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
 
@@ -49,9 +51,10 @@ docker run --rm --privileged \
     cd /work/layers/shrek-conf
     mkosi --force $SIGN build
 
-    # --- shrek-extra sysext DDI: signed SECOND layer, built only for the selection gate (O2). It is
-    # a valid signed layer; oniond must OMIT it because it is not in the sealed enable-list. ---
-    if [ "$MODE" = "select" ]; then
+    # --- shrek-extra sysext DDI: signed SECOND layer, built for the selection gate (O2) and the
+    # injection gate (G3). It is a valid signed layer; oniond must OMIT it (not sealed-enabled), and
+    # the wall must REFUSE it even when a compromised oniond explicitly requests it. ---
+    if [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
       cd /work/layers/shrek-extra
       mkosi --force $SIGN build
     fi
@@ -77,11 +80,17 @@ docker run --rm --privileged \
     # --- assemble the layer store: extensions/ (sysext) + confexts/ (confext, good mode only) ---
     rm -rf out/store-stage; mkdir -p out/store-stage/extensions out/store-stage/confexts
     cp "$HELLO" out/store-stage/extensions/shrek-hello.raw
-    if [ "$MODE" = "select" ]; then
+    if [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
       cp "$(ls out/layers/shrek-extra*.raw | head -1)" out/store-stage/extensions/shrek-extra.raw
     fi
-    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ]; then
+    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
       cp "$(ls out/layers/shrek-conf*.raw | head -1)" out/store-stage/confexts/shrek-conf.raw
+    fi
+    # inject: drop the compromised-brain marker oniond reads off the (untrusted) store. World-readable
+    # so the unprivileged oniond can read it from the ro mount. The wall (gatekeeperd) must still refuse.
+    if [ "$MODE" = "inject" ]; then
+      echo "shrek-extra" > out/store-stage/oniond-inject
+      chmod 0644 out/store-stage/oniond-inject
     fi
     rm -f out/layer-store.raw
     mkfs.ext4 -q -L shrek-layers -d out/store-stage out/layer-store.raw 256M

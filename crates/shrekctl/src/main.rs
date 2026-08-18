@@ -1,14 +1,17 @@
 //! shrekctl — operator CLI.
 //!
-//! Phase-4 slice 1: `shrekctl onion status` reads oniond's audit record (/run/shrek/onion.json) and
-//! prints a legible table of which signed layers were merged / omitted / refused. It is a thin,
-//! UNPRIVILEGED reader — it makes no policy decision and performs no merge (that is oniond). This is
-//! the operator query surface that replaces "read the serial console" (docs/phase4-oniond.md).
+//! Phase-4: `shrekctl onion status` reads the audit record (/run/shrek/onion.json) written by the
+//! gatekeeperd broker; `shrekctl onion activate|deactivate <name>` drives the broker's runtime API
+//! over the root-owned socket (slice 2). shrekctl is a thin, UNPRIVILEGED client — it makes no policy
+//! decision and performs no merge; the broker independently re-checks the sealed policy, so even the
+//! operator cannot activate a non-policy or unsigned layer (docs/phase4-gatekeeperd.md).
 //!
-//! Dependency-free: the record is oniond's own stable, one-object-per-line JSON, read line-oriented
-//! (no general JSON parser). Override the path with SHREK_ONION_STATE for the container repro.
+//! Dependency-free: the record is a stable one-object-per-line JSON, read line-oriented; the wire
+//! protocol is line text. Override with SHREK_ONION_STATE / SHREK_BROKER_SOCK for the container repro.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 
 const ONION_STATE: &str = "/run/shrek/onion.json";
 
@@ -16,8 +19,10 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match (args.first().map(String::as_str), args.get(1).map(String::as_str)) {
         (Some("onion"), Some("status")) => onion_status(),
+        (Some("onion"), Some("activate")) => onion_op("activate", args.get(2).map(String::as_str)),
+        (Some("onion"), Some("deactivate")) => onion_op("deactivate", args.get(2).map(String::as_str)),
         (Some("onion"), _) => {
-            eprintln!("usage: shrekctl onion status");
+            eprintln!("usage: shrekctl onion status | activate <layer> | deactivate <layer>");
             std::process::exit(2);
         }
         _ => usage(),
@@ -26,9 +31,47 @@ fn main() {
 
 fn usage() {
     eprintln!("shrekctl {} — operator CLI", env!("CARGO_PKG_VERSION"));
-    eprintln!("  shrekctl onion status         which signed layers oniond merged / omitted / refused");
+    eprintln!("  shrekctl onion status                which signed layers are merged / omitted / refused");
+    eprintln!("  shrekctl onion activate <layer>      ask the broker to merge a sealed+signed layer live");
+    eprintln!("  shrekctl onion deactivate <layer>    ask the broker to unmerge a layer live");
     eprintln!("  (planned) shrek find|history|related|status; shrek run --trust=…; shrek audit --agent");
     std::process::exit(0);
+}
+
+/// Send a runtime request to the broker and print its verdict. The broker re-checks the sealed policy,
+/// so a non-policy/unsigned layer is refused here just as at boot.
+fn onion_op(verb: &str, name: Option<&str>) {
+    let Some(name) = name else {
+        eprintln!("usage: shrekctl onion {verb} <layer>");
+        std::process::exit(2);
+    };
+    let sock = std::env::var("SHREK_BROKER_SOCK").unwrap_or_else(|_| "/run/shrek-gk.sock".into());
+    let mut stream = match UnixStream::connect(&sock) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("shrekctl: broker unavailable at {sock}: {e}");
+            std::process::exit(1);
+        }
+    };
+    if writeln!(stream, "{verb} {name}").is_err() {
+        eprintln!("shrekctl: broker write failed");
+        std::process::exit(1);
+    }
+    let reader = BufReader::new(stream);
+    for line in reader.lines().map_while(Result::ok) {
+        let mut t = line.split_whitespace();
+        match t.next() {
+            Some("RESULT") => {
+                let n = t.next().unwrap_or("?");
+                let k = t.next().unwrap_or("?");
+                let d = t.next().unwrap_or("?");
+                let r = t.next().unwrap_or("-");
+                println!("  {n} ({k}) -> {d}{}", if r == "-" { String::new() } else { format!(" ({r})") });
+            }
+            Some("END") => break,
+            _ => {}
+        }
+    }
 }
 
 /// Value of a quoted field on a line: `"key": "value"` → `value`. Scoped to oniond's flat schema.

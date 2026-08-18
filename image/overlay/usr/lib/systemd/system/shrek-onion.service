@@ -1,33 +1,24 @@
-# shrek-onion — Phase 4 (slice 1): oniond owns the layer-merge policy. This unit no longer hardcodes
-# the merge (that was the Phase-2 `onion-merge` shell) — it only mounts the untrusted layer store,
-# then hands off to oniond, which reads the sealed enable-list (/usr/lib/shrek/onion-policy), SELECTS
-# which signed layers belong, exposes only those to systemd-sysext, merges them under a fixed trust
-# policy, and writes a structured audit record to /run/shrek/onion.json. shrekctl then reads that
-# record back to the console. The low-level layering stays systemd-sysext (architecture.md §3).
-# docs/phase4-oniond.md.
-#
-# The layer store is a SEPARATE writable disk (the VM's 2nd drive, fs label `shrek-layers`) holding
-# signed dm-verity DDIs under extensions/ and confexts/. The store is UNtrusted: integrity comes from
-# each DDI's PKCS#7 roothash signature, verified against /usr/lib/verity.d/shrek.crt and enforced by
-# oniond's baked image policy — so a tampered/unsigned/unselected layer is refused or omitted, never
-# silently merged.
+# shrek-onion — Phase 4 (slice 2): oniond runs UNPRIVILEGED and only PROPOSES the sealed layer set to
+# the gatekeeperd broker over the root-owned socket; the broker (the only privileged component) mounts
+# the store, independently re-checks the sealed policy, and performs the merge. oniond holds no mount
+# privilege — it cannot merge on its own (proven by its startup privilege probe). If the broker is
+# unreachable oniond fails CLOSED (no layers merge) but exits 0 so the OS still boots.
+# docs/phase4-gatekeeperd.md.
 [Unit]
-Description=Shrek Onion — oniond selects + merges signed sysext/confext layers from the external store
-Documentation=file:///usr/share/doc/shrek/phase4-oniond.md
-After=local-fs.target systemd-udevd.service
+Description=Shrek Onion — oniond proposes the sealed layer set to the gatekeeperd broker
+Documentation=file:///usr/share/doc/shrek/phase4-gatekeeperd.md
+# Ordered after the broker so the store is mounted + socket bound; oniond also connect-retries to
+# close the Type=simple readiness gap. Wants (not Requires) — a broker outage must not block boot.
+After=gatekeeperd.service
+Wants=gatekeeperd.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-# Mount the untrusted store read-only at /run/shrek-store. oniond scans store/extensions and
-# store/confexts, and exposes only the ENABLED DDIs as symlinks in the tmpfs search dirs
-# (/run/extensions, /run/confexts) — so unlike Phase 2 we do NOT bind the whole store onto the
-# search path; selection is oniond's job, not the mount's.
-ExecStartPre=/bin/mkdir -p /run/shrek-store /run/shrek
-ExecStartPre=/bin/mount -o ro /dev/disk/by-label/shrek-layers /run/shrek-store
-# oniond makes + records the policy decision and drives the merge (never hard-fails the boot).
+# The policy brain runs as the unprivileged control-plane user — the whole point of the slice.
+User=shrek
 ExecStart=/usr/libexec/shrek/oniond merge
-# The operator query surface reads the audit record back — legible O4 proof on the serial console.
+# Operator query surface reads the broker's audit record back to the console (O4 proof).
 ExecStartPost=/usr/libexec/shrek/shrekctl onion status
 StandardOutput=journal+console
 StandardError=journal+console

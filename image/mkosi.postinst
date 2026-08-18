@@ -1,0 +1,15 @@
+#!/bin/sh
+# mkosi postinst — runs in the image build root. Create the unprivileged 'shrek' control-plane user so
+# oniond/shrekctl run non-root and the gatekeeperd socket can be group-fenced. This MUST be baked into
+# /etc at build time: the runtime /etc is sealed read-only (dm-verity), so a boot-time systemd-sysusers
+# could never create it. Written by direct append (no dependency on useradd/passwd being in the image).
+set -eu
+
+if ! getent group shrek >/dev/null 2>&1; then
+    echo 'shrek:x:700:' >> /etc/group
+fi
+if ! getent passwd shrek >/dev/null 2>&1; then
+    echo 'shrek:x:700:700:Shrek OS control plane:/nonexistent:/usr/sbin/nologin' >> /etc/passwd
+    echo 'shrek:!*:19723:0:99999:7:::' >> /etc/shadow
+fi
+echo "postinst: shrek control-plane user -> $(getent passwd shrek)"

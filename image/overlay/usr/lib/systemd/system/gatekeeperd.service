@@ -1,16 +1,32 @@
-# gatekeeperd — privileged broker (Phase 4/5). PHASE-1: DISABLED SCAFFOLD.
-# Deliberately has NO [Install] section, so it cannot be enabled by preset or `systemctl enable`.
-# A Phase-1 image therefore boots a bare hardened Debian with this inert. When gatekeeperd gains
-# behavior, this unit tightens to run it privileged-but-confined; today it does nothing.
+# gatekeeperd — Phase 4 (slice 2): the privileged layer-merge broker. The ONLY merge-capable
+# component. It mounts the untrusted layer store, independently re-checks each request against the
+# sealed /usr/lib/shrek/onion-policy, and performs the privileged systemd-sysext merge/refresh. oniond
+# (unprivileged) and shrekctl connect over the root-owned socket /run/shrek-gk.sock and only REQUEST.
+# docs/phase4-gatekeeperd.md.
+#
+# Eager-start + long-running + Restart=always (supervised), ordered BEFORE shrek-onion.service so the
+# store is mounted and the socket is bound before oniond builds its request.
 [Unit]
-Description=Shrek gatekeeperd (Phase-1 disabled scaffold)
-Documentation=file:///usr/share/doc/shrek/security-model.md
+Description=Shrek gatekeeperd — privileged layer-merge broker (only merge-capable component)
+Documentation=file:///usr/share/doc/shrek/phase4-gatekeeperd.md
+After=local-fs.target systemd-udevd.service
+Before=shrek-onion.service
 
 [Service]
 Type=simple
 ExecStart=/usr/libexec/shrek/gatekeeperd
-# Phase-1 confinement placeholder — real hardening lands with real behavior.
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=yes
-Restart=no
+Restart=always
+RestartSec=1
+# Scoped privilege: runs as root but bounded to CAP_SYS_ADMIN only — exactly what mount / overlayfs /
+# dm-verity / loop need for the merge, and nothing else root can normally do. This is the "no arbitrary
+# root" property: a compromised broker cannot load modules, change net config, override DAC, etc.
+User=root
+CapabilityBoundingSet=CAP_SYS_ADMIN
+NoNewPrivileges=no
+# IMPORTANT: do NOT add ProtectHome/ProtectSystem/PrivateMounts/ReadOnlyPaths or any sandbox directive
+# that creates a private MOUNT NAMESPACE — the sysext overlay must overmount the HOST /usr and
+# propagate system-wide. A namespaced broker would merge only into its own invisible view. (This is
+# why the Phase-2 unit that merged successfully also carried no Protect* directives.)
+
+[Install]
+WantedBy=multi-user.target
