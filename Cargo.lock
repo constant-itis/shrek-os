@@ -5,13 +5,23 @@ version = 4
 [[package]]
 name = "agentd"
 version = "0.0.1"
+dependencies = [
+ "shrek-tier",
+]
 
 [[package]]
 name = "gatekeeperd"
 version = "0.0.1"
+dependencies = [
+ "shrek-tier",
+]
 
 [[package]]
 name = "oniond"
+version = "0.0.1"
+
+[[package]]
+name = "shrek-tier"
 version = "0.0.1"
 
 [[package]]

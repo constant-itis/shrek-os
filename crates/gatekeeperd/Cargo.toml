@@ -2,3 +2,6 @@
 name = "gatekeeperd"
 version.workspace = true
 edition.workspace = true
+
+[dependencies]
+shrek-tier = { path = "../shrek-tier" }

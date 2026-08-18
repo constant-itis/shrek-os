@@ -8,6 +8,7 @@ resolver = "2"
 members = [
     "crates/swampd",      # filesystem-intelligence daemon        (Phase 6+)
     "crates/agentd",      # agent identity + tier/caps resolver    (Phase 8)
+    "crates/shrek-tier",  # (trust×caps)→tier decision plane       (Phase 5)
     "crates/gatekeeperd", # privileged broker; only sandbox builder (Phase 4/5)
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
     "crates/shrekctl",    # operator CLI

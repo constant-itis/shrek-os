@@ -1,0 +1,4 @@
+[package]
+name = "shrek-tier"
+version.workspace = true
+edition.workspace = true

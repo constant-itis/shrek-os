@@ -1,6 +1,7 @@
 #!/bin/sh
-# Phase-5 slice-1 — M4 VM GATE. SPIKE ONLY: remove this file, shrek-mount-gate.service, and the
-# multi-user.target.wants symlink before any real/shipped image (docs/phase5-slice1-mount.md).
+# Phase-5 slice-1 M4 + slice-2 decision-plane VM GATE. SPIKE ONLY: remove this file,
+# shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped image
+# (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md).
 #
 # Runs on the sealed, enforcing-Secure-Boot image. Drives `gatekeeperd sandbox` to construct a
 # capability-enforced T1 sandbox from a grant, and asserts the four mount-plane properties from
@@ -51,4 +52,39 @@ if [ "$gkrc" = 0 ] && [ "$F" = 0 ] && [ "$P" -ge 4 ]; then
 else
   emit "FAIL M4 mount-plane VM gate (gkrc=${gkrc} pass=${P} fail=${F})"
 fi
+
+# ---- Phase-5 slice-2: the decision plane on the SEALED image (docs/phase5-slice2-tier.md) ----
+# G6: on the dm-verity read-only /usr the gatekeeperd binary — and its COMPILED-IN (trust×caps)→tier
+# matrix — is immutable, so the privileged re-check has NO writable input to tamper. Assert the plane
+# behaves exactly as in the oracle: a cleared T1 request constructs; a ⇒T2 request fails CLOSED and
+# the workload NEVER runs (no unconfined/weaker fallback — security-model.md §7).
+s2fail=0
+emit "S2-BEGIN Phase-5 slice-2 decision plane"
+
+# G2: cleared T-pinned/C-proj-rw ⇒ T1 constructs, and the slice-1 caps property still holds through
+# the decision path (stdout-only capture; gatekeeperd's `exec …` echo goes to stderr/console).
+OUT=$("$GK" sandbox --tier T1 --trust T-pinned --caps C-proj-rw --profile C-proj-rw \
+        --id s2 --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE")
+s2rc=$?
+printf '%s\n' "$OUT"
+P2=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: PASS gate=in-')
+F2=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: FAIL')
+if [ "$s2rc" = 0 ] && [ "$F2" = 0 ] && [ "$P2" -ge 4 ]; then
+  emit "PASS S2-cleared T-pinned/C-proj-rw constructed at T1 (${P2}/4 gates)"
+else
+  emit "FAIL S2-cleared (rc=${s2rc} pass=${P2} fail=${F2})"; s2fail=1
+fi
+
+# G3*: refused ⇒T2 fails closed — exit 12 AND zero in-sandbox gate lines (the workload never ran).
+OUT=$("$GK" sandbox --tier T2 --trust T-untrust --caps C-net --profile C-net \
+        --id s2r --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE" 2>/dev/null)
+rrc=$?
+G2N=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE')
+if [ "$rrc" = 12 ] && [ "$G2N" = 0 ]; then
+  emit "PASS S2-refused ->T2 failed closed (rc=12, 0 workload gates)"
+else
+  emit "FAIL S2-refused (rc=${rrc} workload-gates=${G2N})"; s2fail=1
+fi
+
+[ "$s2fail" = 0 ] && emit "PASS S2 decision-plane VM gate" || emit "FAIL S2 decision-plane VM gate"
 verdict_done=1
