@@ -38,11 +38,14 @@ Freeze invariants before implementation. `architecture.md`, `base-selection.md`,
 dials), `swamp.md`, `agents.md`.
 **Milestone:** Shrek Architecture v0.1 frozen.
 
-### Phase 1 — Hardened bootc base
-Produce a Shrek bootc image from the Fedora Atomic base: hardened config, SELinux enforcing,
-UKI, sealed composefs + fs-verity, signed with our keys, empty Shrek control-plane
-scaffold. Ride Fedora's signed shim/kernel.
-**Milestone:** Shrek boots *sealed* on bare metal + VM; a broken update rolls back.
+### Phase 1 — Hardened Debian bootc base (+ base acceptance test)
+Produce a Shrek image from **Debian Stable via mkosi**: hardened config, AppArmor enforcing,
+UKI (systemd-stub, Shrek key), **dm-verity** sealed root, MOK-enrolled Secure Boot, empty
+Shrek control-plane scaffold, delivered via **bootc**.
+**Acceptance test (breaks the base tie):** clean → stay on Debian+bootc; janky → fall back
+to `mkosi` + `systemd-sysupdate`; blocked → build a Fedora oracle and port back (cheap via
+mkosi). Study a stock Fedora bootc image in a VM first as the reference.
+**Milestone:** Shrek boots *sealed* on bare metal + VM under MOK; a broken update rolls back.
 
 ### Phase 2 — The Onion (sysext layers)
 Build `graphics`, `desktop`, `dev`, `gaming`, `ai` as signed, Verity-authenticated sysext
@@ -95,8 +98,8 @@ already enforced in Phases 6/8), secret awareness, human-only-domain isolation.
 ### Phase 10 — Desktop productization
 Only after the base is stable: Wayland desktop, settings UI, graphical layer manager, agent
 permission UI, semantic search UI, recovery UI, installer, hardware detection, Shrek
-identity. Borrow ergonomics from Universal Blue. Evaluate CentOS Stream image mode for the
-stable channel here.
+identity. Borrow ergonomics from Universal Blue / Vanilla OS (reference only). Decide the
+stable channel here (Debian Stable vs Trixie for hardware freshness).
 **Milestone:** a non-developer can install and use Shrek.
 
 ---
@@ -104,7 +107,7 @@ stable channel here.
 ## Benchmark profiles (measured from Phase 1 on)
 
 ```
-A — Fedora bootc baseline (no Shrek control plane)
+A — Debian bootc baseline (no Shrek control plane)
 B — Shrek core enabled, swampd metadata only
 C — full Shrek intelligence, semantic workers enabled
 ```

@@ -26,10 +26,10 @@ refinements (swampd confinement, DLP-as-tripwire).
 │ The Onion         signed sysext layers        │
 │   desktop · graphics · dev · gaming · ai      │
 ├─────────────────────────────────────────────┤
-│ Immutable base    bootc OCI image             │
-│   sealed composefs + fs-verity (was: EROFS+dm-verity)│
+│ Immutable base    Debian → mkosi → bootc OCI  │
+│   dm-verity sealed (composefs upgrade path)   │
 ├─────────────────────────────────────────────┤
-│ Boot trust        Secure Boot · UKI · TPM     │
+│ Boot trust        Secure Boot(MOK) · UKI · TPM│
 ├─────────────────────────────────────────────┤
 │ Linux kernel      LSM · Landlock · seccomp · BPF│
 └─────────────────────────────────────────────┘
@@ -39,24 +39,31 @@ Everything from "immutable base" down is **borrowed and upstream-maintained**. E
 in the "Shrek control plane" and "AI/agent" bands is **ours to build**. That boundary is
 the whole point of the two-track decision.
 
-## 2. The base — bootc, not LFS
+## 2. The base — Debian + bootc, not LFS
 
-Decision recorded in [`base-selection.md`](base-selection.md). Summary:
+Decision recorded in [`base-selection.md`](base-selection.md) (ADR-001, committed). Summary:
 
-- **Transport & updates:** the entire bootable host ships as an **OCI image**; updates are
-  transactional with rollback. `systemd` is still PID 1 — there is no container wrapping
-  the OS.
-- **Integrity:** **sealed composefs** (whole-tree fs-verity: contents *and* metadata,
-  digest-authenticated) replaces the original "EROFS + dm-verity" plan. It's strictly
-  stronger — verifies structure/permissions/xattrs, no fixed-partition requirement — and
-  it's landing upstream on the Fedora Atomic base now.
-- **Boot chain:** `UKI → systemd-boot → sealed composefs root → verified sysext layers`.
-  We *ride* Fedora's signed shim and signed kernel rather than re-solving Secure Boot
-  signing. **Custom-compiling the kernel is a late, expensive, opt-in decision** — the one
-  place the "free substrate" has a real price, because forking the kernel risks stepping
-  off the pre-signed boot chain.
-- **MAC:** SELinux, native to the base. (A deciding factor against openSUSE/AppArmor and
-  NixOS for the *product* track.)
+- **Provenance:** **Debian Stable** supplies the packages (glibc, systemd, kernel, mesa,
+  security team, dependency graph). Debian is the *package source*, **not** the runtime
+  package manager — the live base is immutable; `apt` lives only inside dev containers.
+- **Builder:** **`mkosi`** assembles the image. (Speaks both Debian and Fedora, so a base
+  swap is a `distro=` + package-list delta, not a rewrite — keeps Fedora a cheap escape
+  hatch.)
+- **Transport & updates:** ships as a **bootc OCI image**; transactional A/B with rollback.
+  `systemd` is still PID 1 — no container wraps the OS. bootc is distro-independent
+  (`ubuntu-bootc` proves the Debian-family path). *Fallback if bootc-on-Debian is janky:*
+  `mkosi` + `systemd-sysupdate` raw A/B.
+- **Integrity:** **dm-verity** sealed root (via `systemd-repart`) — proven, turnkey on
+  Debian today. **composefs** (whole-tree, content-addressed) is a later upgrade, not a
+  blocker; it's upstream, so Debian can adopt it.
+- **Boot chain:** `UKI (systemd-stub, Shrek key) → sealed root → verified sysext layers`,
+  with **MOK enrollment** for Secure Boot now (shim-review only if Shrek is publicly
+  distributed later — see base-selection.md). **Custom-compiling the kernel is a late,
+  expensive, opt-in decision** — forking it risks stepping off the signed chain.
+- **MAC / agent wall:** **Landlock-first** (kernel-native, distro-agnostic — the *real*
+  wall, enforced per-process by `agentd`/`gatekeeperd`) + **AppArmor** as the system MAC.
+  AppArmor's path model fits the deterministic wall (`deny ~/Vault/**`) more naturally than
+  SELinux labels.
 
 LFS lives on only in `reference-lfs/` as a frozen teaching build.
 

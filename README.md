@@ -37,12 +37,13 @@ demoted from *foundation* to *laboratory*.
 |                   | **Shrek Research Base**        | **Shrek OS (product)**                 |
 | ----------------- | ------------------------------ | -------------------------------------- |
 | Purpose           | understand the whole stack     | an actually usable, distributable OS   |
-| Foundation        | LFS (frozen reference build)   | **bootc** immutable base (Fedora-derived) |
-| Updates           | experimental                   | transactional bootc / OCI              |
+| Foundation        | LFS (frozen reference build)   | **Debian Stable** provenance, imaged via **mkosi** + **bootc** |
+| Updates           | experimental                   | transactional bootc / OCI (sysupdate fallback) |
 | Layers            | sysext experiments             | signed sysext ("the Onion")            |
-| Integrity         | hand-rolled dm-verity          | sealed **composefs** + fs-verity       |
+| Integrity         | hand-rolled dm-verity          | **dm-verity** sealed (composefs upgrade path) |
+| MAC / agent wall  | —                              | **Landlock**-first + AppArmor          |
 | Audience          | us                             | real machines / users                  |
-| Maintenance       | frozen; port *lessons*, not code | sustainable (upstream owns the substrate) |
+| Maintenance       | frozen; port *lessons*, not code | sustainable (Debian owns the substrate) |
 
 The LFS build is a **frozen artifact**: built once, understood, documented, pinned. It is
 NOT a living parallel distro and NOT in production CI. If it teaches us something, we port
@@ -50,7 +51,7 @@ the lesson to the product image — never the code. This preserves the reason we
 (bottom-up understanding of what Shrek stands on) without making Sebastian the personal
 security-advisory-response-team and package repository for a full distribution forever.
 
-See [`docs/base-selection.md`](docs/base-selection.md) for why bootc/Fedora wins.
+See [`docs/base-selection.md`](docs/base-selection.md) (ADR-001) for why Debian + bootc wins.
 
 ## Repository layout
 
