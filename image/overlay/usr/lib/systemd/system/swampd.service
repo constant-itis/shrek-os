@@ -1,0 +1,14 @@
+# swampd — filesystem-intelligence daemon (Phase 6+). PHASE-1: DISABLED SCAFFOLD.
+# No [Install] section — cannot be enabled. Indexes nothing; opens no sockets; holds no privilege.
+# When implemented, swampd runs Landlocked DEFAULT-DENY to an explicit allow-set (security-model.md §5).
+[Unit]
+Description=Shrek swampd (Phase-1 disabled scaffold)
+Documentation=file:///usr/share/doc/shrek/security-model.md
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/shrek/swampd
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+Restart=no

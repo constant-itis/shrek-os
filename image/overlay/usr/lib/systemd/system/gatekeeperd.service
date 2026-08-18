@@ -1,0 +1,16 @@
+# gatekeeperd — privileged broker (Phase 4/5). PHASE-1: DISABLED SCAFFOLD.
+# Deliberately has NO [Install] section, so it cannot be enabled by preset or `systemctl enable`.
+# A Phase-1 image therefore boots a bare hardened Debian with this inert. When gatekeeperd gains
+# behavior, this unit tightens to run it privileged-but-confined; today it does nothing.
+[Unit]
+Description=Shrek gatekeeperd (Phase-1 disabled scaffold)
+Documentation=file:///usr/share/doc/shrek/security-model.md
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/shrek/gatekeeperd
+# Phase-1 confinement placeholder — real hardening lands with real behavior.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+Restart=no

@@ -1,0 +1,25 @@
+# Shrek OS control plane — cargo workspace.
+# Phase-1 scaffold: five DISABLED stub binaries. They compile and install; their systemd units
+# ship disabled. The security posture is authored in docs/ BEFORE these gain any behavior
+# (roadmap priority: correctness -> security -> ... -> AI features). See docs/phase1-spike.md.
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/swampd",      # filesystem-intelligence daemon        (Phase 6+)
+    "crates/agentd",      # agent identity + tier/caps resolver    (Phase 8)
+    "crates/gatekeeperd", # privileged broker; only sandbox builder (Phase 4/5)
+    "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
+    "crates/shrekctl",    # operator CLI
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+
+# Small, sealed release binaries for the image. No dependencies by design (minimal-deps).
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

@@ -1,0 +1,13 @@
+# agentd — unprivileged isolation resolver (Phase 8). PHASE-1: DISABLED SCAFFOLD.
+# No [Install] section — cannot be enabled. Resolves nothing, holds no privilege.
+[Unit]
+Description=Shrek agentd (Phase-1 disabled scaffold)
+Documentation=file:///usr/share/doc/shrek/isolation.md
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/shrek/agentd
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+Restart=no

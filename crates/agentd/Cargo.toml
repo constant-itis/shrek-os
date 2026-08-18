@@ -1,0 +1,4 @@
+[package]
+name = "agentd"
+version.workspace = true
+edition.workspace = true

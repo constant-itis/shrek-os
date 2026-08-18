@@ -1,0 +1,4 @@
+[package]
+name = "oniond"
+version.workspace = true
+edition.workspace = true

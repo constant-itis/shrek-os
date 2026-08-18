@@ -1,0 +1,9 @@
+# Rust build output
+/target
+# Spike artifacts — image builds and throwaway signing keys never get committed
+/build/
+/out/
+/keys/
+*.raw
+*.efi
+*.img
