@@ -33,9 +33,10 @@ flags, dependency versions, output hashes.
 
 ### Phase 0 — Architecture spec ✅ (this repo)
 Freeze invariants before implementation. `architecture.md`, `base-selection.md`,
-`roadmap.md`, `isolation.md` (four tiers, the trust×caps dials, the selection matrix) done.
-Still to write: `threat-model.md`, `security-model.md`, `filesystem-intelligence.md`,
-`update-model.md`, `swamp.md`, `agents.md`.
+`roadmap.md`, `isolation.md` (four tiers, the trust×caps dials, the selection matrix),
+`threat-model.md` (assets, adversary catalog, trust boundaries, attack narratives) done.
+Still to write: `security-model.md`, `filesystem-intelligence.md`, `update-model.md`,
+`swamp.md`, `agents.md`.
 **Milestone:** Shrek Architecture v0.1 frozen.
 
 ### Phase 1 — Hardened Debian bootc base (+ base acceptance test)
