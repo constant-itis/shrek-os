@@ -92,7 +92,7 @@ domain project:shrek-os
   members:  ~/Projects/shrek-os
             ~/Documents/Shrek notes
             /mnt/nas/shrek-assets
-  policy:   agents = discover + read + search        (default for the domain)
+  policy:   agents ≤ discover + read + search        (domain CEILING — narrows, never grants)
 ```
 
 This is the property that makes the intelligence layer worth more than `locate`: *"everything
@@ -100,28 +100,54 @@ related to Shrek OS isolation"* resolves across all three trees, the repo, prior
 the relationship graph — not just filename matches under one path.
 
 **Domains are an overlay on the physical map, never a replacement for it.** Every object still
-has exactly one physical home; a domain is a *view* that groups homes. This matters for the
-wall:
+has exactly one physical home where its policy stays attached; a domain is a *view* that groups
+homes, not a security principal. This is the whole reason it can never launder authority:
+
+> **A logical domain combines knowledge, never authority.**
+
+The extent and the authority are resolved *separately*. The extent is a union; the authority is
+a per-object intersection at that object's physical home:
 
 ```
 AUTHORITY COMPOSITION (load-bearing — a domain must never launder authority)
 
-  A domain's effective read-scope, and any agent capability scoped to the domain,
-  is the UNION of its member subtrees — but resolved against each member's OWN policy,
-  and on any conflict MOST-RESTRICTIVE WINS.
+  RESULT SET of the domain     = UNION of its member subtrees
+                                 (the extent — which objects the domain "contains")
 
-  A permissive member can NEVER lift a stricter member's denial. If /mnt/nas/shrek-assets
-  is agent-readable but ~/Documents/Shrek notes contains a subtree marked agents=DENY,
-  membership in project:shrek-os does not grant the agent that subtree. The deny survives
-  the union.
+  AUTHORITY over each OBJECT    = INTERSECTION(
+                                     caller capability,
+                                     object's inherited physical-tree policy (§4),
+                                     the domain's own policy (a CEILING, never a grant),
+                                     any object-specific restriction )
+                                 resolved PER OBJECT at its physical home — NEVER
+                                 synthesized into one domain-wide permission.
+
+  Every term of the intersection can only NARROW. A caller with NONE on an object sees it as
+  INVISIBLE (discover:false) — absent from that caller's PROJECTION of the result set, not
+  merely unreadable.
 ```
 
-Restated: a domain composes *reach* (you can search across trees at once) but composes
-*authority downward-only* — exactly the rule §6 already fixes for the deny-list. Grouping trees
-is a convenience for the human and the search planner; it is never a mechanism for widening what
-the kernel allow-set permits. `swampd`'s own confinement (`swamp.md` §5) enforces this from
-below: it can only index the trees on its allow-set, so a domain that *names* a forbidden tree
-simply has no map of it to expose.
+Worked example — one domain over three trees, each keeping its own policy:
+
+```
+project:shrek-os
+  ~/Projects/shrek-os/**     Donkey = RW        (physical-tree policy, unchanged by membership)
+  ~/Documents/Shrek notes/** Donkey = R
+  /mnt/private/shrek/**      Donkey = NONE
+
+A Donkey query over the domain resolves PER OBJECT:
+  source              RW
+  docs                R
+  private research    invisible                 ← intersection with NONE ⇒ absent from projection
+
+The domain groups all three for the human's convenience and for one-shot search reach. It never
+mints a fourth, synthesized "project:shrek-os" permission that unions or averages the three.
+```
+
+`swampd`'s own confinement (`swamp.md` §5) enforces the same thing from below: it can only index
+the trees on its allow-set, so a domain that *names* a forbidden tree simply has no map of it to
+project. The extent is a union of *knowledge*; the authority is an intersection resolved at the
+physical home — exactly the downward-only rule §6 fixes for the deny-list.
 
 ## 4. Inherited policy — narrow, never widen
 
@@ -195,13 +221,13 @@ The maps of §2 are not a monolith. They are a stack of tiers a person opts into
 light box runs the mandatory core and stops; a power user enables the whole stack. Each tier is
 independently installable and each degrades gracefully to the tier below it.
 
-| Tier | Provides | Cost | Status |
-|------|----------|------|--------|
-| **Metadata core** | physical map, structural map, path/metadata search | cheap, always on | **mandatory** |
-| **FTS** | full-text search over extracted text | moderate | opt-in |
-| **Semantic** | embeddings, vector similarity | heavy (model + storage) | opt-in |
-| **Relationships** | the semantic-map graph between objects | moderate over semantic | opt-in |
-| **Living graph** | co-access strengthening, decay, reinforcement | — | **deferred** (§8) |
+| Profile | Adds | Provides | Cost | Status |
+|---------|------|----------|------|--------|
+| **SWAMP CORE** | metadata | physical+structural map, paths, types, hashes, permissions, domains | cheap, always on | **mandatory** |
+| **SWAMP SEARCH** | + FTS | full-text search over extracted text | moderate | opt-in |
+| **SWAMP SEMANTIC** | + embeddings | vector similarity | heavy (model + storage) | opt-in |
+| **SWAMP RELATE** | + relationship graph | the semantic-map graph between objects | moderate over semantic | opt-in |
+| **SWAMP LIVING** | + reinforcement | co-access learning, decay, richer graph behavior | — | **deferred** (§8) |
 
 Design consequences:
 

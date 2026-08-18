@@ -146,10 +146,14 @@ Consequences that fall out of default-deny, not out of configuration diligence:
   `swampd` the moment it exists, with no config change — it is simply not on the allow-set, and
   default-deny covers the gap. A deny-*list* would have to be updated and would leak until it
   was ([`architecture.md`](architecture.md) §5).
-- **The allow-set is the union of enabled domains only.** A domain that *names* a tree
-  `swampd` may not read (per the most-restrictive-wins composition of
-  [`filesystem-intelligence.md`](filesystem-intelligence.md) §3) contributes nothing to the
-  allow-set — there is no map of that tree to leak.
+- **`swampd`'s own read-scope is the union of enabled trees; per-caller authority is not.**
+  The allow-set is the union of the enabled domains' member trees minus the never-indexable
+  exclusions — this is `swampd`'s authority *as a subject*, the extent it may index. It is not
+  a grant to any *caller*: a caller's authority over a mapped object is the per-object
+  intersection resolved at query time (§9,
+  [`filesystem-intelligence.md`](filesystem-intelligence.md) §3 — "a domain combines knowledge,
+  never authority"). A domain that *names* a tree `swampd` may not read contributes nothing to
+  the allow-set — there is no map of that tree to project.
 - **Static core, counter-anchored additions.** The never-indexable human-only exclusions and
   the allow-set template are sealed static policy baked into the image under dm-verity.
   Per-machine additions go through the counter-anchored grant path, not a writable config file
@@ -217,13 +221,13 @@ The enrichment stack is the tiered, opt-in structure of
 installable units. A base install carries the metadata core and nothing else; richer tiers are
 separate packages/layers a person adds by need — and can enable per domain.
 
-| Tier | Unit | Adds | Default |
-|------|------|------|---------|
-| Metadata core | `swampd` | physical+structural map, path/metadata search | installed |
-| FTS | extractor + FTS5 | full-text search | opt-in |
-| Semantic | embedder + vector store | embeddings, similarity | opt-in |
-| Relationships | relater | semantic-map graph | opt-in |
-| Living graph | (mycelium engine, adapted) | co-access, decay, reinforcement | **deferred** |
+| Profile | Unit | Adds | Default |
+|---------|------|------|---------|
+| SWAMP CORE | `swampd` | physical+structural map, path/metadata search | installed |
+| SWAMP SEARCH | extractor + FTS5 | full-text search | opt-in |
+| SWAMP SEMANTIC | embedder + vector store | embeddings, similarity | opt-in |
+| SWAMP RELATE | relater | semantic-map graph | opt-in |
+| SWAMP LIVING | (mycelium engine, adapted) | co-access, decay, reinforcement | **deferred** |
 
 - **Per-domain enablement.** A person can run the semantic tier over `~/Projects` and metadata-
   only over `~/Media`. The tier config is per-domain, so "better in the areas that need it" is a
@@ -255,7 +259,12 @@ request:  { caller, intent: discover|search|read, query, domain_hint? }
    escalation ladder (filesystem-intelligence.md §5), SCOPED to those domains from the start
              │
              ▼
-   results drawn only from within authorized scope
+   PER-OBJECT authority = intersection( caller cap, object's physical-tree policy,
+                                        domain ceiling, object restriction )  (fs-intel §3)
+             │
+             ▼
+   caller's PROJECTION of the result set — objects the caller lacks discover on are ABSENT,
+   not returned-and-filtered
 ```
 
 - **Authorize before retrieve.** The authorized domain set is an *input* to the planner, not a
