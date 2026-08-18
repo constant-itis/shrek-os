@@ -1,4 +1,4 @@
 [package]
-name = "shrek-tier"
+name = "shrek-policy"
 version.workspace = true
 edition.workspace = true

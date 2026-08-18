@@ -1,7 +1,7 @@
 #!/bin/sh
-# Phase-5 slice-1 M4 + slice-2 decision-plane VM GATE. SPIKE ONLY: remove this file,
-# shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped image
-# (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md).
+# Phase-5 slice-1 M4 + slice-2 decision-plane + slice-3 egress-plane VM GATE. SPIKE ONLY: remove this
+# file, shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped
+# image (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md).
 #
 # Runs on the sealed, enforcing-Secure-Boot image. Drives `gatekeeperd sandbox` to construct a
 # capability-enforced T1 sandbox from a grant, and asserts the four mount-plane properties from
@@ -87,4 +87,48 @@ else
 fi
 
 [ "$s2fail" = 0 ] && emit "PASS S2 decision-plane VM gate" || emit "FAIL S2 decision-plane VM gate"
+
+# ---- Phase-5 slice-3: the egress plane on the SEALED image (checkpoint #2567) ----
+# The headless VM has NO NIC and a read-only /etc, so it cannot hermetically REACH a dst or map DNS;
+# positive reach/deny/teardown are proven in the container oracle (scripts/egress-construct-proof.sh)
+# against the IDENTICAL release binary. Here we assert the sealed-image properties that ARE provable
+# without a network: (a) --private-network is applied (no-net cell = loopback-only, the closed
+# host-net hole); (b) the fail-closed refusals hold on the sealed re-check; (c) a C-net request
+# cannot SILENTLY egress when the broker cannot resolve (no NIC ⇒ construction fails closed).
+s3fail=0
+emit "S3-BEGIN Phase-5 slice-3 egress plane"
+
+# (a) no-net cell: a cleared C-ro-nosec sandbox owns a FRESH netns with ONLY loopback (the historical
+# host-netns hole — construct() used to pass no network flag — is shut on the sealed image).
+NETPROBE='ifs=$(ls /sys/class/net 2>/dev/null | tr "\n" ,); [ "$ifs" = "lo," ] && echo "SHREK_GATE: PASS gate=s3-nonet-loopback-only" || echo "SHREK_GATE: FAIL gate=s3-nonet ifs=$ifs"'
+OUT=$("$GK" sandbox --tier T1 --trust T-first --caps C-ro-nosec --profile C-ro-nosec \
+        --id s3n --anchor "$SRV" --grant project -- /bin/sh -c "$NETPROBE")
+printf '%s\n' "$OUT"
+if printf '%s\n' "$OUT" | grep -q '^SHREK_GATE: PASS gate=s3-nonet-loopback-only'; then
+  emit "PASS S3-nonet C-ro-nosec is loopback-only (host-net hole closed on sealed image)"
+else
+  emit "FAIL S3-nonet (no loopback-only gate)"; s3fail=1
+fi
+
+# (b) unknown egress profile ⇒ REFUSED (rc 13) at the sealed re-check; the workload NEVER runs.
+"$GK" sandbox --tier T1 --trust T-first --caps C-net --egress-profile bogus-exfil --profile C-net \
+      --id s3u --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+urc=$?
+[ "$urc" = 13 ] && emit "PASS S3-unknown-profile refused (rc=13)" || { emit "FAIL S3-unknown-profile (rc=$urc)"; s3fail=1; }
+
+# (b) C-broad ⇒ REFUSED (rc 13): no plane for unrestricted egress, no silent downgrade to loopback.
+"$GK" sandbox --tier T1 --trust T-first --caps C-broad --profile C-broad \
+      --id s3b --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+brc=$?
+[ "$brc" = 13 ] && emit "PASS S3-cbroad refused (rc=13)" || { emit "FAIL S3-cbroad (rc=$brc)"; s3fail=1; }
+
+# (c) C-net + a real sealed profile: with no NIC the broker cannot resolve the profile hosts, so
+# construction FAILS CLOSED (nonzero) and hands back NO sandbox/egress — never a silent open network.
+# (The positive "resolves ⇒ injects ⇒ reaches allowed / drops denied" path is an oracle gate.)
+timeout 30 "$GK" sandbox --tier T1 --trust T-first --caps C-net --egress-profile github-https \
+      --profile C-net --id s3c --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+crc=$?
+[ "$crc" != 0 ] && emit "PASS S3-cnet-failclosed C-net did not egress w/o resolver (rc=$crc)" || { emit "FAIL S3-cnet-failclosed (constructed unexpectedly rc=0)"; s3fail=1; }
+
+[ "$s3fail" = 0 ] && emit "PASS S3 egress-plane VM gate" || emit "FAIL S3 egress-plane VM gate"
 verdict_done=1

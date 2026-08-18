@@ -1,14 +1,19 @@
 //! agentd — agent identity + isolation resolver (Phase 8; decision plane in Phase-5 slice-2).
 //!
 //! agentd is the UNPRIVILEGED resolver: it maps `(trust, caps) → tier` via the matrix + floor
-//! (`shrek-tier`) and emits a construction request for gatekeeperd to RE-CHECK and build
+//! (`shrek-policy`) and emits a construction request for gatekeeperd to RE-CHECK and build
 //! (isolation.md §5, §7). It resolves; it never constructs a sandbox and never holds privilege.
 //!
-//! Phase-5 slice-2 scope — the `resolve` subcommand only:
+//! Phase-5 slice-2/3 scope — the `resolve` subcommand only:
 //!   step 1: validate `caps ⊆ granted-profile`            (the grant ceiling; refuse if exceeded)
 //!   step 2: `tier = max(matrix[trust][caps], floor(trust), escalation)`
 //!   output: the gatekeeperd construction-request argv on stdout (the CLI seam; the socket verb +
 //!           crypto seal are slice #5). A refusal emits NOTHING to stdout and a decision to stderr.
+//!
+//! Slice-3 adds `--egress-profile NAME` passthrough: for a C-net workload agentd forwards the profile
+//! NAME only — it never resolves the `host:proto:port` set. gatekeeperd resolves that from its own
+//! sealed `shrek-policy::egress` table (adjustment B), so a compromised agentd can name a profile but
+//! cannot manufacture a destination. An unknown/absent name is gatekeeperd's to refuse, not agentd's.
 //!
 //! Trust band must be integrity-sourced; unknown ⇒ `T-hostile` (fail-high) — realized by
 //! `TrustBand::parse` (security-model.md §6/B1). HOW the band is derived/attested is OPEN (B1, owed
@@ -17,7 +22,7 @@
 //!
 //! With no subcommand the daemon is the disabled Phase-1 scaffold (holds no privilege).
 
-use shrek_tier::{effective_tier, CapsProfile, Tier, TrustBand};
+use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -31,8 +36,8 @@ fn main() {
     }
 }
 
-/// `agentd resolve --trust T --caps C [--profile C] [--escalate Tn] --id X --anchor DIR
-/// --grant NAME [--grant NAME]... [--guest-prefix DIR] -- WORKLOAD...`
+/// `agentd resolve --trust T --caps C [--profile C] [--escalate Tn] [--egress-profile NAME] --id X
+/// --anchor DIR --grant NAME [--grant NAME]... [--guest-prefix DIR] -- WORKLOAD...`
 ///
 /// On success prints the `gatekeeperd sandbox` argv to stdout and exits 0. On a grant-check refusal
 /// prints an `AGENTD-DECISION refused …` line to stderr, nothing to stdout, and exits nonzero.
@@ -41,6 +46,7 @@ fn resolve_cli(args: &[String]) -> i32 {
     let mut caps_s = String::new();
     let mut profile_s: Option<String> = None;
     let mut escalate_s: Option<String> = None;
+    let mut egress_s: Option<String> = None;
     let mut id = String::from("s0");
     let mut anchor = String::new();
     let mut guest_prefix = String::from("/srv");
@@ -54,6 +60,7 @@ fn resolve_cli(args: &[String]) -> i32 {
             "--caps" => { i += 1; caps_s = args.get(i).cloned().unwrap_or_default(); }
             "--profile" => { i += 1; profile_s = args.get(i).cloned(); }
             "--escalate" => { i += 1; escalate_s = args.get(i).cloned(); }
+            "--egress-profile" => { i += 1; egress_s = args.get(i).cloned(); }
             "--id" => { i += 1; id = args.get(i).cloned().unwrap_or(id); }
             "--anchor" => { i += 1; if let Some(v) = args.get(i) { anchor = v.clone(); } }
             "--guest-prefix" => { i += 1; if let Some(v) = args.get(i) { guest_prefix = v.clone(); } }
@@ -67,7 +74,7 @@ fn resolve_cli(args: &[String]) -> i32 {
     if trust_s.is_empty() || caps_s.is_empty() || anchor.is_empty() || grants.is_empty() || workload.is_empty() {
         eprintln!(
             "usage: agentd resolve --trust T --caps C [--profile C] [--escalate Tn] \
-             --anchor DIR --grant NAME [...] [--guest-prefix DIR] -- WORKLOAD..."
+             [--egress-profile NAME] --anchor DIR --grant NAME [...] [--guest-prefix DIR] -- WORKLOAD..."
         );
         return 2;
     }
@@ -98,9 +105,10 @@ fn resolve_cli(args: &[String]) -> i32 {
     // Step 2: deterministic tier. No LLM, no vibes (isolation.md §5).
     let tier = effective_tier(trust, caps, escalation);
     eprintln!(
-        "AGENTD-DECISION resolved tier={} trust={} caps={} profile={} escalation={}",
+        "AGENTD-DECISION resolved tier={} trust={} caps={} profile={} escalation={} egress={}",
         tier.label(), trust.label(), caps.label(), profile.label(),
-        escalation.map(|t| t.label()).unwrap_or("-")
+        escalation.map(|t| t.label()).unwrap_or("-"),
+        egress_s.as_deref().unwrap_or("-")
     );
 
     // Output: the construction-request argv for gatekeeperd. gatekeeperd RE-CHECKS all of this
@@ -114,6 +122,11 @@ fn resolve_cli(args: &[String]) -> i32 {
         "--anchor".into(), anchor,
         "--guest-prefix".into(), guest_prefix,
     ];
+    // Passthrough only — gatekeeperd resolves the NAME against its sealed table and re-checks.
+    if let Some(name) = &egress_s {
+        out.push("--egress-profile".into());
+        out.push(name.clone());
+    }
     for g in &grants {
         out.push("--grant".into());
         out.push(g.clone());

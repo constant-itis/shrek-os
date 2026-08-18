@@ -1,8 +1,8 @@
-//! shrek-tier — the deterministic `(trust × caps) → tier` decision plane. Phase-5 slice-2.
+//! tier — the deterministic `(trust × caps) → tier` decision plane. Phase-5 slice-2.
 //!
 //! This is the whole of isolation.md §4–§5.2 as code: the two discretized axes, the selection
-//! matrix, the `floor(trust)` rule, and `effective_tier = max(matrix, floor, escalation)`. It is
-//! PURE, TOTAL, and DEPENDENCY-FREE (no I/O, no allocation, no `std` state).
+//! matrix, the `floor(trust)` rule, and `effective_tier = max(matrix, floor, escalation)`. Like the
+//! rest of `shrek-policy` it is PURE, TOTAL, and DEPENDENCY-FREE (no I/O, no allocation, no state).
 //!
 //! Both `agentd` (the unprivileged resolver) and `gatekeeperd` (the privileged re-checker) compile
 //! this in. The matrix and floor are therefore baked into every binary — sealed by dm-verity when
@@ -15,12 +15,6 @@
 //! and an unrecognized caps label to `Broad`, so a spoofed/garbled label can only ever RAISE the
 //! wall, never lower it. An unrecognized *tier* does not fail-high — it is `None`, and the caller
 //! (gatekeeperd) fails the request closed.
-//!
-//! What is NOT here (later slices, by design): how the trust band is derived/attested (OPEN B1,
-//! owed to agents.md); the T0/T2/T3 constructors; the egress plane; the crypto seal + socket
-//! transport. This crate only DECIDES; it never constructs.
-
-#![forbid(unsafe_code)]
 
 /// Provenance of the *code being executed* (never the data — that is caps). Four bands of
 /// increasing risk. Declaration order is the risk order (`First` < … < `Hostile`).

@@ -6,22 +6,38 @@
 //! trusted anchor), builds a sandbox in which `caps ⊆ profile` holds *at construction* — a
 //! granted-out path is ABSENT from the sandbox, not merely unreadable. Slice-2 adds the `(trust×caps)
 //! →tier` re-check (`recheck`): the request's tier is independently recomputed from the compiled-in
-//! sealed matrix and REFUSED if below floor, and any tier ≥ T2 or egress-needing caps fails closed
-//! (no T2/T3 constructor or egress plane exists yet). Only T1 is constructed; the egress plane is a
-//! later slice.
+//! sealed matrix and REFUSED if below floor, and any tier ≥ T2 fails closed (no T2/T3 constructor).
+//! Slice-3 adds the egress plane: EVERY sandbox gets `--private-network` (a fresh loopback-only
+//! netns — the no-net default that also closed the old host-netns hole), and a ≤T1 C-net cell that
+//! names a SEALED egress profile gets a gatekeeperd-injected veth + nft allow-list (see net_plane).
+//! C-broad and any tier ≥ T2 still fail closed.
 //!
 //! Construction (all inside a private mount namespace so nothing touches the host mount table):
 //!   1. synthetic OS-shaped root — the base runtime (`/usr`) bound read-only, an EMPTY grant tree.
 //!   2. each grant: pin beneath the anchor (TOCTOU-safe), relocate read-only to a broker-owned path.
-//!   3. `systemd-nspawn --directory=<root> --private-users=pick --bind-ro=<pinned>:<guest>` runs the
-//!      workload. The empty grant tree hides ungranted siblings (ENOENT, not EACCES); --private-users
-//!      is mandatory or UID isolation silently fails.
+//!   3. `systemd-nspawn --directory=<root> --private-users=pick --private-network
+//!      --bind-ro=<pinned>:<guest>` runs the workload. The empty grant tree hides ungranted siblings
+//!      (ENOENT, not EACCES); --private-users is mandatory or UID isolation silently fails;
+//!      --private-network gives every sandbox its own loopback-only netns (egress is injected, never
+//!      shared from the host).
 
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
-use shrek_tier::{effective_tier, CapsProfile, Tier, TrustBand};
+use crate::net_plane;
+use shrek_policy::egress::EgressProfile;
+use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+/// Egress decision for a constructed sandbox. `None` = loopback-only (`--private-network`, no
+/// injection) — every no-net cell, and the slice-1 mount-plane path. `Profile` = a ≤T1 C-net cell
+/// whose SEALED egress profile gatekeeperd resolved; the net plane injects a veth + nft allow-list.
+#[derive(Clone, Copy)]
+pub enum Egress {
+    None,
+    Profile(&'static EgressProfile),
+}
 
 pub struct SandboxSpec {
     pub id: String,
@@ -29,6 +45,7 @@ pub struct SandboxSpec {
     pub grants: Vec<String>,
     pub guest_prefix: PathBuf,
     pub workload: Vec<String>,
+    pub egress: Egress,
 }
 
 /// Build the synthetic root: an OS-tree-shaped directory (nspawn requires `/usr/` to exist — M0)
@@ -97,35 +114,124 @@ pub fn construct(spec: &SandboxSpec) -> io::Result<i32> {
         // mount-ns); the plain userns view still maps ungranted host-root content to the overflow
         // uid, which is the isolation property we assert.
         .arg("--private-users=pick")
-        .arg("--private-users-ownership=off");
+        .arg("--private-users-ownership=off")
+        // Slice-3: EVERY sandbox OWNS a fresh netns (loopback-only). This is the no-net default —
+        // it closes the historical host-netns hole (construct() used to pass no network flag, so
+        // nspawn shared the host netns) — and it is the baseline the C-net egress plane injects
+        // into. It MUST be --private-network (nspawn owning the ns), not --network-namespace-path
+        // into a pre-made one: --private-users cannot join a host-owned netns (EPERM — #2563 / C2).
+        .arg("--private-network");
     for (src, guest) in &binds {
         cmd.arg(format!("--bind-ro={src}:{guest}"));
     }
-    cmd.arg("--");
-    for w in &spec.workload {
+
+    // Resolve egress destinations BEFORE spawning: an unresolvable/AAAA-only host must fail closed
+    // with NO sandbox at all. An empty profile is treated as no-net (reaches nothing either way).
+    let resolved = match spec.egress {
+        Egress::Profile(p) if !p.rules.is_empty() => Some(net_plane::resolve_profile_v4(p)?),
+        _ => None,
+    };
+
+    match resolved {
+        // No-net cell (and the slice-1 mount path): loopback-only, run straight through.
+        None => {
+            cmd.arg("--");
+            for w in &spec.workload {
+                cmd.arg(w);
+            }
+            eprintln!("gatekeeperd/sandbox: exec (no-net) {cmd:?}");
+            Ok(cmd.status()?.code().unwrap_or(-1))
+        }
+        Some(res) => {
+            // Pin the sealed hosts into the sandbox's /etc/hosts so the workload resolves the profile
+            // names WITHOUT any DNS egress (there is none — the nft allow-list is IP+port only).
+            std::fs::write(root.join("etc/hosts"), net_plane::etc_hosts(&res.hosts))?;
+            run_egress(cmd, &runtime, &spec.id, &spec.workload, &res.endpoints)
+        }
+    }
+}
+
+/// The ready-barrier the C-net workload is wrapped in: block until gatekeeperd has injected the veth
+/// + nft rules (`/rv/go`), abort fail-closed if injection failed (`/rv/abort`), or time out (~60s).
+/// `exec "$@"` then becomes the real workload. Requires `/bin/sh` in the sandbox (present via the
+/// bound `/usr`). This is what makes egress rules-before-usable: no workload byte leaves until the
+/// default-deny + allow-list is live.
+const EGRESS_BARRIER: &str =
+    "n=0; while [ ! -e /rv/go ]; do [ -e /rv/abort ] && exit 71; n=$((n+1)); [ \"$n\" -gt 1200 ] && exit 71; sleep 0.05; done; exec \"$@\"";
+
+/// C-net construction: spawn nspawn (which OWNS the netns), discover the container leader, inject the
+/// egress plane, release the barrier, then wait. ANY setup failure aborts the workload, tears the
+/// plane down, and returns the error — fail closed, no host-network fallback, no residual plumbing.
+fn run_egress(
+    mut cmd: Command,
+    runtime: &Path,
+    id: &str,
+    workload: &[String],
+    endpoints: &[net_plane::Endpoint],
+) -> io::Result<i32> {
+    // Rendezvous dir, bound into the sandbox at /rv; the barrier polls /rv/go and /rv/abort.
+    let rv = runtime.join("rv");
+    std::fs::create_dir_all(&rv)?;
+    cmd.arg(format!("--bind={}:/rv", rv.display()));
+    cmd.arg("--").arg("/bin/sh").arg("-c").arg(EGRESS_BARRIER).arg("shrek-egress-barrier");
+    for w in workload {
         cmd.arg(w);
     }
-    eprintln!("gatekeeperd/sandbox: exec {cmd:?}");
-    let status = cmd.status()?;
-    Ok(status.code().unwrap_or(-1))
+
+    let net = net_plane::SandboxNet::for_id(id);
+    let barrier = net_plane::Barrier { dir: rv };
+
+    eprintln!(
+        "gatekeeperd/sandbox: exec (egress ns={} cip={} dsts={}) {cmd:?}",
+        net.ns, net.cont_ip, endpoints.len()
+    );
+    let mut child = cmd.spawn()?;
+    let nspawn_pid = child.id();
+
+    let setup = (|| -> io::Result<()> {
+        let leader = net_plane::discover_leader(nspawn_pid, Duration::from_secs(8))?;
+        net.inject(leader, endpoints)?;
+        barrier.go() // rules-before-usable: release the workload ONLY after inject succeeds
+    })();
+
+    match setup {
+        Ok(()) => {
+            let code = child.wait()?.code().unwrap_or(-1);
+            net.teardown();
+            Ok(code)
+        }
+        Err(e) => {
+            barrier.abort();
+            net.teardown();
+            let _ = child.wait();
+            eprintln!("gatekeeperd/sandbox: FAIL egress setup: {e} — failed closed (no network)");
+            Err(e)
+        }
+    }
 }
 
 /// Outcome of the privileged re-check (isolation.md §7 steps 4–5) plus this slice's constructibility
 /// gate. `Construct` carries the effective tier we are cleared to build (T0 folds up to T1);
 /// `Refuse` carries a distinct exit code + an audit reason.
 enum Decision {
-    Construct { effective: Tier },
+    Construct { effective: Tier, egress: Egress },
     Refuse { code: i32, reason: String },
 }
 
 /// The independent re-check — gatekeeperd trusts NONE of agentd's numbers. It recomputes the tier
-/// bound from the COMPILED-IN `shrek-tier` matrix/floor (sealed by dm-verity in the shipped `/usr`,
+/// bound from the COMPILED-IN `shrek-policy` matrix/floor (sealed by dm-verity in the shipped `/usr`,
 /// NOT read from agentd or any writable state — isolation.md §7, security-model.md §4). This proves
 /// the arithmetic/floor independence: a bug or compromise in the unprivileged resolver cannot widen
 /// a sandbox. (Integrity-sourcing the trust band ITSELF is OPEN B1, a separate upstream slice; here
 /// `trust`/`caps` still ride in with the request, and the fail-high parse guarantees a garbled band
 /// only ever raises the wall.)
-fn recheck(requested: Tier, trust: TrustBand, caps: CapsProfile, profile: CapsProfile) -> Decision {
+fn recheck(
+    requested: Tier,
+    trust: TrustBand,
+    caps: CapsProfile,
+    profile: CapsProfile,
+    egress_name: Option<&str>,
+) -> Decision {
     // (a) Downgrade/floor. Refuse anything below max(matrix, floor); a requested tier ABOVE the
     // bound is a legal upward escalation and is honored. This is the downward-forbidden invariant.
     let bound = effective_tier(trust, caps, None); // = max(matrix[trust][caps], floor(trust))
@@ -140,21 +246,36 @@ fn recheck(requested: Tier, trust: TrustBand, caps: CapsProfile, profile: CapsPr
         return Decision::Refuse { code: 11, reason: "caps-exceed-profile".into() };
     }
     let effective = requested; // >= bound; honor any upward escalation agentd applied
-    // (c) Constructibility — the honest limit of THIS slice. Only the T1 constructor exists and
-    // there is no egress plane yet. Anything stronger, or anything needing egress, FAILS CLOSED —
-    // it is NEVER silently downgraded to T1 (security-model.md §7: no unconfined fallback, ever).
+    // (c) Constructibility. Only the T1 constructor exists; anything ≥ T2 FAILS CLOSED — never
+    // silently downgraded to T1 (security-model.md §7: no unconfined fallback, ever).
     if effective >= Tier::T2 {
         return Decision::Refuse {
             code: 12,
             reason: format!("no-constructor-{} (slice-3)", effective.label()),
         };
     }
-    if caps.needs_egress() {
-        return Decision::Refuse { code: 13, reason: "no-egress-plane (later slice)".into() };
+    // (d) Egress realization (slice-3). A ≤T1 C-net cell is now constructible IFF it names a SEALED
+    // egress profile that resolves — gatekeeperd resolves the destinations from compiled-in policy
+    // itself, NEVER trusting an agentd-supplied host. C-broad (unrestricted egress / secret domains)
+    // has no plane and still fails closed. Non-egress caps ignore any profile name → loopback-only.
+    match caps {
+        CapsProfile::Broad => Decision::Refuse {
+            code: 13,
+            reason: "no-plane-for-C-broad (unrestricted egress)".into(),
+        },
+        CapsProfile::Net => match egress_name {
+            None => Decision::Refuse { code: 13, reason: "C-net-requires-egress-profile".into() },
+            Some(name) => match shrek_policy::egress::resolve(name) {
+                Some(p) => Decision::Construct { effective, egress: Egress::Profile(p) },
+                None => Decision::Refuse { code: 13, reason: format!("unknown-egress-profile={name}") },
+            },
+        },
+        // effective ∈ {T0, T1}, caps ∈ {C-ro-nosec, C-proj-rw}: build at T1, loopback-only. A T0
+        // result at T1 is a legal upward escalation until the real T0 (Landlock) constructor lands.
+        CapsProfile::RoNosec | CapsProfile::ProjRw => {
+            Decision::Construct { effective, egress: Egress::None }
+        }
     }
-    // effective ∈ {T0, T1}, caps ∈ {C-ro-nosec, C-proj-rw}: build at T1. A T0 result at T1 is a
-    // legal upward escalation until the real T0 (Landlock) constructor lands.
-    Decision::Construct { effective }
 }
 
 /// CLI entrypoint: `gatekeeperd sandbox [--tier Tn --trust T --caps C [--profile C]] --id X
@@ -173,6 +294,7 @@ pub fn cli(args: &[String]) -> i32 {
     let mut trust_s: Option<String> = None;
     let mut caps_s: Option<String> = None;
     let mut profile_s: Option<String> = None;
+    let mut egress_s: Option<String> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -184,17 +306,20 @@ pub fn cli(args: &[String]) -> i32 {
             "--trust" => { i += 1; trust_s = args.get(i).cloned(); }
             "--caps" => { i += 1; caps_s = args.get(i).cloned(); }
             "--profile" => { i += 1; profile_s = args.get(i).cloned(); }
+            "--egress-profile" => { i += 1; egress_s = args.get(i).cloned(); }
             "--" => { workload = args[i + 1..].to_vec(); break; }
             other => { eprintln!("gatekeeperd/sandbox: unknown arg {other}"); return 2; }
         }
         i += 1;
     }
     if grants.is_empty() || workload.is_empty() {
-        eprintln!("usage: gatekeeperd sandbox [--tier Tn --trust T --caps C] --anchor DIR --grant NAME [...] -- WORKLOAD...");
+        eprintln!("usage: gatekeeperd sandbox [--tier Tn --trust T --caps C [--profile C] [--egress-profile NAME]] --anchor DIR --grant NAME [...] -- WORKLOAD...");
         return 2;
     }
 
-    // Decision-plane mode (slice-2): re-check the resolved request before touching the mount plane.
+    // Decision-plane mode (slice-2/3): re-check the resolved request before touching the mount plane.
+    // Slice-1 direct mode (no --tier) constructs loopback-only (Egress::None), unchanged.
+    let mut egress = Egress::None;
     if let Some(t) = tier_s {
         let Some(requested) = Tier::parse(&t) else {
             eprintln!("SANDBOX-DECISION refused reason=bad-request-tier={t:?}");
@@ -204,17 +329,20 @@ pub fn cli(args: &[String]) -> i32 {
         let trust = TrustBand::parse(trust_s.as_deref().unwrap_or(""));
         let caps = CapsProfile::parse(caps_s.as_deref().unwrap_or(""));
         let profile = profile_s.as_deref().map(CapsProfile::parse).unwrap_or(caps);
-        match recheck(requested, trust, caps, profile) {
+        let egress_name = egress_s.as_deref();
+        match recheck(requested, trust, caps, profile, egress_name) {
             Decision::Refuse { code, reason } => {
                 eprintln!(
-                    "SANDBOX-DECISION refused reason={reason} requested={} trust={} caps={} profile={}",
-                    requested.label(), trust.label(), caps.label(), profile.label()
+                    "SANDBOX-DECISION refused reason={reason} requested={} trust={} caps={} profile={} egress={}",
+                    requested.label(), trust.label(), caps.label(), profile.label(), egress_name.unwrap_or("-")
                 );
                 return code;
             }
-            Decision::Construct { effective } => {
+            Decision::Construct { effective, egress: e } => {
+                egress = e;
+                let egr = match e { Egress::Profile(p) => p.name, Egress::None => "none" };
                 eprintln!(
-                    "SANDBOX-DECISION cleared construct-at=T1 effective={} requested={} trust={} caps={} profile={}",
+                    "SANDBOX-DECISION cleared construct-at=T1 effective={} requested={} trust={} caps={} profile={} egress={egr}",
                     effective.label(), requested.label(), trust.label(), caps.label(), profile.label()
                 );
                 // fall through to construction
@@ -222,7 +350,7 @@ pub fn cli(args: &[String]) -> i32 {
         }
     }
 
-    let spec = SandboxSpec { id, anchor, grants, guest_prefix, workload };
+    let spec = SandboxSpec { id, anchor, grants, guest_prefix, workload, egress };
     match construct(&spec) {
         Ok(code) => code,
         Err(e) => {

@@ -23,10 +23,11 @@ constructibility gate; empirical proof on host, oracle, and the sealed VM.
 (OPEN B1, owed to agents.md); the T2 (gVisor) / T3 (libkrun) constructors; a real T0 (Landlock)
 constructor; the egress plane (nftables/tap); the crypto seal + socket transport (slice-5).
 
-## The decision — `crates/shrek-tier`
+## The decision — `crates/shrek-policy` (`tier` module)
 
 A pure, total, dependency-free crate compiled into BOTH daemons, so the matrix + floor are baked
-into every binary and sealed by dm-verity when shipped in `/usr`.
+into every binary and sealed by dm-verity when shipped in `/usr`. (Renamed from `shrek-tier` in
+slice-3 when the sealed egress-profile table joined it as a second `egress` policy module.)
 
 - **Axes** (isolation.md §4): `TrustBand ∈ {First, Pinned, Untrust, Hostile}`; `CapsProfile ∈
   {RoNosec, ProjRw, Net, Broad}` — declaration order is the danger order, so `caps ⊆ profile`
@@ -85,7 +86,8 @@ load-bearing negative (security-model.md §7: "no unconfined fallback, ever").
 ## Gates
 
 - **G1** (host unit): all 16 matrix cells + floor + escalation + ordering + fail-high parse —
-  `cargo test -p shrek-tier` (10 tests). Slice-1's 7 gatekeeperd tests unchanged.
+  `cargo test -p shrek-policy` (10 tier tests; the crate now also carries 7 slice-3 egress tests).
+  Slice-1's 7 gatekeeperd tests unchanged.
 - **Host decision repro** — `scripts/tier-plane-repro.sh`: the resolver + every refusal code + the
   cleared path, no privilege needed (refusals return before the mount namespace).
 - **Oracle construction proof** — `scripts/tier-plane-proof.sh` (privileged debian:trixie):
