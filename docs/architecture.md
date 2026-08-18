@@ -102,6 +102,10 @@ user-facing APPLICATION                    → FLATPAK
 
 ## 4. Graduated isolation — trust × capability are TWO dials
 
+> Full spec: [`isolation.md`](isolation.md) — tier definitions, the deterministic
+> `(trust × caps) → tier` selection matrix, the floor rule, and the agentd/gatekeeperd
+> contract. This section is the summary.
+
 Agents and ephemeral workloads don't need full QEMU machine emulation. We pick isolation
 by **trust tier**, and — critically — the trust tier is *orthogonal* to the **capability
 profile**. They answer different questions and are enforced at different points:
