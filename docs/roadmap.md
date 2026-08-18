@@ -65,6 +65,11 @@ Establish IPC conventions, structured audit logs, privilege separation, policy f
 daemon security profiles.
 **Milestone:** Routine privileged ops no longer need arbitrary root.
 
+Design-of-record: `grant-protocol.md` (the trusted-path capability-approval flow / policy/agent-UI
+role from `shell-architecture.md`). Extends the `gatekeeperd` broker skeleton with a `grant` verb
+family and a human trusted path (VT-primary via systemd `SecureAttentionKey`); introduces the first
+mutable grants (TPM NV-counter). The rendered prompt is the Phase-10 agent permission UI.
+
 ### Phase 5 — Isolation runtime
 Wire the four-tier `shrek run --trust=<tier> --caps=<profile>` model: Tier 0 (Landlock/
 seccomp), Tier 1 (nspawn/Incus), Tier 2 (**gVisor**), Tier 3 (libkrun/Kata). Build the
