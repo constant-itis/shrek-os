@@ -3,9 +3,10 @@
 # host is never mutated (see docs/phase1-spike.md §0). Drafted by the local coder tier, reviewed
 # on the primary model.
 #
-# SPIKE SCOPE: dm-verity (S4), UKI signing (S5), and the bootc wrap (S7) are NOT wired yet, so
-# this currently produces an UNSEALED base image — enough to prove the trixie base + scaffold
-# assemble and boot. Every `# VERIFY` is confirmed the first time this actually runs.
+# SPIKE SCOPE: dm-verity (S4) is now wired via image/mkosi.repart/, so this produces a SEALED
+# verity root with the roothash injected into the UKI cmdline. UKI signing (S5) and the bootc wrap
+# (S7) are still NOT wired — the UKI is unsigned, so verity is integrity-without-authentication until
+# the signed UKI at S5 authenticates the roothash-bearing cmdline.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -35,4 +36,4 @@ docker run --rm --privileged \
     chown -R "${HOST_UID}:${HOST_GID}" /work/out
   '
 
-echo "=== done — artifacts in out/ (UNSEALED base image; S4/S5/S7 still to wire) ==="
+echo "=== done — artifacts in out/ (dm-verity SEALED root, roothash in UKI cmdline; S5 UKI-sign + S7 bootc still to wire) ==="
