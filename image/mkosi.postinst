@@ -1,15 +1,15 @@
 #!/bin/sh
-# mkosi postinst — runs in the image build root. Create the unprivileged 'shrek' control-plane user so
-# oniond/shrekctl run non-root and the gatekeeperd socket can be group-fenced. This MUST be baked into
-# /etc at build time: the runtime /etc is sealed read-only (dm-verity), so a boot-time systemd-sysusers
-# could never create it. Written by direct append (no dependency on useradd/passwd being in the image).
+# mkosi postinst — runs on the HOST with the image tree exposed as $BUILDROOT (the sandbox's own /etc
+# is read-only, so we must write into $BUILDROOT/etc, not /etc). Create the unprivileged 'shrek'
+# control-plane user so oniond/shrekctl run non-root and the gatekeeperd socket peer-check has a uid to
+# allow. Baked into the sealed /etc at build time — the runtime /etc is read-only (dm-verity), so a
+# boot-time systemd-sysusers could never create it. Direct append (no useradd dependency in the image).
 set -eu
 
-if ! getent group shrek >/dev/null 2>&1; then
-    echo 'shrek:x:700:' >> /etc/group
-fi
-if ! getent passwd shrek >/dev/null 2>&1; then
-    echo 'shrek:x:700:700:Shrek OS control plane:/nonexistent:/usr/sbin/nologin' >> /etc/passwd
-    echo 'shrek:!*:19723:0:99999:7:::' >> /etc/shadow
-fi
-echo "postinst: shrek control-plane user -> $(getent passwd shrek)"
+grep -q '^shrek:' "$BUILDROOT/etc/group" \
+    || echo 'shrek:x:700:' >> "$BUILDROOT/etc/group"
+grep -q '^shrek:' "$BUILDROOT/etc/passwd" || {
+    echo 'shrek:x:700:700:Shrek OS control plane:/nonexistent:/usr/sbin/nologin' >> "$BUILDROOT/etc/passwd"
+    echo 'shrek:!*:19723:0:99999:7:::' >> "$BUILDROOT/etc/shadow"
+}
+echo "postinst: shrek control-plane user -> $(grep '^shrek:' "$BUILDROOT/etc/passwd")"

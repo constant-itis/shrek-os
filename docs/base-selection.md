@@ -73,16 +73,21 @@ Custom db keys    enroll Shrek KEK/db into firmware (Setup Mode) → controlled 
 "Riding the distro's signed kernel" only defers this while booting *their* kernel with
 *their* key — true on Debian and Fedora equally.
 
-## Update transport — decided fork
+## Update transport — RESOLVED (spike ran; see update-model.md)
+
+The Phase-1 spike settled this fork. bootc + composefs are **unpackaged on Debian trixie**, so
+bootc-on-Debian is the fragile source-build path — the pre-authorized **janky → fallback** branch
+fired. The shipping transport is `systemd-sysupdate` raw A/B, proven end to end (one update +
+automatic rollback) in [`phase1-s7-sysupdate.md`](phase1-s7-sysupdate.md) /
+[`phase1-s8-rollback.md`](phase1-s8-rollback.md). Full model + the rollback-vs-anti-rollback split
+in [`update-model.md`](update-model.md).
 
 ```
-PRIMARY   : bootc (OCI image → A/B → rollback → health-check)   — mature engine, on Debian
-FALLBACK  : mkosi + systemd-sysupdate (raw .raw A/B)            — purer systemd, lower-level,
-                                                                  we own more delivery infra
+RESOLVED  : mkosi + systemd-sysupdate (raw .raw A/B)   — native to trixie systemd 257, we own it
+DEFERRED  : bootc + composefs (OCI image → A/B)         — a later UPGRADE, not the shipping path
 ```
 
-If bootc-on-Debian proves janky in the Phase-1 spike, drop to the sysupdate fallback. Still
-Debian, still sealed/verified, just a lower-level updater.
+Still Debian, still sealed/verified, just a lower-level updater we fully own.
 
 ## Keep the port cheap (either direction)
 

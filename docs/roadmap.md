@@ -36,19 +36,23 @@ Freeze invariants before implementation. `architecture.md`, `base-selection.md`,
 `roadmap.md`, `isolation.md` (four tiers, the trust×caps dials, the selection matrix),
 `threat-model.md` (assets, adversary catalog, trust boundaries, attack narratives),
 `security-model.md` (threat→primitive mapping + the OPEN-resolving amendments) done.
-`filesystem-intelligence.md` (three maps, logical domains, escalation ladder, modular tiers)
-and `swamp.md` (swampd component, object record, confinement, event pipeline) done.
-Still to write: `update-model.md`, `agents.md`.
+`filesystem-intelligence.md` (three maps, logical domains, escalation ladder, modular tiers),
+`swamp.md` (swampd component, object record, confinement, event pipeline), and
+`update-model.md` (sysupdate A/B transport, rollback vs anti-rollback) done.
+Still to write: `agents.md`.
 **Milestone:** Shrek Architecture v0.1 frozen.
 
-### Phase 1 — Hardened Debian bootc base (+ base acceptance test)
+### Phase 1 — Hardened Debian sealed base (+ base acceptance test)
 Produce a Shrek image from **Debian Stable via mkosi**: hardened config, AppArmor enforcing,
-UKI (systemd-stub, Shrek key), **dm-verity** sealed root, MOK-enrolled Secure Boot, empty
-Shrek control-plane scaffold, delivered via **bootc**.
+UKI (systemd-stub, Shrek key), **dm-verity** sealed root, Secure Boot (Shrek key auto-enrolled
+into UEFI db — no shim/MOK, since we sign our own UKI), empty Shrek control-plane scaffold.
 **Acceptance test (breaks the base tie):** clean → stay on Debian+bootc; janky → fall back
-to `mkosi` + `systemd-sysupdate`; blocked → build a Fedora oracle and port back (cheap via
-mkosi). Study a stock Fedora bootc image in a VM first as the reference.
-**Milestone:** Shrek boots *sealed* on bare metal + VM under MOK; a broken update rolls back.
+to `mkosi` + `systemd-sysupdate`; blocked → build a Fedora oracle and port back.
+**RESOLVED:** bootc/composefs unpackaged on trixie → the **janky→fallback** branch fired.
+**Stay on Debian**, transport = `systemd-sysupdate` raw A/B ([`update-model.md`](update-model.md),
+S7/S8). bootc deferred to a later upgrade.
+**Milestone (met):** Shrek boots *sealed* under enforcing Secure Boot; a broken update rolls back
+automatically ([`phase1-s8-rollback.md`](phase1-s8-rollback.md)).
 
 ### Phase 2 — The Onion (sysext layers)
 Build `graphics`, `desktop`, `dev`, `gaming`, `ai` as signed, Verity-authenticated sysext
@@ -58,8 +62,10 @@ but layering itself is `systemd-sysext`, not our code.
 **Milestone:** Shrek's visible OS composes from independently managed, signed layers.
 
 ### Phase 3 — Transactional boot + recovery hardening
-Lean on bootc's transactional model; add health validation, staged updates, recovery mode.
-**Milestone:** Deliberately destroy an update → automatic return to the last good system.
+Built on `systemd-sysupdate` A/B + boot-assessment (bootc dropped, §Phase 1); add greenboot-style
+health validation, staged updates, recovery mode. Model in [`update-model.md`](update-model.md).
+**Milestone (core met at S8):** Deliberately destroy an update → automatic return to the last
+good system ([`phase1-s8-rollback.md`](phase1-s8-rollback.md)).
 
 ### Phase 4 — Rust control plane
 `shrekctl`, `oniond` (policy/orchestration over sysext), `gatekeeperd` (privileged broker).
