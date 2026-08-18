@@ -18,6 +18,17 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 RAW="${RAW:-$(ls -t out/shrek_*_x86-64.raw 2>/dev/null | head -1)}"
 [ -n "$RAW" ] && [ -f "$RAW" ] || { echo "no out/shrek_*_x86-64.raw — run scripts/build-in-container.sh first" >&2; exit 1; }
 echo "=== booting $RAW ==="
+
+# Phase-2 (Onion): optional second drive = the layer store (STORE=out/layer-store.raw). Attached as a
+# virtio disk; shrek-onion.service mounts it by fs-label `shrek-layers` and merges the signed layers.
+# snapshot=on so the store artifact is never mutated by the guest.
+STORE="${STORE:-}"
+STORE_DRIVE=""
+if [ -n "$STORE" ]; then
+  [ -f "$STORE" ] || { echo "STORE=$STORE not found" >&2; exit 1; }
+  STORE_DRIVE="-drive file=/work/${STORE},format=raw,if=virtio,snapshot=on"
+  echo "=== attaching layer store: $STORE ==="
+fi
 QEMU_SECONDS="${1:-150}"     # wall-clock budget for the two-boot cycle
 LOG=out/vm-console.log
 : > "$LOG"
@@ -41,6 +52,7 @@ docker run --rm --device /dev/kvm \
       -drive if=pflash,format=raw,unit=0,file=/usr/share/OVMF/OVMF_CODE_4M.secboot.fd,readonly=on \
       -drive if=pflash,format=raw,unit=1,file="$tmp/vars.fd" \
       -drive file="/work/'"$RAW"'",format=raw,if=virtio,snapshot=on \
+      '"$STORE_DRIVE"' \
       -device virtio-rng-pci \
       -display none -serial file:/work/'"$LOG"'
     rc=$?

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Marker binary shipped by the shrek-hello sysext layer. Its mere presence under /usr/bin proves the
+# layer merged into the sealed read-only /usr via overlayfs.
+echo "shrek-hello layer active (merged into sealed /usr via systemd-sysext)"

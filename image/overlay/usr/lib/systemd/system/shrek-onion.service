@@ -1,0 +1,37 @@
+# shrek-onion — Phase-2 seed of oniond. Mounts the external layer store and merges signed sysext/
+# confext layers onto the sealed base under a FIXED, trusted image policy. This is the whole
+# "orchestration" surface the Onion needs in Phase 1/2; the low-level layering is systemd-sysext
+# (architecture.md §3). oniond (Phase 4) later owns the policy decisions; the merge stays sysext.
+#
+# The layer store is a SEPARATE writable disk (the VM's 2nd drive, fs label `shrek-layers`) holding
+# signed dm-verity DDIs under extensions/ and confexts/. The store is UNtrusted: integrity comes from
+# each DDI's PKCS#7 roothash signature, verified against /usr/lib/verity.d/shrek.crt, enforced by the
+# image policy below. So a tampered/unsigned layer on the store is refused, not merged (docs §L3).
+[Unit]
+Description=Shrek Onion — merge signed sysext/confext layers from the external store
+Documentation=file:///usr/share/doc/shrek/phase2-onion.md
+# Run once the store disk + /dev/disk/by-label are guaranteed present (relaxed for the spike; the
+# "extensions available before basic.target" placement is oniond's job in Phase 4). Nothing here
+# depends on the layer being present early.
+After=local-fs.target systemd-udevd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Mount the store read-only, then bind its two subtrees onto the sysext/confext search dirs so each
+# tool sees only its own DDIs. A missing confexts/ subtree is tolerated (gates L1–L3 ship no confext).
+ExecStartPre=/bin/mkdir -p /run/shrek-store /var/lib/extensions /var/lib/confexts
+ExecStartPre=/bin/mount -o ro /dev/disk/by-label/shrek-layers /run/shrek-store
+ExecStartPre=/bin/mount --bind /run/shrek-store/extensions /var/lib/extensions
+ExecStartPre=-/bin/mount --bind /run/shrek-store/confexts /var/lib/confexts
+# Merge under a FIXED trusted policy (never read from the untrusted store): the data partition,
+# whichever designator mkosi gives the layer (root or usr), must be Verity-authenticated AND
+# PKCS#7-signed; +absent lets the other designator be missing. This is the L3 refusal lever. The
+# helper reports each step's outcome to the console and never hard-fails the boot (a refused layer
+# is survivable — the verdict is observed, not fatal).
+ExecStart=/usr/lib/shrek/onion-merge
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

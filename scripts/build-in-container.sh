@@ -53,6 +53,12 @@ if [ ! -s keys/secureboot.key ] || [ ! -s keys/secureboot.crt ]; then
   chmod 0600 keys/secureboot.key
 fi
 
+# Phase 2 (Onion): bake the Shrek cert into the sealed root at /usr/lib/verity.d/shrek.crt so
+# systemd-sysext/confext trust layers signed by the same throwaway key (shrek-onion.service merges
+# under --image-policy=…signed). The cert is a build artifact (keys/ gitignored) — staged, not committed.
+install -d image/overlay/usr/lib/verity.d
+install -m0644 keys/secureboot.crt image/overlay/usr/lib/verity.d/shrek.crt
+
 echo "=== STAGE 2 (container): mkosi build in throwaway debian:trixie ==="
 # --privileged: mkosi needs loop devices to assemble a disk image. Ephemeral container, host untouched.
 docker run --rm --privileged \
