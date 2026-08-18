@@ -10,7 +10,7 @@ to resolve inline — **takes positions on the load-bearing OPENs as amendments*
 `⇒ AMENDS` and collected in §9 for review before propagation.
 
 Reading order: §1 the two theorems · §2 the enforcement stack · §3 threat→primitive table ·
-§4–§8 the amendments (the spine) · §9 amendment summary · §10 residual register.
+§4–§8b the amendments (the spine) · §9 amendment summary · §10 residual register.
 
 ---
 
@@ -63,7 +63,7 @@ for wall strength and *nothing about the radius* — the radius is the row below
 ## 3. Threat → enforcing primitive
 
 Every adversary and boundary from threat-model.md, mapped. **Status:** `CLOSED` (a primitive
-fully answers it), `MITIGATED` (bounded, residual named), `AMEND` (needs a decision in §4–§8),
+fully answers it), `MITIGATED` (bounded, residual named), `AMEND` (needs a decision in §4–§8b),
 `ACCEPTED` (non-goal, threat-model §9).
 
 | Threat | Enforcing primitive | Layer | Status |
@@ -76,7 +76,7 @@ fully answers it), `MITIGATED` (bounded, residual named), `AMEND` (needs a decis
 | ADV-6 malicious app | Flatpak portals + routing rule; native ⇒ mandatory sandbox | isolation | CLOSED (§8/D1 — no unconfined path) |
 | ADV-7 DLP evasion | *by design advisory*; wall holds the catastrophic set | tripwire | ACCEPTED (N8) + §7 placement |
 | ADV-8 confused-deputy via gatekeeperd | independent re-check from **sealed** policy source | broker | CLOSED via §4/§6 (B4 rename race → MITIGATED) |
-| ADV-9 indirect prompt injection | wall ignores agent intent; caps bound the blast | radius + wall | MITIGATED (→ §7, same channel as ADV-1) |
+| ADV-9 indirect prompt injection | wall ignores agent intent (radius); + taint-tag → demote-to-propose (in-model trigger) | radius + wall + tripwire | MITIGATED (radius → §7; trigger → §8b, tripwire-grade) |
 | ADV-10 warm-pool contamination | reset-to-clean between tenants; no cross-band reuse | isolation | MITIGATED (§8/B5) |
 | ADV-11 provenance-log adversary | append-only + anchored head + read-ACL | provenance | MITIGATED (§8/F1, F2) |
 | ADV-12 degrade-to-unsafe | **fail-closed** wall; supervised gatekeeperd | broker | wall CLOSED / availability MITIGATED (§7) |
@@ -462,11 +462,95 @@ what happens when it is absent.
 
 ---
 
+## 8b. AMENDMENT — untrusted content is not instruction (ADV-9 / threat-model §6.9)
+
+**Problem (threat-model.md ADV-9, §6.9).** §7 bounds the *blast radius* of a prompt-injection
+hijack — caps⊆profile and the egress chokepoint cap what a subverted agent can send where. It says
+nothing about the hijack *itself*: an agent reads trusted file A and attacker-controlled file B
+(both allowed), and B's text steers an action against A, **entirely within profile, zero grant, zero
+kernel event**. This is the one part of the LLM threat model a capability wall structurally cannot
+see. The invariant `semantic authority ≤ data authority` bounds what an agent can **reach**; it does
+not bound what untrusted text *inside an authorized read* makes the agent **decide to do**. §7 is the
+radius; this is the trigger.
+
+```
+⇒ AMENDS agents.md §8 as the SECURITY registration of the agent-side stance (agents.md is the
+  canonical statement; this ties it into the threat→primitive spine and the residual register):
+
+  UNTRUSTED CONTENT IS DATA, NEVER INSTRUCTION.
+    Content from below the agent's trust band, or from any object not operator-authored, is
+    tagged `untrusted-instruction-source` when it enters the agent's CONTEXT (extending swamp.md's
+    authorize-before-retrieve from bytes-at-rest to bytes-in-context). Provenance travels with the
+    passage into context — a retrieved snippet carries its operator-authored/untrusted label.
+    An instruction extracted from tagged content MUST NOT trigger write / execute / network / grant.
+    It may only PROPOSE — and a proposal from tainted content is DENIED THE SELF-SERVICE ROUTE
+    (agents.md §7 route 2, in-sandbox write/execute). It requires a HUMAN acknowledgment even for an
+    IN-PROFILE action — the trusted path (§8/TP1) for anything authority-increasing, an explicit ack
+    (grant-protocol.md D2, tainted-origin ceremony) for a non-escalating in-profile action. The
+    dangerous case is precisely the in-profile confused deputy, so in-profile is exactly what MUST
+    NOT auto-execute when the trigger is untrusted text.
+
+    Provenance fail-high: a passage whose provenance is unlabeled or unattributable is treated as
+    tainted (matching §6/B1's unknown⇒T-hostile). Agent-authored content stays tainted (an agent
+    cannot launder instructions into a file a later session reads as trusted — the two-hop SpAIware
+    write); the cost is taint saturation, cleared only by an operator-endorsement path — saturation
+    fatigue is named residual (§10), not silently exempted. Endorsement is the ONLY tainted→trusted
+    flip, so it is itself an authority-increasing act (trusted-path/grant ceremony, never a casual
+    inline ack — else "please endorse this file" is the next injection payload); its concrete class
+    is deferred to the grant-protocol.md propagation (§9, pending item d).
+
+  This is the dual-LLM / CaMeL discipline (quarantined parser returns data-only; taint metadata
+  keeps untrusted data out of the control path) applied to Shrek.
+```
+
+**Guarantee class: tripwire-grade, not wall-grade.** Taint-tracking through an LLM's reasoning is
+best-effort — the same class as the semantic DLP tripwire (architecture.md §7, §7 above), and by
+Theorem 2 it must NEVER be relied on where a deterministic boundary is available. The **demotion to
+*propose*** has two honestly-separated failure modes: a **caught** tag reaches no action without a
+human acknowledgment, so its residual is *bad-grant risk* (an injected reason that reads plausibly
+at the ack — content fatigue); a **missed** tag (source mislabeled trusted, or the model not linking
+an action to its tainted trigger) still executes *within the profile* with no human — degrading to
+the pre-§8b in-profile baseline (§7 radius + wall, `caps⊆profile`, no widening), **never a silent
+wall breach**. The demotion converts a missed taint from "breached wall" down to "in-profile action
+the wall already bounds"; it does not promise a human on every path. **Headless (Rung-0):** a
+tainted-origin authority-increasing proposal MUST NOT auto-satisfy from the pre-baked cap-sets an
+unattended box grants (grant-protocol.md Rung-0) — it fails to denied-pending-human, matching the
+settled rule that interactive escalation requires a human at the console. A tainted-origin *in-profile*
+action on a headless box composes to the same fail-closed outcome: the general human-ack requirement
+has no human, and grant-protocol.md's ack timeout ⇒ denied — so it does not execute either. Two
+consequences the model prices honestly:
+
+- **The lethal trifecta, surfaced not hidden.** `untrusted-read + any network` is a presumptive
+  exfil channel — not only for protected data (the wall holds that) but for *ordinary
+  readable-sensitive* data encoded into permitted request params/hostnames/timing (EchoLeak,
+  Supabase-MCP: legitimate-read chained to legitimate-egress, zero protected-cap abuse). ⇒ AMENDS
+  grant-protocol.md — `untrusted-read + network` renders as a **trifecta warning** in the grant UI,
+  never routine merely because each capability is individually in-policy; and the agent's stated
+  reason is rendered as **untrusted text** beside the *actual* authority diff (defeats a
+  plausible-reason social-engineer — **content fatigue**, distinct from the volume fatigue
+  grant-protocol already rate-limits).
+- **Index poisoning is partly live now.** The shipping semantic tier is already poisonable (one
+  attacker-authored doc biases ranking for unrelated future tasks — the SpAIware pattern), not only
+  the deferred living-graph tier (filesystem-intelligence.md §8). The tag mitigates only the
+  *instruction-hijack* consequence of a poisoned passage (its provenance travels into context);
+  **ranking/selection integrity** — a poisoned doc taking the retrieval slot or burying the right
+  one — needs no extracted instruction and remains an **open integrity residual** (the living-graph
+  threat pass, filesystem-intelligence.md §8). No new primitive for the hijack half; the selection
+  half is unclosed.
+
+---
+
 ## 9. Amendment summary (for review before propagation)
 
 These have been **propagated** into the sibling docs (architecture.md §1/§5/§6/§9,
 isolation.md §7/§9, base-selection.md), each carrying a pointer back here as the controlling
-source. The `swamp.md` / `update-model.md` rows will be honored when those docs are authored.
+source. The `swamp.md` / `update-model.md` rows will be honored when those docs are authored. The
+**§8b grant-protocol.md propagation is PENDING**: grant-protocol.md today has the reason-as-untrusted-text
+legibility rule but needs, added there before §8b is fully propagated — (a) the `untrusted-read + network`
+**trifecta warning**; (b) a **tainted-origin D2 ceremony** (human ack for an in-profile tainted action);
+(c) a **Rung-0 exclusion** (a tainted-origin authority-increasing proposal must not auto-satisfy from the
+pre-baked cap-sets grant-protocol.md's headless policy would otherwise grant); (d) the **endorsement
+ceremony** (§8b — the tainted→trusted flip is authority-increasing).
 
 | # | Amends | Change |
 |---|---|---|
@@ -479,6 +563,7 @@ source. The `swamp.md` / `update-model.md` rows will be honored when those docs 
 | §8/C1 | base-selection.md | monotonic **anti-rollback** SVN (TPM NV counter); floor **advances only on greenboot-healthy commit**; recovery repairs to **≥ current SVN**, never below |
 | §8/A5-disc | architecture.md §6 | scope `discover:false` honestly to A1 bytes+own-metadata; reference leakage is accepted residual |
 | §8/AS3 | base-selection.md | specify **PCR sealing** targets + TPM-absent documented-degrade (never silent) |
+| §8b | agents.md §8 (done); grant-protocol.md (**pending**) | **untrusted content is not instruction**: tag `untrusted-instruction-source` on context ingest (fail-high on unlabeled; agent-authored stays tainted), **demote-to-propose** — deny self-service route 2, require a human ack even in-profile (TP1 if escalating); tripwire-grade not wall-grade (missed tag → in-profile baseline, not silent breach). Pending in grant-protocol.md (§9 preamble a–d): **trifecta warning** (`untrusted-read + network`) + tainted-origin D2 ceremony + Rung-0 exclusion + endorsement ceremony. Cites architecture.md §7 as the tripwire class (no change there). Instruction-hijack half only; ranking-integrity stays open |
 | §8/B5,F1,F2 | (new detail in swamp.md / update-model.md) | pool reset by (band,caps); log head TPM-anchored; log read-ACL + Theorem-1 content rule |
 
 ---
@@ -497,6 +582,15 @@ CLOSED   ADV-3 (A1 bytes via index)      — swampd default-deny subject-of-wall
 MITIGATED (bounded, residual named)
          ADV-1/ADV-9 exfil via egress   — minimized channel + out-of-band DLP (§7); the
                                           allow-listed host remains a channel by construction
+         ADV-9 in-model confused deputy — taint-tag + demote-to-propose (§8b); TRIPWIRE-grade, two
+                                          modes: CAUGHT tag → human ack, residual = bad-grant/content
+                                          fatigue; MISSED tag → executes in-profile with NO human,
+                                          the pre-§8b §7 baseline, never a silent wall breach. Trifecta
+                                          surfaced in grant UI
+         §8b taint saturation           — agent-authored stays tainted (no laundering); cost is
+                                          saturation fatigue, cleared only by operator endorsement
+         §8b ranking/selection poison   — the tag fixes instruction-hijack, NOT which content wins
+                                          retrieval; open integrity residual (filesystem-intelligence §8)
          ADV-2 provenance spoof         — integrity-sourced trust band, fail-high (§6/B1)
          B4 mount TOCTOU                — subtree-pin + resolve-beneath (§6); holds under the
                                           non-attacker-writable-parent invariant
@@ -518,4 +612,4 @@ ACCEPTED (non-goal — threat-model §9, unchanged)
 The model is strongest exactly where Theorem 1 reaches — **byte-level reachability of the
 human-only domains by agents and sandboxed code** — and every remaining risk is now either a
 named, bounded channel or an explicit non-goal, not a silent gap. `security-model.md`'s job was
-to convert threat-model.md's OPENs into decisions; §4–§8 are those decisions.
+to convert threat-model.md's OPENs into decisions; §4–§8b are those decisions.

@@ -201,7 +201,7 @@ itself authority**:
 | The agent wants to… | Route | Enforced by |
 |---------------------|-------|-------------|
 | **find / read** something | swamp query API, caller-scoped, **authorize-before-retrieve** | [`swamp.md`](swamp.md) §9 — per-object intersection, `discover:false` absent from projection |
-| **write / execute** within its scope | the sandbox it already runs in | [`isolation.md`](isolation.md) — the default-deny Landlock ruleset |
+| **write / execute** within its scope | the sandbox it already runs in — *unless the action's trigger is tainted, then §8 denies this route* | [`isolation.md`](isolation.md) — the default-deny Landlock ruleset |
 | **exceed its current profile** (a new mount/host/cap/tier) | a *proposal* → `agentd` → `gatekeeperd` → human | [`grant-protocol.md`](grant-protocol.md) — trusted path, no bearer token |
 
 The load-bearing property: **reads authorize before they retrieve** (never global-search then
@@ -212,7 +212,9 @@ pixel-perfect fake grant prompt the agent draws in its own window therefore gran
 
 There is a fourth *pseudo*-route, denied by construction: an instruction the agent extracts from
 **untrusted content it read** does not get to act on its own authority — it is demoted to a
-*proposal* and routed through the same three routes above, never a shortcut around them (§8).
+*proposal* that is specifically **denied route 2** (the self-service in-sandbox write/execute above).
+It requires a human: route 3 (the trusted path) if authority-increasing, an explicit human ack if
+merely in-profile — because the in-profile case is exactly the confused deputy (§8).
 
 ## 8. Untrusted content is not instruction — the in-model confused deputy
 
@@ -230,9 +232,19 @@ stance:
 UNTRUSTED CONTENT IS DATA, NEVER INSTRUCTION.
   Content from below the agent's trust band, or from any object not operator-authored, is tagged
   UNTRUSTED-INSTRUCTION-SOURCE when it enters the agent's context.
-  An instruction extracted from tagged content CANNOT trigger write / execute / network / grant.
-  It may only PROPOSE — routed back through the three routes of §7 exactly as if the agent itself
-  had asked, including the human trusted path for anything authority-increasing.
+  An instruction extracted from tagged content MUST NOT trigger write / execute / network / grant.
+  It may only PROPOSE — and a proposal from tainted content is NOT self-served: it is denied the
+  self-service route (§7 route 2, in-sandbox write/execute) and requires a HUMAN acknowledgment —
+  the trusted path (§7 route 3) for anything authority-increasing, an explicit ack for even an
+  in-profile action. The dangerous case IS the in-profile one (the confused deputy), so in-profile
+  is exactly what must not auto-execute when the trigger is untrusted text.
+
+  Provenance fails high: a passage whose provenance is unlabeled or unattributable is treated as
+  tainted (matching the unknown⇒hostile convention). Agent-authored content STAYS tainted — an
+  agent must not launder instructions into a file a later session reads as trusted (the two-hop
+  SpAIware write). The cost is taint saturation, cleared only by an operator-endorsement path;
+  endorsement is itself an authority-increasing act (trusted-path/grant ceremony), never a casual
+  inline ack — or "please endorse this file" becomes the next injection payload.
 ```
 
 This is the dual-LLM / CaMeL discipline (a planner that never sees untrusted content; a quarantined
@@ -247,15 +259,17 @@ bytes-in-context.** Three consequences the design must state plainly:
   `network: [docs.python.org]` is still a channel. Real-world: the EchoLeak Copilot exfiltration and
   the Supabase MCP leak were both legitimate-read chained to legitimate-egress, zero
   protected-capability abuse. So **`untrusted-read + network` surfaces in the grant UI as a trifecta
-  warning** ([`grant-protocol.md`](grant-protocol.md)) — never routine merely because each
-  capability is individually in-policy.
+  warning** ([`grant-protocol.md`](grant-protocol.md) — *rule pending propagation, security-model §9*)
+  — never routine merely because each capability is individually in-policy.
 - **Index poisoning is partly live now, not only in SWAMP LIVING.** The deferred living-graph tier
   earns its own threat pass ([`filesystem-intelligence.md`](filesystem-intelligence.md) §8) — but the
   *shipping* semantic tier (embeddings + relationships) is already poisonable: one attacker-authored
   document in an enabled domain can bias Donkey's retrieval and ranking for *unrelated future* tasks
-  (the SpAIware pattern — injection that writes memory to steer later sessions). Mitigation is the
-  same tag: a retrieved passage is data, and its provenance (operator-authored vs untrusted) travels
-  with it into context.
+  (the SpAIware pattern — injection that writes memory to steer later sessions). The tag mitigates
+  only the *instruction-hijack* consequence — a retrieved passage is data, its provenance travels
+  into context. It does **not** fix **ranking/selection integrity**: a poisoned doc that takes the
+  retrieval slot or buries the right one steers *which* content is returned with no extracted
+  instruction — an open integrity residual ([`filesystem-intelligence.md`](filesystem-intelligence.md) §8).
 - **Content fatigue, distinct from volume fatigue.** [`grant-protocol.md`](grant-protocol.md)
   rate-limits and coalesces proposal *volume*; it does not vet proposal *text*. An injected document
   that makes Donkey draft a plausible-sounding grant reason ("fetch the changelog for a compat
@@ -267,8 +281,14 @@ bytes-in-context.** Three consequences the design must state plainly:
 **This is a tripwire-grade guarantee, not a wall-grade one.** Taint-tracking through an LLM's
 reasoning is best-effort, exactly like the semantic DLP tripwire ([`architecture.md`](architecture.md)
 §7); it must never be relied on where a deterministic capability boundary is available. The
-demotion-to-*propose* is what keeps a *missed* taint from becoming a *breached* wall — the only
-actions untrusted content can reach are the ones that already route through the human.
+demotion-to-*propose* has two honest halves. A **caught** tag reaches no action without a human
+acknowledgment (in-profile: an explicit ack; authority-increasing: the trusted path) — its residual
+is *content fatigue*, a human waving through a plausible reason. A **missed** tag (a source
+mislabeled trusted, or the model failing to connect an action to its tainted trigger) executes
+within the granted profile with no human — degrading to the pre-taint blast radius bounded by the
+wall (`caps⊆profile`, no widening), **never a silent wall breach**. The demotion converts a missed
+taint from "breached wall" down to "in-profile action the wall already bounds"; it does not, and
+cannot, promise a human on every path.
 
 ## 9. Donkey — the built-in assistant
 
