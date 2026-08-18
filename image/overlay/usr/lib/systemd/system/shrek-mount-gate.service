@@ -1,0 +1,29 @@
+# shrek-mount-gate — Phase-5 slice-1 M4 VM gate. SPIKE / VM-ACCEPTANCE ONLY — remove this unit, its
+# multi-user.target.wants symlink, and /usr/lib/shrek/mount-plane-gate before any real/shipped image
+# (docs/phase5-slice1-mount.md, "Spike-only").
+#
+# Runs late (after full userspace), constructs a caps-enforced sandbox via `gatekeeperd sandbox`,
+# asserts the four mount-plane properties, mirrors the verdict to the serial console, then powers the
+# VM off (whether pass or fail) so the headless boot-vm.sh run exits promptly. A hang instead powers
+# nothing off → the host's serial-log timeout sees no `PASS M4` → fail closed.
+#
+# Runs as plain root with NO Protect*/PrivateMounts/sandbox directives: the gate itself unshares a
+# private mount namespace and drives systemd-nspawn, which needs full CAP_SYS_ADMIN and must not be
+# confined to an invisible mount view.
+[Unit]
+Description=Shrek Phase-5 slice-1 mount-plane VM gate (SPIKE)
+Documentation=file:///usr/share/doc/shrek/phase5-slice1-mount.md
+After=multi-user.target
+# Always power off after the verdict — pass or fail — so the VM never lingers past the gate.
+# (SuccessAction/FailureAction are [Unit] directives, not [Service].)
+SuccessAction=poweroff-force
+FailureAction=poweroff-force
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/shrek/mount-plane-gate
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

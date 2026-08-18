@@ -25,6 +25,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::process::Command;
 
+use gatekeeperd::linux_uapi::{self, Ucred};
+
 /// Fixed trust gate (same as slice 1 / Phase 2). Baked in code, never read from the untrusted store.
 const IMAGE_POLICY: &str = "root=signed+absent:usr=signed+absent";
 
@@ -51,44 +53,12 @@ fn env_or(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
-// ---- peer credentials (SO_PEERCRED via raw getsockopt syscall; x86-64) ----
-
-#[repr(C)]
-#[derive(Default, Clone, Copy)]
-struct Ucred {
-    pid: i32,
-    uid: u32,
-    gid: u32,
-}
-
-/// Read the connecting peer's (pid,uid,gid). Dependency-free: SOL_SOCKET=1, SO_PEERCRED=17,
-/// getsockopt = syscall 55 on x86-64. struct ucred is 12 bytes, no padding.
+// ---- peer credentials ----
+//
+// The raw getsockopt(SO_PEERCRED) syscall now lives in `linux_uapi::peer_cred` (all raw syscall code
+// is centralized there). This thin wrapper adapts the socket to that call.
 fn peer_cred(s: &UnixStream) -> std::io::Result<Ucred> {
-    const SYS_GETSOCKOPT: i64 = 55;
-    const SOL_SOCKET: i32 = 1;
-    const SO_PEERCRED: i32 = 17;
-    let mut cred = Ucred::default();
-    let mut len: u32 = core::mem::size_of::<Ucred>() as u32;
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") SYS_GETSOCKOPT => ret,
-            in("rdi") s.as_raw_fd(),
-            in("rsi") SOL_SOCKET,
-            in("rdx") SO_PEERCRED,
-            in("r10") &mut cred as *mut Ucred,
-            in("r8")  &mut len as *mut u32,
-            in("r9")  0i64,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    if ret < 0 {
-        return Err(std::io::Error::from_raw_os_error(-ret as i32));
-    }
-    Ok(cred)
+    linux_uapi::peer_cred(s.as_raw_fd())
 }
 
 /// Resolve a username → (uid,gid) from /etc/passwd (colon fields: name:x:uid:gid:…).
@@ -415,6 +385,13 @@ fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>) {
 }
 
 fn main() {
+    // Subcommand dispatch. `sandbox` (Phase-5 slice-1) constructs a T1 nspawn sandbox from a grant;
+    // with no subcommand the binary is the long-running onion broker (Phase-4 slice-2).
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("sandbox") {
+        std::process::exit(gatekeeperd::sandbox::cli(&argv[1..]));
+    }
+
     let sock = env_or("SHREK_BROKER_SOCK", "/run/shrek-gk.sock");
     let store = env_or("SHREK_ONION_STORE", "/run/shrek-store");
 

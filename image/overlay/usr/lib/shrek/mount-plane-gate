@@ -1,0 +1,54 @@
+#!/bin/sh
+# Phase-5 slice-1 — M4 VM GATE. SPIKE ONLY: remove this file, shrek-mount-gate.service, and the
+# multi-user.target.wants symlink before any real/shipped image (docs/phase5-slice1-mount.md).
+#
+# Runs on the sealed, enforcing-Secure-Boot image. Drives `gatekeeperd sandbox` to construct a
+# capability-enforced T1 sandbox from a grant, and asserts the four mount-plane properties from
+# INSIDE the sandbox, emitting anchored `SHREK_GATE:` lines on the serial console. The unit's
+# Success/FailureAction powers the VM off afterwards; absence of a PASS line (hang/crash) fails
+# closed because the host harness times out and never sees `PASS M4`.
+set -u
+GK=/usr/libexec/shrek/gatekeeperd
+SRV=/run/shrek-m4/srv
+verdict_done=0
+
+emit() { echo "SHREK_GATE: $*"; }
+# EXIT trap keyed on $? — a crash before the verdict still prints a FAIL, never silence.
+on_exit() {
+  rc=$?
+  [ "$verdict_done" = 1 ] || emit "FAIL M4 mount-plane VM gate reason=crashed rc=$rc"
+}
+trap on_exit EXIT
+
+emit "M4-BEGIN Phase-5 slice-1 mount plane"
+command -v systemd-nspawn >/dev/null 2>&1 || { emit "FAIL M4 mount-plane VM gate reason=nspawn-missing"; verdict_done=1; exit 1; }
+
+# Fixtures on the writable tmpfs /run (the sealed dm-verity root is read-only): granted 'project',
+# denied 'vault'.
+mkdir -p "$SRV/project" "$SRV/vault"
+echo PROJECT > "$SRV/project/marker"
+echo VAULT   > "$SRV/vault/marker"
+
+# In-sandbox probe: assert the caps-enforced mount set and emit a gate per property.
+PROBE='
+m=$(cat /srv/project/marker 2>/dev/null); [ "$m" = PROJECT ] && echo "SHREK_GATE: PASS gate=in-project-readable" || echo "SHREK_GATE: FAIL gate=in-project-readable m=$m"
+if cat /srv/vault/marker 2>&1 | grep -qi "No such file"; then echo "SHREK_GATE: PASS gate=in-vault-enoent"; else echo "SHREK_GATE: FAIL gate=in-vault-enoent"; fi
+l=$(ls /srv | tr "\n" ,); [ "$l" = "project," ] && echo "SHREK_GATE: PASS gate=in-vault-absent" || echo "SHREK_GATE: FAIL gate=in-vault-absent l=$l"
+o=$(stat -c %u /srv/project/marker); [ "$o" = 65534 ] && echo "SHREK_GATE: PASS gate=in-private-users" || echo "SHREK_GATE: FAIL gate=in-private-users o=$o"
+'
+# Capture the workload's STDOUT only (the in-sandbox gate lines); let gatekeeperd's diagnostics flow
+# to the console via stderr. Capturing 2>&1 would fold in the `exec …` echo, whose embedded probe
+# source literally contains SHREK_GATE strings and would corrupt the counts.
+OUT=$("$GK" sandbox --id m4 --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE")
+gkrc=$?
+printf '%s\n' "$OUT"
+
+# Anchored ^ so only real gate lines count — never an incidental echo of the probe source.
+P=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: PASS gate=in-')
+F=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: FAIL')
+if [ "$gkrc" = 0 ] && [ "$F" = 0 ] && [ "$P" -ge 4 ]; then
+  emit "PASS M4 mount-plane VM gate (gatekeeperd rc=0, ${P}/4 in-sandbox gates)"
+else
+  emit "FAIL M4 mount-plane VM gate (gkrc=${gkrc} pass=${P} fail=${F})"
+fi
+verdict_done=1

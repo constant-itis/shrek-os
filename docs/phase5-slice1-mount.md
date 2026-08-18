@@ -57,10 +57,49 @@
   Assert on exit codes + probed mounted content, **never on console-string presence** (systemd can
   swallow bind-source errors to the console).
 
+## M0 — RESULTS (verified 2026-08-18, privileged `debian:trixie` container oracle)
+
+All M0 checks pass. Findings fold back into the design below.
+
+- **CHECK 1 — PASS.** `systemd-container = 257.13-1~deb13u1` (≥ 257.12 → CVE-2026-40226 fixed).
+- **CHECK 2 — noted.** Host nested-virt `kvm_intel/nested=Y`. Unused in T1; matters only if a later
+  tier wants runsc-KVM.
+- **CHECK 3 — PASS (with a shape correction).** Synthetic root + `--bind-ro=/srv/project`: inside the
+  sandbox `ls /srv` shows **only `project`**; `cat /srv/project/hello.txt` → readable;
+  `cat /srv/vault/secret.txt` → **ENOENT** (`No such file or directory`), the strong absence result,
+  not EACCES. Trap 1 defeated. **CORRECTION:** nspawn refuses a *literally empty* `--directory` root
+  — *"doesn't look like it has an OS tree (/usr/ directory is missing). Refusing."* The root must be
+  **OS-tree-shaped** (contain `/usr/`); it is the **grant-mount tree (`/srv`) that stays empty**, and
+  that is what hides siblings. Read "synthetic empty root" as **"synthetic minimal root: `/usr/`
+  present, grant tree empty"** everywhere below.
+- **CHECK 3-priv — PASS.** `--private-users=pick` accepted and functional; sibling-hiding still holds
+  under UID isolation. (M4 additionally asserts the *host-side* mapped UID is non-0 — the userns view
+  of `uid=0` is expected and not by itself proof.)
+- **CHECK 5 — PASS.** `--bind-ro=/proc/self/fd/N` → **`mount(... MS_BIND): Invalid argument`**. The fd
+  number is process-local; in nspawn's own process it is not a valid fd, so the path re-resolves to
+  nothing. Confirms a pinned fd **cannot cross the exec boundary** → the pin→verify→**relocate** step
+  is mandatory (mount the `O_PATH` fd's `/proc/self/fd/N` to a controlled plain path *inside the
+  broker's own process/mount-ns*, then hand nspawn the plain path).
+- **CHECK 4 — satisfied by prior art.** `scripts/boot-vm.sh` already captures serial via `-serial
+  file:` and flushed the final console line across the S6/S7 gates. Re-confirmed at M4.
+
+### nspawn-in-container prerequisites (environment, not design)
+The container oracle needs, and the M1 repro harness must replicate (they hold natively on the real
+Shrek image where gatekeeperd runs under systemd PID1): `/run` as **tmpfs** (else nspawn refuses to
+tear down its propagate dir on overlayfs); `mount --make-rshared /`; and **`--keep-unit
+--register=no`** so nspawn reuses the current cgroup instead of asking an absent system bus for a
+transient scope.
+
+### OPEN — resolve before M2 code
+The plan's fd-pinning step names the **`rustix`** crate for `openat2`. The entire control plane is
+**dependency-free by design** (`Cargo.toml`: "No dependencies by design"; `gatekeeperd` hand-writes
+`SO_PEERCRED` via inline-asm rather than pull even a syscall crate). rustix-vs-hand-roll is a
+supply-chain decision for a **sealed, privileged** binary — flagged for a call before writing M2.
+
 ## Method (unchanged from Phase 1/2/4)
 
 Researcher-before-build (done). Host/container repro before the VM cycle. Empirical VM gate before
-commit. No assistant/tooling references in-tree. Repo stays unpushed. Commit only after M4 is green.
+commit. No third-party tooling attributions in-tree. Repo stays unpushed. Commit only after M4 is green.
 
 ## Spike-only (strip before ship)
 
