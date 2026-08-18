@@ -7,3 +7,7 @@
 *.raw
 *.efi
 *.img
+# Overlay contents staged by build-in-container.sh STAGE 1 (release binaries + installed docs).
+# Generated every build; the tracked source under image/overlay/ is only the systemd unit files.
+/image/overlay/usr/libexec/
+/image/overlay/usr/share/
