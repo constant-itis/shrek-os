@@ -1,0 +1,5 @@
+#!/bin/sh
+# Marker binary shipped by the shrek-extra sysext layer. A SIGNED, valid layer that oniond must
+# OMIT because it is not in the sealed enable-list — so under gate O2 this file must be ABSENT after
+# boot even though the DDI is on the store. Its presence would mean selection leaked.
+echo "shrek-extra layer active (should NOT appear unless enabled in onion-policy)"

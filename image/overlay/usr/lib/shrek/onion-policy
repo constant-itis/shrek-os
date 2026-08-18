@@ -1,0 +1,11 @@
+# Shrek Onion policy — which signed layers belong on THIS machine (docs/phase4-oniond.md).
+#
+# oniond merges ONLY the layers listed here, and ONLY if they also pass the baked signature/verity
+# gate (systemd-sysext --image-policy). A layer present on the store but not listed is
+# "signed-but-omitted"; a listed layer that fails the trust gate is refused. This file is sealed
+# under dm-verity in the image, so the selection itself is trusted — it is never read from the
+# untrusted layer store.
+#
+# Format: `enable <layer-name>` (the DDI's basename without .raw). `#` comments and blanks ignored.
+enable shrek-hello
+enable shrek-conf

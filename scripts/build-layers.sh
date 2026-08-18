@@ -4,9 +4,10 @@
 # mounts it and merges the signed layers onto the sealed base. Cheap to rebuild — this is how we iterate
 # gates L1–L4 without rebuilding the sealed root.
 #
-#   scripts/build-layers.sh good      signed-verity sysext + signed-verity confext  → should MERGE (L1/L2/L4)
-#   scripts/build-layers.sh unsigned  sysext with verity but NO signature           → should be REFUSED (L3a)
-#   scripts/build-layers.sh tamper    signed sysext with a flipped byte (verity fails) → should be REFUSED (L3b)
+#   scripts/build-layers.sh good      signed-verity sysext + signed-verity confext  → should MERGE (L1/L2/L4, O1)
+#   scripts/build-layers.sh select    TWO signed sysext (hello+extra) + signed confext → only ENABLED merge (O2)
+#   scripts/build-layers.sh unsigned  sysext with verity but NO signature           → should be REFUSED (L3a, O3)
+#   scripts/build-layers.sh tamper    signed sysext with a flipped byte (verity fails) → should be REFUSED (L3b, O3)
 #
 # Runs mkosi in an ephemeral --privileged debian:trixie container (loop devices for the DDI + verity);
 # the beepboop host stays untouched. Reuses the throwaway Shrek key from scripts/build-in-container.sh.
@@ -15,7 +16,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 MODE="${1:-good}"
-case "$MODE" in good|unsigned|tamper) ;; *) echo "usage: $0 [good|unsigned|tamper]" >&2; exit 1 ;; esac
+case "$MODE" in good|select|unsigned|tamper) ;; *) echo "usage: $0 [good|select|unsigned|tamper]" >&2; exit 1 ;; esac
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
 
@@ -44,9 +45,16 @@ docker run --rm --privileged \
       mkosi --force $SIGN build
     fi
 
-    # --- confext DDI: always signed (only assembled into the store in good mode) ---
+    # --- confext DDI: always signed (assembled into the store in good + select modes) ---
     cd /work/layers/shrek-conf
     mkosi --force $SIGN build
+
+    # --- shrek-extra sysext DDI: signed SECOND layer, built only for the selection gate (O2). It is
+    # a valid signed layer; oniond must OMIT it because it is not in the sealed enable-list. ---
+    if [ "$MODE" = "select" ]; then
+      cd /work/layers/shrek-extra
+      mkosi --force $SIGN build
+    fi
     cd /work
 
     echo "--- built layer artifacts ---"; ls -l out/layers/
@@ -69,7 +77,10 @@ docker run --rm --privileged \
     # --- assemble the layer store: extensions/ (sysext) + confexts/ (confext, good mode only) ---
     rm -rf out/store-stage; mkdir -p out/store-stage/extensions out/store-stage/confexts
     cp "$HELLO" out/store-stage/extensions/shrek-hello.raw
-    if [ "$MODE" = "good" ]; then
+    if [ "$MODE" = "select" ]; then
+      cp "$(ls out/layers/shrek-extra*.raw | head -1)" out/store-stage/extensions/shrek-extra.raw
+    fi
+    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ]; then
       cp "$(ls out/layers/shrek-conf*.raw | head -1)" out/store-stage/confexts/shrek-conf.raw
     fi
     rm -f out/layer-store.raw
