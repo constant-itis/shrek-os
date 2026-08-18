@@ -120,16 +120,26 @@ MUTABLE POLICY  (per-machine, per-user: the grants the operator actually made)
     per-FILE integrity, NOT set-level integrity — so the load-bearing object is a signed MANIFEST
     of expected {path → verity-digest} carrying a POLICY GENERATION number, and freshness is
     anchored to a TPM NV MONOTONIC COUNTER: every grant/revoke bumps the counter, the manifest is
-    bound to the counter value (authenticated NV index, e.g. HMAC(manifest_root ‖ counter)), and
-    gatekeeperd verifies manifest-against-counter on EVERY policy load — NOT at boot. Grant + anchor
-    update are transactional. TPM-absent ⇒ §8/AS3 documented-degrade (software counter, lower
+    bound to the counter value by a TPM-RESIDENT, NON-EXPORTABLE keyed-hash (or the NV index is
+    write-gated by a TPM policy so ONLY the grant path can update the binding). The manifest is
+    signed by a key of the same custody class — the binding/signing key is NEVER a file on /var,
+    or the offline attacker (ADV-5) re-mints HMAC(old_manifest ‖ current_counter) around the
+    counter and anti-rollback is void. gatekeeperd verifies manifest-against-counter on EVERY
+    policy load — NOT at boot — and ACCEPTS ONLY generation == counter. Grant/revoke updates the
+    pair with FIXED ORDERING: REVOKE = bump-counter-then-write-manifest (the old broader manifest
+    must die instantly); GRANT = write-manifest-then-bump, rolling forward if it observes
+    gen == counter+1. A crash mid-update leaving manifest ≠ counter FAILS CLOSED (agents paused),
+    repaired only through the grant path. Counter writes happen ONLY on grant/revoke, never on
+    load (loads are reads). TPM-absent ⇒ §8/AS3 documented-degrade (software counter, lower
     assurance, no silent claim of a guarantee it can't back).
 
 WRITE PATH  — the grant API is the ONLY mutator of authority, and is itself guarded:
-  - UNREACHABLE from any sandbox at any tier: its socket is never a member of any mount-set or
-    net-set (an invariant, enforced like any other cap — a sandbox cannot even name it).
-  - A grant/revoke REQUIRES operator trusted-path confirmation (the MOK-class attested channel
-    §8/C1 defines), so an injected agent (ADV-9) that merely *asks* cannot self-widen the wall.
+  - UNREACHABLE from any sandbox at any tier: its socket is a PATHNAME socket (never abstract-
+    namespace) that is never a member of any mount-set, and NO sandbox at any tier shares the host
+    network namespace (dedicated netns even under C-net; the tap crosses, abstract sockets do not).
+    Broker-side fds are CLOEXEC. A sandbox cannot even name it.
+  - A grant/revoke REQUIRES operator confirmation over the TRUSTED-PATH channel (§8/TP1), so an
+    injected agent (ADV-9) that merely *asks* — or drives the UI — cannot self-widen the wall.
   - Every grant/revoke is a first-class provenance event (§8/F1), logged with the counter value.
 ```
 
@@ -139,7 +149,9 @@ WRITE PATH  — the grant API is the ONLY mutator of authority, and is itself gu
   adding, or reordering grant files breaks the signed manifest → detected at load. **Rollback**
   — the offline attacker who snapshots the policy dir *and* the anchor while a broad grant exists
   (or before a revocation) and later restores both — is caught because the restored manifest's
-  generation is BELOW the TPM NV counter, which cannot be decremented on-device. *(fs-verity plus
+  generation is BELOW the TPM NV counter (which cannot be decremented on-device) AND the old
+  manifest cannot be re-bound to the current counter because the binding key never leaves the
+  TPM. *(fs-verity plus
   a boot-sealed root alone would MISS this — seal/measure are confidentiality-gated-by-PCR and
   attestation, not freshness. The monotonic counter checked every load is the primitive that
   actually delivers anti-rollback.)*
@@ -176,10 +188,13 @@ being exhaustive forever.
 
 ```
 swampd's Landlock ruleset is generated ALLOW-LIST-FIRST, default-deny.
-  swampd is granted read ONLY to an explicit set of indexable trees (e.g. ~/Projects, ~/Documents,
-  ~/Downloads — configurable, but an ALLOW set). Everything else — including any directory created
-  after the ruleset was built, and every human-only domain — is denied by construction.
-  The human-only domains are NEVER members of the allow set; they cannot be added by config.
+  swampd is granted read ONLY to an explicit set of indexable trees. The DEFAULT allow-set
+  TEMPLATE (e.g. ~/Projects, ~/Documents, ~/Downloads) and the never-indexable exclusion (the
+  human-only domains) are STATIC POLICY (§4). Per-machine additions (e.g. "also index ~/Music")
+  go through the §4 MUTABLE grant path — counter-anchored, trusted-path-gated — NEVER a plain
+  writable config file. Everything else — including any directory created after the ruleset was
+  built, and every human-only domain — is denied by construction.
+  The human-only domains are NEVER members of the allow set; they cannot be added by any path.
 ```
 
 Deny-list examples in architecture.md §5/§6 are **illustrative of the intent** ("agents don't
@@ -190,8 +205,9 @@ actually delivered.
 
 ```
 ⇒ AMENDS architecture.md §5 — restate swampd confinement as default-deny allow-list, not
-  deny-list. The allow set is itself STATIC POLICY (§4): shipped signed, extended only by
-  signed update. AMENDS §6 — the `denied:` example is illustrative; the enforced form is an
+  deny-list. The allow-set TEMPLATE + the human-only exclusion are STATIC POLICY (§4, signed);
+  per-machine additions use the §4 mutable grant path. AMENDS §6 — the `denied:` example is
+  illustrative; the enforced form is an
   allow set. (Agent profiles in §6 keep `denied:` as human-readable intent but COMPILE to a
   default-deny Landlock ruleset — same principle applied to agents, not just swampd.)
 ```
@@ -237,11 +253,16 @@ rename(evil,foo)` before use. `RESOLVE_NO_SYMLINKS` stops the symlink swap but N
 ⇒ gatekeeperd pins the granted-subtree ROOT as an O_PATH directory fd, then resolves every
   component BENEATH that pinned fd (openat2 RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS) and mounts
   FROM the resulting fd — never re-resolving a pathname through the mount namespace.
+  The INITIAL pin of the subtree root is itself a component-wise RESOLVE_NO_SYMLINKS walk from a
+  pinned trusted-ancestor fd — so even the root fd is acquired without a symlink-swap window.
   INVARIANT: a granted mount source has NO attacker-writable parent component — policy dirs and
   mount roots live where only the sealed write path or the owning principal can rename them.
-  Under that invariant the rename race has no writable component to win.
-  (Exact openat2 flag behavior is kernel-version-dependent — verify at implementation; the
-  REQUIREMENT is resolve-beneath-a-pinned-root + non-writable-parents, not any single flag.)
+  Under that invariant the rename race has no writable component to win. Residual (accepted): a
+  grant whose root lies INSIDE another sandbox's writable subtree can suffer cross-grant content
+  poisoning WITHIN that granted authority (not a wall breach — landing A1 still needs a symlink,
+  which the symlink-free walk denies); such overlapping grants are flagged at grant time.
+  (Exact openat2 flag behavior is kernel-version-dependent — verify at implementation, incl. the
+  initial pin; the REQUIREMENT is resolve-beneath-a-pinned-root + non-writable-parents.)
 ```
 
 ```
@@ -280,13 +301,14 @@ insufficient, not resolved-IP alone. (Implementation detail deferred to `update-
 Phase-5 net plumbing; the *requirement* — no raw IP allow-listing for security-critical egress —
 is fixed here.)
 
-**T3 ciphertext blind spot (honest scope).** Placing DLP at the chokepoint stops a workload from
-*disabling* the tripwire; it does NOT let it read *encrypted* egress from a hostile T3 guest. A
-T3 guest owns its own TLS stack — it declines a MITM proxy's cert and tunnels its own TLS to an
-allowed SNI, or SNI-passthrough leaves the (spoofable) SNI rule as the only control. So on
-T3/T-hostile egress — the very case T3 exists for — DLP sees ciphertext/metadata only. Encrypted
-exfil past an allowed host is accepted residual (N8); the wall, not the tripwire, holds the
-catastrophic set.
+**Ciphertext blind spot (honest scope).** Placing DLP at the chokepoint stops a workload from
+*disabling* the tripwire; it does NOT let it read *encrypted* egress from any **non-cooperative**
+workload. Any workload with `C-net` that brings its own TLS stack — hostile code at T0/T2 as much
+as a T3 guest — declines a MITM proxy's cert and tunnels its own TLS to an allowed SNI, or
+SNI-passthrough leaves the (spoofable) SNI rule as the only control. So plaintext inspection
+holds ONLY for cooperating workloads that accept the proxy CA; for any non-cooperative C-net
+workload, DLP sees ciphertext/metadata only. Encrypted exfil past an allowed host is accepted
+residual (N8); the wall, not the tripwire, holds the catastrophic set.
 
 **G1 — the two planes: OS fails OPEN, the wall fails CLOSED.** threat-model §7.7 caught the
 latent inconsistency: architecture.md §9 guarantees the OS survives swampd/agentd being down,
@@ -314,11 +336,16 @@ once, no contradiction. This is the security reading of the critical-failure tes
 gatekeeperd for agent execution means an attacker who can crash-loop it denies the *entire* agent
 plane — a *stronger* denial than the fail-open it replaces. This is accepted for the WALL (a
 denied agent leaks nothing) but is a real AVAILABILITY residual, not "closed." gatekeeperd MUST
-run under a supervised, rate-limited restart contract that recovers from the sealed state (§4)
-without operator intervention; a crash degrades to "agents paused," never "agents unconfined" and
-never "agents permanently dead." Note the §4 interaction: per-load TPM counter checks put TPM
-latency / dictionary-lockout on the grant/verify path — bound it so a remote actor cannot induce
-lockout as a DoS. ADV-12's wall half is closed; its **availability half is MITIGATED** (§10).
+run under a supervised, rate-limited restart contract — **supervised by systemd** (already in the
+TCB; not a bespoke supervisor daemon that would be new privileged surface) — recovering from the
+sealed state (§4) without operator intervention. A crash degrades to "agents paused," never
+"agents unconfined." The one exception is the §4 wedge (a crash mid grant/counter update leaving
+manifest ≠ counter): that is "agents paused pending operator repair through the grant path," not
+silently dead — restart re-loads existing sealed state and mints no grants, so it self-heals every
+case *except* a half-written transaction. Note the §4 interaction: per-load TPM counter checks put
+TPM latency / dictionary-lockout on the grant/verify path — the policy NV index should be
+DA-exempt (TPMA_NV_NO_DA) and `/dev/tpm*` is never in any mount-set, so a host-side actor cannot
+induce lockout as a DoS. ADV-12's wall half is closed; its **availability half is MITIGATED** (§10).
 
 ---
 
@@ -340,18 +367,42 @@ beside Flatpak/OCI with no confinement contract (ADV-6).
 a forced downgrade to a validly-signed, known-vulnerable version (threat-model §6.7).
 
 ```
-⇒ AMENDS base-selection.md — a monotonic security version counter (SVN), anchored in the same
-  TPM NV counter primitive as §4. Boot REFUSES any image below the current SVN floor. TWO rules
-  make this coexist with bootc's A/B safety net instead of bricking it:
+⇒ AMENDS base-selection.md — a monotonic security version counter (SVN) in a SEPARATE TPM NV
+  index of the same primitive class as §4's policy counter (NOT the same index — a policy grant
+  must never bump the image floor). Boot REFUSES any image below the current SVN floor. THREE
+  rules make this coexist with bootc's A/B safety net instead of bricking it:
    (1) The SVN floor advances ONLY when a new slot commits greenboot-HEALTHY — never at install
        or first-boot. So the last-known-good A/B slot is always ≥ floor, and an automatic
        health-check rollback (the thing A/B exists for) always targets an at-or-above-floor image.
        A headless box that fails a staged update rolls back normally; it does not brick.
-   (2) Recovery may repair/re-install but MUST land at ≥ the current SVN — it boots a CURRENT-SVN
+   (2) Ordering: commit the new slot as default FIRST, then bump the floor. A crash between the
+       two is safe (floor still allows the committed slot); the reverse order would briefly strand
+       the not-yet-default new slot below floor.
+   (3) Recovery may repair/re-install but MUST land at ≥ the current SVN — it boots a CURRENT-SVN
        recovery image, never an old one. Evil-maid (ADV-5) HAS physical presence, so
        "human-attested recovery" alone would not stop a physically-present rollback; forbidding
        recovery from lowering the floor is what actually bounds ADV-5's rollback goal. Hence ADV-5
        stays MITIGATED (§10), not closed — the floor is monotonic even under a physical actor.
+  Availability residual (named): once the floor advances, the OLD slot is below floor, so
+  post-commit corruption of the current slot (bitrot / later verity failure) can leave no bootable
+  LOCAL image — recovery then needs current-SVN media/network per rule (3). Bounded, consistent
+  with ADV-5 MITIGATED.
+```
+
+**TP1 — the trusted-path grant channel.** §4's grant API requires "operator trusted-path
+confirmation." That channel is defined HERE (it does not otherwise exist — and MOK/MokManager is
+*pre-boot*, so it cannot be the grant-time channel). Without a real definition, an injected agent
+(ADV-9) driving the UI could complete a grant.
+
+```
+⇒ A grant/revoke is confirmed on a COMPOSITOR-PRIVILEGED surface that no client can occlude,
+  screenshot, or mimic (a secure/attention path the compositor renders, not an ordinary window).
+  It displays the EXACT grant text (agent, paths, hosts) plus a per-request NONCE. Confirmation
+  input is accepted ONLY from a physical-input path that no sandbox, portal-holding process, or
+  RemoteDesktop/input-injection portal can synthesize. The confirmation is logged (§8/F1) with the
+  nonce. An agent may REQUEST a grant; only a human at the trusted path can COMPLETE one.
+  (Wayland specifics — which compositor primitive realizes the unoccludable surface + input-path
+  gating — are deferred to the desktop phase; the REQUIREMENT is fixed here.)
 ```
 
 **B5 — warm-pool reset.** Pooled T2/T3 instances (isolation.md §6/§9) must not leak residual
@@ -398,11 +449,15 @@ what happens when it is absent.
 
 ```
 ⇒ AMENDS base-selection.md — specify PCR sealing for (a) the boot measurement and (b) the §4
-  mutable-policy digest root and (c) the §8/C1 SVN. TPM-ABSENT fallback: dm-verity + Secure Boot
-  still hold BOOT and OFFLINE-ROOT integrity; measured-policy and anti-rollback degrade to a
-  DOCUMENTED lower assurance (fs-verity digest without hardware anchor). Shrek must REFUSE to
-  advertise "sealed"/measured guarantees it cannot back when the TPM is absent — no silent downgrade
-  of a claimed property.
+  mutable-policy digest root and (c) the §8/C1 SVN (a separate NV index from (b)). Anti-rollback
+  leans on the TPM 2.0 property that a newly (re)created NV counter initializes to ≥ the max any
+  counter has ever held — which is what actually defeats destroy-and-recreate; this is
+  conformance-dependent and MUST be live-verified on target TPMs (⚠ VERIFY), and the NV-index
+  owner/policy auth custody must be named (who may create/define the index). TPM-ABSENT fallback:
+  dm-verity + Secure Boot still hold BOOT and OFFLINE-ROOT integrity; measured-policy and
+  anti-rollback degrade to a DOCUMENTED lower assurance (software counter, no hardware anchor).
+  Shrek must REFUSE to advertise "sealed"/measured guarantees it cannot back when the TPM is
+  absent — no silent downgrade of a claimed property.
 ```
 
 ---
@@ -417,7 +472,8 @@ Once approved, patch each target:
 | §4 | architecture.md §1,§3; isolation.md §7; base-selection.md | **Sealed policy plane**: static policy **baked into the bootc image** (per the existing §3 routing rule, not confext); mutable grants fs-verity-sealed + **TPM NV monotonic-counter** freshness checked *every load*; single **grant API** — sandbox-unreachable, trusted-path-gated, audited; enforcers **fail closed on absent static policy** |
 | §5 | architecture.md §5, §6 | swampd (and agent profiles) enforce **default-deny allow-lists**, not deny-lists; allow set is static signed policy |
 | §6 | isolation.md §7, §9 | recheck reads sealed policy; mounts **pin the subtree root & resolve beneath it** (parent-rename race, not just symlink) + non-attacker-writable-parent invariant; trust band integrity-sourced, **fails to T-hostile** on doubt |
-| §7 | architecture.md §9 | **two planes**: availability fails-open, agent-execution fails-**closed**; gatekeeperd **supervised restart** so fail-closed isn't a permanent DoS; DLP at the egress chokepoint (**blind on T3 ciphertext** — accepted) |
+| §7 | architecture.md §9 | **two planes**: availability fails-open, agent-execution fails-**closed**; gatekeeperd **systemd-supervised restart** so fail-closed isn't a permanent DoS; DLP at the egress chokepoint (**blind on any non-cooperative C-net workload's ciphertext** — accepted) |
+| §8/TP1 | (desktop phase) | define the **trusted-path grant channel**: unoccludable compositor surface, exact grant text + nonce, input no sandbox/portal can synthesize; agent requests, human completes |
 | §8/D1 | architecture.md §1 | "trusted native" = signed **and** sandboxed; no unconfined execution path exists |
 | §8/C1 | base-selection.md | monotonic **anti-rollback** SVN (TPM NV counter); floor **advances only on greenboot-healthy commit**; recovery repairs to **≥ current SVN**, never below |
 | §8/A5-disc | architecture.md §6 | scope `discover:false` honestly to A1 bytes+own-metadata; reference leakage is accepted residual |
