@@ -213,6 +213,41 @@ The pre-code gate ran on 2026-08-18 in the oracle. Result, recorded in
 - Re-check the pinned release's `flags.go` defaults (`--platform`, `--directfs`) if the pin is ever
   bumped, since those shifted historically.
 
+## Image seal (implementation)
+
+The pin (`image/supply/gvisor.pin`) is turned into sealed `/usr` content by two pieces wired into the
+existing build harness:
+
+- **`scripts/seal-t2-artifacts.sh`** assembles an mkosi ExtraTree at `image/mkosi.extra.t2/usr/lib/
+  shrek/`: it **re-verifies** the runsc sha256 against the pin (drift-guarded — the hash must also be
+  recorded in `gvisor.pin`) before copying it to `runsc` (0755), then builds `t2-rootfs/` from
+  `busybox-static` with **relative** applet symlinks (absolute links break at the sandbox root). The
+  applet set matches the oracle rootfs so S5 exercises the identical userland.
+- **`image/mkosi.conf.d/30-t2-gvisor.conf`** adds `ExtraTrees=mkosi.extra.t2`, which mkosi merges on
+  top of the base `overlay` tree, landing `runsc` + `t2-rootfs` in the dm-verity `/usr` at exactly the
+  compiled-in prod defaults `t2_plane` reads. No `SHREK_T2_*` override ships — the sealed image drives
+  off the read-only, roothash-authenticated paths, so the constructor has no writable authority source.
+
+`build-in-container.sh` fetches + sha256-verifies the pinned runsc on the host (STAGE 1, cached, never
+`latest`), bind-mounts it into STAGE 2, and runs the seal script before `mkosi build`. The ExtraTree is
+a ~100 MB build artifact and is gitignored (like `out/` and `keys/`).
+
+### Read-only rootfs → writable per-sandbox copy
+
+gVisor's **gofer** creates each bind-mount destination directory *inside the rootfs tree on the host*
+(`mkdir <root.path>/srv/<name>`) during `setupRootFS`, **before** any guest-visible overlay — so
+`runsc --overlay2=…` does not help. Because the sealed rootfs lives on **read-only dm-verity `/usr`**,
+that `mkdir` fails `EROFS`, the gofer aborts, and the Sentry then dies reading the empty mounts pipe:
+`cannot create sandbox: … waiting for sandbox to start: EOF`. The container oracle missed this at first
+because its throwaway rootfs was writable.
+
+Fix: the constructor copies the tiny sealed rootfs (busybox + relative applet symlinks, ~2 MB) into
+tmpfs `/run` per sandbox (`cp -a`, preserving the relative symlinks) and points `root.path` at the
+copy. The copy is remade from the verity-authenticated source each construction (integrity preserved)
+and discarded on teardown; the guest still sees it read-only (`readonly:true`). A verity-lower /
+tmpfs-upper overlay + a warm rootfs pool is the deferred scaling optimization. The oracle now bind-remounts
+its rootfs **read-only** so it exercises this exact path — the fast gate before the ~35-min VM cycle.
+
 ## Decisions (settled) — recorded for the implementation
 
 1. **Platform policy — Option B:** prefer `systrap` on nested/VM hosts (our sealed-VM target); `kvm`

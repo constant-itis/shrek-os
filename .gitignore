@@ -19,3 +19,6 @@
 /image/overlay/usr/lib/shrek/boot-poison
 # Phase 2: the Shrek verity cert is staged from keys/ at build time (a build artifact, not source).
 /image/overlay/usr/lib/verity.d/
+# Phase-5 slice-6: the T2 gVisor ExtraTree (pinned runsc ~100MB + busybox rootfs), assembled at build
+# time by scripts/seal-t2-artifacts.sh and sealed via 30-t2-gvisor.conf. Build artifact, not source.
+/image/mkosi.extra.t2/

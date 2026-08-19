@@ -269,7 +269,7 @@ fn json_escape(s: &str) -> String {
 /// Build the OCI `config.json` for a minimal T2 sandbox: read-only rootfs, the workload argv, the
 /// grant bind-mounts (rbind,ro), and an empty-but-for-grants mount namespace. Network is set by the
 /// runsc `--network=none` flag, not here. Pure over the spec — unit-tested for shape.
-fn build_config_json(spec: &T2Spec, grants: &[GrantMount]) -> String {
+fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path) -> String {
     let args = spec
         .workload
         .iter()
@@ -296,7 +296,7 @@ fn build_config_json(spec: &T2Spec, grants: &[GrantMount]) -> String {
             "\"linux\":{{\"namespaces\":[{{\"type\":\"pid\"}},{{\"type\":\"mount\"}},{{\"type\":\"ipc\"}},{{\"type\":\"uts\"}}]}}}}"
         ),
         args = args,
-        rootfs = json_escape(&spec.rootfs.to_string_lossy()),
+        rootfs = json_escape(&rootfs.to_string_lossy()),
         mounts = mounts
     )
 }
@@ -338,21 +338,56 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&bundle)?;
     std::fs::create_dir_all(&state)?;
-    std::fs::write(bundle.join("config.json"), build_config_json(spec, &grants))?;
+
+    // gVisor's gofer creates each bind-mount DESTINATION dir inside the rootfs tree on the host
+    // (mkdir <root.path>/srv/<name>) as part of `setupRootFS`, BEFORE any guest-visible overlay — so
+    // `--overlay2` does not help. The sealed rootfs is on read-only dm-verity /usr, so that mkdir fails
+    // EROFS and the sandbox never starts ("waiting for sandbox to start: EOF"). Give the gofer a
+    // WRITABLE per-sandbox rootfs: copy the tiny sealed rootfs (busybox + relative applet symlinks,
+    // ~2MB) into tmpfs /run. `cp -a` preserves the RELATIVE symlinks (following them would break
+    // /bin/sh inside the sandbox). The copy is made fresh from the verity-authenticated source each
+    // construction (integrity preserved) and discarded on teardown; the guest still sees it read-only
+    // (config readonly:true). A verity-lower/tmpfs-upper overlay + warm pool is the deferred scaling
+    // optimization (docs §Deferred) — a per-construct copy is right for the minimal T2 floor.
+    let run_rootfs = work.join("rootfs");
+    std::fs::create_dir_all(&run_rootfs)?;
+    match Command::new("cp").arg("-a").arg(format!("{}/.", spec.rootfs.display())).arg(&run_rootfs).status() {
+        Ok(s) if s.success() => {}
+        Ok(s) => return Err(io::Error::new(io::ErrorKind::Other, format!("rootfs copy failed rc={:?}", s.code()))),
+        Err(e) => return Err(io::Error::new(e.kind(), format!("rootfs copy exec failed: {e}"))),
+    }
+
+    std::fs::write(bundle.join("config.json"), build_config_json(spec, &grants, &run_rootfs))?;
 
     let cg = CgroupLeaf::create(&spec.id, spec.mem_max, spec.pids_max)?;
 
+    // Spike-only diagnostic (SHREK_T2_DEBUG=1): make runsc write its Sentry/boot debug log to a
+    // PERSISTENT dir OUTSIDE `work` (teardown removes `work`, so the log would vanish with it) so a
+    // caller — e.g. the sealed-VM S5 gate — can read WHY the sandbox failed to start. Prod never sets
+    // this env, so it adds no flags and no behavior change on the shipped image.
+    let debug_dir = std::env::var_os("SHREK_T2_DEBUG").map(|_| {
+        let d = PathBuf::from(format!("/run/shrek-t2-debug/{}", spec.id));
+        let _ = std::fs::create_dir_all(&d);
+        d
+    });
+
     // Drive runsc directly (no shim, no containerd): `runsc --root <state> --ignore-cgroups
-    // --network=none --platform <p> run --bundle <bundle> <id>`. The child joins the bounded cgroup
-    // leaf in pre_exec (its runsc-forked sandbox+gofer inherit it; --ignore-cgroups keeps runsc from
-    // moving them). `run` = create+start+wait+delete in one; we still tear down state/bundle/cgroup.
+    // --network=none --platform <p> [--debug --debug-log <dir>/] run --bundle <bundle> <id>`. The child
+    // joins the bounded cgroup leaf in pre_exec (its runsc-forked sandbox+gofer inherit it;
+    // --ignore-cgroups keeps runsc from moving them). `run` = create+start+wait+delete in one; we still
+    // tear down state/bundle/cgroup.
     let procs = cg.procs_path();
     let mut cmd = Command::new(&spec.runsc);
     cmd.arg("--root").arg(&state)
         .arg("--ignore-cgroups")
         .arg("--network=none")
-        .arg(format!("--platform={}", spec.platform.flag()))
-        .arg("run")
+        .arg(format!("--platform={}", spec.platform.flag()));
+    if let Some(d) = &debug_dir {
+        // Trailing slash ⇒ runsc treats it as a directory and writes per-subcommand files
+        // (…boot.txt has the Sentry failure). Global flags, so they precede the `run` subcommand.
+        cmd.arg("--debug").arg(format!("--debug-log={}/", d.display()));
+    }
+    cmd.arg("run")
         .arg("--bundle").arg(&bundle)
         .arg(&spec.id);
     unsafe {
@@ -428,7 +463,7 @@ mod tests {
             pids_max: DEFAULT_PIDS_MAX,
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project") }];
-        let j = build_config_json(&spec, &grants);
+        let j = build_config_json(&spec, &grants, &spec.rootfs);
         assert!(j.contains("\"readonly\":true"));
         assert!(j.contains("\"destination\":\"/srv/project\""));
         assert!(j.contains("\"source\":\"/srv/project\""));

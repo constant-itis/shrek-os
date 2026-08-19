@@ -166,4 +166,66 @@ for g in t0-grant-readable t0-vault-landlock-denied t0-seccomp-mount-eperm t0-sy
   printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" && emit "PASS S4-$g" || { emit "FAIL S4-$g"; s4fail=1; }
 done
 [ "$s4fail" = 0 ] && emit "PASS S4 T0-plane VM gate" || emit "FAIL S4 T0-plane VM gate"
+
+# ---- Phase-5 slice-6: GENUINE T2 (gVisor/runsc) on the SEALED image (docs/phase5-slice6-t2.md §S5) ----
+# The oracle (scripts/t2-construct-proof.sh) proves construction against the IDENTICAL release
+# gatekeeperd + PINNED runsc; the VM proves the SEALED artifacts drive off gatekeeperd's compiled-in
+# PROD default paths (/usr/lib/shrek/{runsc,t2-rootfs} on dm-verity /usr — NO SHREK_T2_* override here)
+# AND that platform selection is correct: this VM is NESTED, so systemd-detect-virt reports a VM and
+# the KVM_CREATE_VM probe must fail ⇒ platform=systrap. platform=kvm here would be a policy regression
+# (nested-KVM attack surface). gatekeeperd runs in a fresh systemd-delegated scope so its cgroup-leaf
+# self-management (move-self-to-_daemon, then bound the sandbox leaf) has a base it alone occupies — as S4.
+s5fail=0
+emit "S5-BEGIN Phase-5 slice-6 T2 gVisor sandbox"
+# In-sandbox probe: fixed T2 guest paths (/srv/<grant>); the vault is simply not mounted ⇒ ENOENT. The
+# minimal T2 rootfs has no /usr, so a host path like /usr/libexec/shrek is absent = host-fs isolated;
+# --network=none makes any egress attempt fail.
+T2PROBE='
+[ -r /srv/project/marker ] && echo "SHREK_GATE: PASS gate=s5-grant-readable" || echo "SHREK_GATE: FAIL gate=s5-grant-readable"
+[ -e /srv/vault ] && echo "SHREK_GATE: FAIL gate=s5-vault-absent" || echo "SHREK_GATE: PASS gate=s5-vault-absent"
+[ -e /usr/libexec/shrek ] && echo "SHREK_GATE: FAIL gate=s5-host-fs-isolated" || echo "SHREK_GATE: PASS gate=s5-host-fs-isolated"
+if timeout 5 nc -w 2 1.1.1.1 53 </dev/null >/dev/null 2>&1; then echo "SHREK_GATE: FAIL gate=s5-no-egress"; else echo "SHREK_GATE: PASS gate=s5-no-egress"; fi
+'
+# 2>&1 capture is safe: the T2 construct() path prints NO argv echo (like T0, unlike the nspawn T1
+# path), so the only ^SHREK_GATE: lines are real in-sandbox results; the SANDBOX-DECISION line
+# (construct-at=T2 … platform=…, on stderr) is grep-able from the same combined capture.
+# SHREK_T2_DEBUG=1 (spike-only) makes the T2 constructor emit a runsc Sentry/boot debug log to
+# /run/shrek-t2-debug/s5/ (persistent across the sandbox teardown) so a startup failure is diagnosable
+# on the sealed image where there is no shell. systemd-run --scope runs GK as a direct child, so the
+# env is inherited.
+if command -v systemd-run >/dev/null 2>&1; then
+  OUT=$(SHREK_T2_DEBUG=1 systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T2 --trust T-untrust \
+          --caps C-ro-nosec --profile C-ro-nosec --id s5 --anchor "$SRV" --grant project \
+          -- /bin/sh -c "$T2PROBE" 2>&1)
+else
+  OUT=$(SHREK_T2_DEBUG=1 "$GK" sandbox --tier T2 --trust T-untrust --caps C-ro-nosec --profile C-ro-nosec \
+          --id s5 --anchor "$SRV" --grant project -- /bin/sh -c "$T2PROBE" 2>&1)
+fi
+printf '%s\n' "$OUT"
+printf '%s\n' "$OUT" | grep -q 'construct-at=T2 effective=T2' \
+  && emit "PASS S5-decision genuine-T2-on-sealed-kernel" || { emit "FAIL S5-decision (no construct-at=T2)"; s5fail=1; }
+if printf '%s\n' "$OUT" | grep -q 'platform=systrap'; then
+  emit "PASS S5-platform-systrap (nested VM ⇒ systemd-detect-virt + KVM_CREATE_VM probe chose systrap)"
+else
+  emit "FAIL S5-platform-systrap"; s5fail=1
+fi
+printf '%s\n' "$OUT" | grep -q 'platform=kvm' \
+  && { emit "FAIL S5-picked-nested-KVM (policy regression)"; s5fail=1; } \
+  || emit "PASS S5-did-not-pick-nested-kvm"
+for g in s5-grant-readable s5-vault-absent s5-host-fs-isolated s5-no-egress; do
+  printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" && emit "PASS S5-$g" || { emit "FAIL S5-$g"; s5fail=1; }
+done
+# On failure, surface the runsc Sentry/boot debug log (SHREK_T2_DEBUG) so we can see WHY the sandbox
+# died on the sealed kernel — no shell on the image, so it must come out over the serial console. Kept
+# to error-relevant lines + a short tail so it does not flood the console / blow the boot budget.
+if [ "$s5fail" != 0 ]; then
+  for f in /run/shrek-t2-debug/s5/*; do
+    [ -f "$f" ] || continue
+    emit "S5-DEBUG ==== $f ===="
+    grep -inE 'panic|fatal|error|fail|unsupported|not permitted|denied|refus|cannot|eperm|enosys|lockdown|seccomp|mmap|ptrace|memfd' "$f" 2>/dev/null | tail -40 | sed 's/^/SHREK_GATE: S5-DEBUG /'
+    emit "S5-DEBUG ---- tail ----"
+    tail -20 "$f" | sed 's/^/SHREK_GATE: S5-DEBUG /'
+  done
+fi
+[ "$s5fail" = 0 ] && emit "PASS S5 T2-plane VM gate" || emit "FAIL S5 T2-plane VM gate"
 verdict_done=1

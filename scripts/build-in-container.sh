@@ -59,25 +59,45 @@ fi
 install -d image/overlay/usr/lib/verity.d
 install -m0644 keys/secureboot.crt image/overlay/usr/lib/verity.d/shrek.crt
 
+# Phase-5 slice-6: fetch + sha256-verify the PINNED runsc (image/supply/gvisor.pin) on the host into a
+# cache (never re-downloaded across builds; NEVER 'latest'). Bind-mounted into STAGE 2, where
+# seal-t2-artifacts.sh re-verifies it and seals it + the busybox rootfs under dm-verity /usr. Same
+# pin/cache path as the oracle (scripts/t2-construct-proof.sh).
+GVISOR_SHA256="670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e"
+GVISOR_URL="https://storage.googleapis.com/gvisor/releases/release/20260810.0/x86_64/runsc"
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/shrek"; mkdir -p "$CACHE"
+RUNSC="$CACHE/runsc-20260810.0"
+if [ ! -f "$RUNSC" ] || [ "$(sha256sum "$RUNSC" | awk '{print $1}')" != "$GVISOR_SHA256" ]; then
+  echo "--- fetching pinned runsc (release-20260810.0) ---"
+  curl -fsSL -m 300 -o "$RUNSC" "$GVISOR_URL"
+fi
+[ "$(sha256sum "$RUNSC" | awk '{print $1}')" = "$GVISOR_SHA256" ] || { echo "runsc PIN MISMATCH — aborting build"; exit 1; }
+echo "--- runsc pinned + verified ($GVISOR_SHA256) ---"
+
 echo "=== STAGE 2 (container): mkosi build in throwaway debian:trixie ==="
 # --privileged: mkosi needs loop devices to assemble a disk image. Ephemeral container, host untouched.
 docker run --rm --privileged \
   -v "${REPO_ROOT}:/work" -w /work/image \
   -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" \
+  -v "${RUNSC}:/t2-runsc-verified:ro" \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update
     # Package names verified on trixie at the S2 build: ukify=systemd-ukify, the EFI stub=systemd-boot-efi
     # (image pkg, see mkosi.conf); systemd-repart IS a separate package here (pulled as an mkosi dep).
-    # sbsigntool provides sbsign for the S5 UKI signing (SecureBootSignTool=sbsign).
+    # sbsigntool provides sbsign for the S5 UKI signing (SecureBootSignTool=sbsign). busybox-static =
+    # the T2 sandbox rootfs userland (Phase-5 slice-6 seal), static so it needs no in-rootfs libs.
     apt-get install -y --no-install-recommends \
-      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor
+      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor busybox-static
+    # Phase-5 slice-6: assemble the T2 gVisor artifacts into the mkosi.extra.t2 ExtraTree BEFORE mkosi
+    # runs (30-t2-gvisor.conf seals it into /usr). Re-verifies the pinned runsc + builds the rootfs.
+    bash /work/scripts/seal-t2-artifacts.sh /work/image/mkosi.extra.t2 /t2-runsc-verified
     # S5 key/cert paths supplied here (harness knows the /work mount); SecureBoot=yes lives in config.
     mkosi --force \
       --secure-boot-key /work/keys/secureboot.key \
       --secure-boot-certificate /work/keys/secureboot.crt \
       build
-    chown -R "${HOST_UID}:${HOST_GID}" /work/out
+    chown -R "${HOST_UID}:${HOST_GID}" /work/out /work/image/mkosi.extra.t2
   '
 
 echo "=== done — version ${VERSION} in out/ ==="

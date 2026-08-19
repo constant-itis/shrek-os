@@ -62,6 +62,11 @@ cp /usr/bin/busybox "$ROOTFS/bin/busybox"
 # RELATIVE symlinks (target "busybox") so /bin/sh → /bin/busybox INSIDE the sandbox. `busybox
 # --install -s` would write ABSOLUTE links to /rootfs/bin/busybox, which does not exist inside.
 for a in sh cat ls nc timeout echo test; do ln -sf busybox "$ROOTFS/bin/$a"; done
+# Faithfully reproduce the SEALED condition: on the image the rootfs is on READ-ONLY dm-verity /usr,
+# where gVisor's gofer cannot mkdir bind-mount destinations. Bind + remount-ro so this oracle exercises
+# the same EROFS path the sealed VM does (the construct now uses --overlay2=root:memory to survive it).
+# Without this, a writable /rootfs masks the bug — it slipped past the oracle to the VM once (S5).
+mount --bind "$ROOTFS" "$ROOTFS" && mount -o remount,ro,bind "$ROOTFS" || echo "WARN: could not remount rootfs ro (oracle less faithful)"
 
 # --- Anchor + grant + ungranted vault; a host sentinel to prove the host FS does not leak in. ---
 mkdir -p /srv/project /srv/vault
