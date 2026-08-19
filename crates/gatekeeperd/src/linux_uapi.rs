@@ -357,6 +357,77 @@ pub fn ioctl(fd: RawFd, request: u64, arg: u64) -> io::Result<i64> {
     res(unsafe { sc3(SYS_IOCTL, fd as i64, request as i64, arg as i64) })
 }
 
+/// `struct fsverity_digest` (linux/fsverity.h): the algorithm id, the digest length, then the digest
+/// bytes. The kernel writes all three on `FS_IOC_MEASURE_VERITY`; we oversize `digest` to 64 (SHA-512)
+/// so any supported algorithm fits, and pre-load `digest_size` with that capacity (the kernel returns
+/// `EOVERFLOW` if the real digest is larger than we advertise).
+#[repr(C)]
+pub struct FsverityDigest {
+    pub digest_algorithm: u16,
+    pub digest_size: u16,
+    pub digest: [u8; 64],
+}
+
+/// `FS_IOC_MEASURE_VERITY = _IOWR('f', 134, struct fsverity_digest)` — the flexible array counts as 0
+/// for the size field, so the encoded size is 4. `_IOWR` dir=3, size=4, type='f'(0x66), nr=134(0x86)
+/// ⇒ `(3<<30)|(4<<16)|(0x66<<8)|0x86 = 0xC004_6686`.
+pub const FS_IOC_MEASURE_VERITY: u64 = 0xC004_6686;
+
+/// Read a file's fs-verity measurement: the kernel-maintained `(digest_algorithm, digest)` of the
+/// Merkle root over the file's content. Returns the algorithm id and the exact-length digest, or the
+/// errno (`ENODATA` = the file has no fs-verity enabled, `ENOTTY`/`EOPNOTSUPP` = fs/kernel without
+/// verity) — every one of which the caller treats as "no measurable pin identity" ⇒ fail high. The fd
+/// must be a real readable fd (`O_RDONLY`), not `O_PATH` (ioctls are rejected on `O_PATH` fds).
+pub fn measure_verity(fd: RawFd) -> io::Result<(u16, Vec<u8>)> {
+    let mut d = FsverityDigest { digest_algorithm: 0, digest_size: 64, digest: [0u8; 64] };
+    ioctl(fd, FS_IOC_MEASURE_VERITY, &mut d as *mut FsverityDigest as u64)?;
+    let n = d.digest_size as usize;
+    if n == 0 || n > d.digest.len() {
+        // A digest length outside what the ABI can hold is not a value we trust — fail high.
+        return Err(io::Error::from_raw_os_error(22)); // EINVAL
+    }
+    Ok((d.digest_algorithm, d.digest[..n].to_vec()))
+}
+
+/// `struct fsverity_enable_arg` (linux/fsverity.h) — 128 bytes. Only `version`, `hash_algorithm`, and
+/// `block_size` are set; salt/signature are unused (0). SPIKE-ONLY: used by the fixture helper to turn
+/// on fs-verity for the pin oracle / VM gate, never on the shipped path.
+#[repr(C)]
+pub struct FsverityEnableArg {
+    pub version: u32,
+    pub hash_algorithm: u32,
+    pub block_size: u32,
+    pub salt_size: u32,
+    pub salt_ptr: u64,
+    pub sig_size: u32,
+    pub reserved1: u32,
+    pub sig_ptr: u64,
+    pub reserved2: [u64; 11],
+}
+
+/// `FS_IOC_ENABLE_VERITY = _IOW('f', 133, struct fsverity_enable_arg)` — dir=1, size=128, type='f',
+/// nr=133 ⇒ `(1<<30)|(128<<16)|(0x66<<8)|0x85 = 0x4080_6685`.
+pub const FS_IOC_ENABLE_VERITY: u64 = 0x4080_6685;
+
+/// Turn on fs-verity (SHA-256, 4K blocks) for a file — SPIKE-ONLY fixture helper (the pin oracle / VM
+/// gate creates a real verity inode to measure). The fd must be `O_RDONLY` with no other writers, on a
+/// filesystem that has the verity feature. After this the file is immutable + block-verified.
+pub fn enable_verity(fd: RawFd) -> io::Result<()> {
+    let arg = FsverityEnableArg {
+        version: 1,
+        hash_algorithm: 1, // FS_VERITY_HASH_ALG_SHA256
+        block_size: 4096,
+        salt_size: 0,
+        salt_ptr: 0,
+        sig_size: 0,
+        reserved1: 0,
+        sig_ptr: 0,
+        reserved2: [0; 11],
+    };
+    ioctl(fd, FS_IOC_ENABLE_VERITY, &arg as *const FsverityEnableArg as u64)?;
+    Ok(())
+}
+
 /// `statx` on an already-open fd via AT_EMPTY_PATH, requesting the identity mask (type+ino). Used to
 /// record dev/inode of a pinned fd and re-verify it after the relocate bind.
 pub fn statx_fd(fd: RawFd) -> io::Result<Statx> {

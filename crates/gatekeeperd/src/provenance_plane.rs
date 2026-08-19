@@ -14,10 +14,12 @@
 //! resolve `T-hostile` — the broker never distinguishes "could not measure" from "measured hostile".
 
 use crate::linux_uapi::*;
+use crate::pin_manifest::PinManifest;
 use shrek_policy::{derive_band, Evidence, TrustBand};
 use std::ffi::CString;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::fd::OwnedFd;
 use std::os::fd::RawFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
@@ -43,12 +45,29 @@ const SEALED_ANCHOR: &str = "/usr";
 /// Paths are CANONICAL (measurement uses `RESOLVE_NO_SYMLINKS`, so a symlinked form would not match).
 const CLOSED_WORLD: &[&str] = &["/usr/libexec/shrek/gate-probe"];
 
+/// The sealed static pin-manifest (slice-8, amendment B): a versioned file under the dm-verity `/usr`
+/// root, so it carries §4-static custody (change it ⇒ signed image update). There is deliberately NO
+/// runtime path override — an env/flag-selectable manifest would be the ADV-8 writable-label attack
+/// renamed (point the broker at attacker-authored "policy"). The shipped image ships this file EMPTY
+/// (header only) or absent, so nothing earns `T-pinned` until a real pin lands.
+const PIN_MANIFEST_PATH: &str = "/usr/lib/shrek/pin-manifest";
+
 /// The outcome of measuring an entrypoint: the derived band plus the raw facts, for the audit line.
 pub struct Derivation {
     pub band: TrustBand,
     pub evidence: Evidence,
     pub sealed_root: Option<(u32, u32)>,
     pub entrypoint: Option<String>,
+    /// The measured entrypoint fd, BOUND to a `T-pinned` derivation (slice-8, amendment A). It is the
+    /// single fd the fs-verity digest was measured on, retained so the classification is provably tied
+    /// to THAT object — not re-resolved by path. `None` for every other band.
+    ///
+    /// This slice is CLASSIFICATION-ONLY: a `T-pinned` workload is NOT runnable (a pinned artifact on a
+    /// writable grant has no executable home — grants are `MS_NOEXEC` + Landlock read-only, and this
+    /// slice does not reopen that posture). `sandbox` therefore REFUSES a `T-pinned` construction
+    /// deterministically (`pinned-exec-home-unavailable`); this fd is never executed. It exists to
+    /// demonstrate the pathname-independent binding for the separately-reviewed exec-home slice.
+    pub exec_fd: Option<OwnedFd>,
 }
 
 fn path_cstr(p: &Path) -> io::Result<CString> {
@@ -131,15 +150,161 @@ fn measure(entrypoint: Option<&str>, sealed: Option<(u32, u32)>) -> Evidence {
     Evidence::mvp(entrypoint_sealed, domain_execution_sealed)
 }
 
+/// Load + parse the sealed pin-manifest. `None` on absence (the shipped default ⇒ no pins) OR on ANY
+/// parse error (fail-high: one bad line poisons the whole manifest rather than shipping an optimistic
+/// subset — docs slice-8 §4). A rejected manifest is logged so a malformed sealed policy is diagnosable.
+fn load_manifest() -> Option<PinManifest> {
+    let text = std::fs::read_to_string(PIN_MANIFEST_PATH).ok()?;
+    match PinManifest::parse(&text) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            eprintln!("gatekeeperd/pin: MANIFEST REJECTED (fail-high, no pins): {e}");
+            None
+        }
+    }
+}
+
+/// Open the entrypoint `O_RDONLY` (needed for the verity ioctl AND to carry to `execveat`), TOCTOU-safe
+/// with the same resolve flags as the sealed measurement. This is the single fd that is both measured
+/// and executed for a pin (amendment A) — not an `O_PATH` fd (ioctls are rejected on `O_PATH`).
+fn open_entry_rdonly(p: &Path) -> io::Result<OwnedFd> {
+    let how = OpenHow {
+        flags: O_RDONLY | O_CLOEXEC,
+        mode: 0,
+        resolve: RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+    };
+    openat2(AT_FDCWD as RawFd, path_cstr(p)?.as_c_str(), &how)
+}
+
+/// Measure the fd's fs-verity `(algorithm, digest)` and look the tuple up in the sealed manifest.
+/// Returns `(pinned_digest_match, closed_world)`. Any measurement failure (`ENODATA` = no verity on
+/// the file, unknown algorithm/size) or a manifest miss ⇒ `(false, false)` ⇒ the pin arm contributes
+/// nothing and the band falls high. Split out so the oracle can drive it with an in-memory manifest
+/// and a real verity fd, exercising the production path without a manifest-path override.
+pub fn pin_lookup_fd(fd: RawFd, manifest: &PinManifest) -> (bool, bool) {
+    let (algo, digest) = match measure_verity(fd) {
+        Ok(v) => v,
+        Err(_) => return (false, false),
+    };
+    match manifest.lookup(algo, &digest) {
+        Some(class) => (true, class.is_closed_world()),
+        None => (false, false),
+    }
+}
+
+/// The pin arm: for an absolute entrypoint, load the sealed manifest and, if it has pins, open+measure
+/// the entrypoint and look it up. Returns `(matched, closed_world, fd)` where `fd` is `Some` (the
+/// measured==executed fd) only on a match. No manifest / empty manifest / non-absolute path / open
+/// failure ⇒ `(false, false, None)`.
+fn pin_arm(entrypoint: &Path) -> (bool, bool, Option<OwnedFd>) {
+    if !entrypoint.is_absolute() {
+        return (false, false, None);
+    }
+    let Some(manifest) = load_manifest() else {
+        return (false, false, None);
+    };
+    if manifest.is_empty() {
+        return (false, false, None);
+    }
+    let Ok(fd) = open_entry_rdonly(entrypoint) else {
+        return (false, false, None);
+    };
+    let (matched, closed) = pin_lookup_fd(fd.as_raw_fd(), &manifest);
+    if matched {
+        (true, closed, Some(fd))
+    } else {
+        (false, false, None)
+    }
+}
+
+/// SPIKE-ONLY fixture helper (stripped before ship, with the gate scaffolding): `pin-verity enable
+/// <path>` turns on fs-verity for a fixture file; `pin-verity measure <path>` prints `<algo> <hex>` so
+/// the oracle / VM gate can write the fixture into the sealed pin-manifest. NOT a production verb — the
+/// shipped image has no writable verity fixtures and the real manifest is baked under dm-verity `/usr`.
+pub fn pin_verity_cli(args: &[String]) -> i32 {
+    let (Some(op), Some(path)) = (args.first().map(String::as_str), args.get(1)) else {
+        eprintln!("usage: gatekeeperd pin-verity <enable|measure> <path>");
+        return 2;
+    };
+    let cpath = match path_cstr(Path::new(path)) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("pin-verity: bad path {path}: {e}");
+            return 2;
+        }
+    };
+    let how = OpenHow { flags: O_RDONLY | O_CLOEXEC, mode: 0, resolve: 0 };
+    let fd = match openat2(AT_FDCWD as RawFd, cpath.as_c_str(), &how) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("pin-verity: open {path}: {e}");
+            return 1;
+        }
+    };
+    match op {
+        "enable" => match enable_verity(fd.as_raw_fd()) {
+            Ok(()) => {
+                println!("verity-enabled {path}");
+                0
+            }
+            Err(e) => {
+                eprintln!("pin-verity: enable {path}: {e}");
+                1
+            }
+        },
+        "measure" => match measure_verity(fd.as_raw_fd()) {
+            Ok((algo, digest)) => {
+                let name = match algo {
+                    1 => "sha256",
+                    2 => "sha512",
+                    _ => "unknown",
+                };
+                let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
+                println!("{name} {hex}");
+                0
+            }
+            Err(e) => {
+                eprintln!("pin-verity: measure {path}: {e}");
+                1
+            }
+        },
+        other => {
+            eprintln!("pin-verity: unknown op {other}");
+            2
+        }
+    }
+}
+
 /// Measure the entrypoint and derive its band. `sealed` is the once-computed sealed-root device.
 pub fn derive(entrypoint: Option<&String>, sealed: Option<(u32, u32)>) -> Derivation {
     let ep = entrypoint.map(|s| s.as_str());
-    let evidence = measure(ep, sealed);
+    let mut evidence = measure(ep, sealed);
+
+    // Pin arm (slice-8): a digest match against the sealed manifest earns `T-pinned` when the
+    // entrypoint is NOT on the sealed root. The matched manifest entry's class supplies
+    // `domain_execution_sealed` for the pinned object — the compiled-in `CLOSED_WORLD` path list only
+    // covers sealed-root programs, so a writable-mount pin needs the manifest as the domain authority.
+    // A sealed-root entrypoint is already `T-first` (strongest-first in `derive_band`), so the pin arm
+    // only ever *adds* a weaker positive proof; it can never lower a band.
+    let mut exec_fd = None;
+    if let Some(p) = ep.map(Path::new) {
+        let (matched, closed, fd) = pin_arm(p);
+        if matched {
+            evidence.pinned_digest_match = true;
+            evidence.domain_execution_sealed = evidence.domain_execution_sealed || closed;
+            exec_fd = fd;
+        }
+    }
+
+    let band = derive_band(&evidence);
+    // Carry the measured fd to exec ONLY for a pin-derived band (amendment A). A non-pin band drops it.
+    let exec_fd = if band == TrustBand::Pinned { exec_fd } else { None };
     Derivation {
-        band: derive_band(&evidence),
+        band,
         evidence,
         sealed_root: sealed,
         entrypoint: entrypoint.cloned(),
+        exec_fd,
     }
 }
 
@@ -167,6 +332,27 @@ mod tests {
         let e = measure(Some("bin/tool"), Some((254, 0)));
         assert_eq!(derive_band(&e), TrustBand::Hostile);
         assert!(!e.entrypoint_sealed);
+    }
+
+    #[test]
+    fn plain_file_has_no_verity_so_no_pin() {
+        // A real fd to a NON-fs-verity file: the measurement ioctl errors (ENODATA/ENOTTY), so the pin
+        // arm yields (false, false) — fail high. Exercises the actual `measure_verity` syscall + the
+        // lookup wiring on a live fd without needing a verity filesystem (that end-to-end is the VM
+        // gate). Guards against a measurement error being mistaken for a match.
+        use std::io::Write;
+        let raw = std::env::temp_dir().join(format!("shrek-pin-noverity-{}", std::process::id()));
+        {
+            let mut f = std::fs::File::create(&raw).unwrap();
+            f.write_all(b"not a pinned artifact").unwrap();
+        }
+        // Canonicalise so RESOLVE_NO_SYMLINKS (in open_entry_rdonly) can't trip on a symlinked tmpdir.
+        let path = std::fs::canonicalize(&raw).unwrap();
+        let fd = open_entry_rdonly(&path).unwrap();
+        assert!(measure_verity(fd.as_raw_fd()).is_err(), "a non-verity file must not measure");
+        let manifest = crate::pin_manifest::PinManifest::parse("shrek-pin-manifest v1\n").unwrap();
+        assert_eq!(pin_lookup_fd(fd.as_raw_fd(), &manifest), (false, false));
+        let _ = std::fs::remove_file(&raw);
     }
 
     #[test]

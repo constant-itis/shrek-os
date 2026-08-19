@@ -351,13 +351,15 @@ pub fn cli(args: &[String]) -> i32 {
         let der = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
         let trust = der.band;
         eprintln!(
-            "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} sealed_root={:?}",
+            "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} pinned={} exec_fd_bound={} sealed_root={:?}",
             trust.label(),
             proposed.label(),
             trust == proposed,
             der.entrypoint,
             der.evidence.entrypoint_sealed,
             der.evidence.domain_execution_sealed,
+            der.evidence.pinned_digest_match,
+            der.exec_fd.is_some(), // the measured fd is bound to a T-pinned derivation (slice-8)
             der.sealed_root
         );
         match recheck(requested, trust, caps, profile, egress_name) {
@@ -369,6 +371,18 @@ pub fn cli(args: &[String]) -> i32 {
                 return code;
             }
             Decision::Construct { effective, egress: e } => {
+                // slice-8 is CLASSIFICATION-ONLY: a `T-pinned` band is correctly derived, but a pinned
+                // artifact has NO executable home (a writable grant is `MS_NOEXEC` + Landlock read-only,
+                // and this slice deliberately does NOT reopen that posture). So a `T-pinned`
+                // construction REFUSES deterministically at EVERY tier — no downward (T2) or upward
+                // (T1 fall-up) constructor workaround — pending a separately-reviewed exec-home slice.
+                if trust == TrustBand::Pinned {
+                    eprintln!(
+                        "SANDBOX-DECISION refused reason=pinned-exec-home-unavailable effective={} trust={} caps={} profile={} exec_fd_bound={}",
+                        effective.label(), trust.label(), caps.label(), profile.label(), der.exec_fd.is_some()
+                    );
+                    return 15;
+                }
                 egress = e;
                 let egr = match e { Egress::Profile(p) => p.name, Egress::None => "none" };
                 // Slice-6: an effective==T2 cell builds at genuine T2 via gVisor/runsc. No fall-DOWN:

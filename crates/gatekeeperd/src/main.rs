@@ -391,6 +391,11 @@ fn main() {
     if argv.first().map(String::as_str) == Some("sandbox") {
         std::process::exit(gatekeeperd::sandbox::cli(&argv[1..]));
     }
+    // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Stripped before
+    // ship with the rest of the gate scaffolding.
+    if argv.first().map(String::as_str) == Some("pin-verity") {
+        std::process::exit(gatekeeperd::provenance_plane::pin_verity_cli(&argv[1..]));
+    }
 
     let sock = env_or("SHREK_BROKER_SOCK", "/run/shrek-gk.sock");
     let store = env_or("SHREK_ONION_STORE", "/run/shrek-store");
