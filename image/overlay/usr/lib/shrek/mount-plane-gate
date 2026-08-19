@@ -131,4 +131,39 @@ crc=$?
 [ "$crc" != 0 ] && emit "PASS S3-cnet-failclosed C-net did not egress w/o resolver (rc=$crc)" || { emit "FAIL S3-cnet-failclosed (constructed unexpectedly rc=0)"; s3fail=1; }
 
 [ "$s3fail" = 0 ] && emit "PASS S3 egress-plane VM gate" || emit "FAIL S3 egress-plane VM gate"
+
+# ---- Phase-5 slice-4: GENUINE T0 (Landlock+seccomp+ns+cgroup) on the SEALED image ----
+# The oracle (scripts/t0-construct-proof.sh) proves construction against the IDENTICAL release binary;
+# the VM proves Landlock actually ENFORCES on the sealed kernel + dm-verity /usr — the one thing a
+# container's kernel cannot guarantee. Landlock deliberately denies the sandbox its own /proc + /sys,
+# so every probe is in-band. gatekeeperd is launched in a fresh systemd-delegated scope so its cgroup
+# self-management (move-self-to-_daemon, then bound the sandbox leaf) has a base it alone occupies.
+s4fail=0
+emit "S4-BEGIN Phase-5 slice-4 T0 process sandbox"
+# T0 has NO mount remap (unlike T1's bind to /srv guest-prefix): the grant is Landlock-allowed at its
+# REAL anchor path, so the probe reads "$SRV/project", not "/srv/project". $SRV is expanded by THIS
+# shell into the probe string (double-quoted); the sandbox's own $m/$rc/$e are escaped to survive.
+T0PROBE="
+m=\$(cat $SRV/project/marker 2>/dev/null); [ \"\$m\" = PROJECT ] && echo \"SHREK_GATE: PASS gate=t0-grant-readable\" || echo \"SHREK_GATE: FAIL gate=t0-grant-readable m=\$m\"
+if cat $SRV/vault/marker 2>&1 | grep -qiE \"permission denied|denied|not permitted\"; then echo \"SHREK_GATE: PASS gate=t0-vault-landlock-denied\"; else echo \"SHREK_GATE: FAIL gate=t0-vault-landlock-denied\"; fi
+e=\$(mount -t tmpfs none /mnt 2>&1); rc=\$?; if [ \$rc -ne 0 ] && echo \"\$e\" | grep -qiE \"not permitted|permission denied\"; then echo \"SHREK_GATE: PASS gate=t0-seccomp-mount-eperm\"; else echo \"SHREK_GATE: FAIL gate=t0-seccomp-mount rc=\$rc\"; fi
+if ls /sys/class/net 2>&1 | grep -qiE \"permission denied|denied\"; then echo \"SHREK_GATE: PASS gate=t0-sys-landlock-denied\"; else echo \"SHREK_GATE: FAIL gate=t0-sys-landlock-denied\"; fi
+"
+# 2>&1 capture is safe here: the T0 path prints NO argv echo (unlike the nspawn path), so the only
+# SHREK_GATE lines are real in-sandbox results, and the construct-at=T0 decision line is grep-able.
+if command -v systemd-run >/dev/null 2>&1; then
+  OUT=$(systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T0 --trust T-first \
+          --caps C-ro-nosec --profile C-ro-nosec --id s4 --anchor "$SRV" --grant project \
+          -- /usr/bin/sh -c "$T0PROBE" 2>&1)
+else
+  OUT=$("$GK" sandbox --tier T0 --trust T-first --caps C-ro-nosec --profile C-ro-nosec \
+          --id s4 --anchor "$SRV" --grant project -- /usr/bin/sh -c "$T0PROBE" 2>&1)
+fi
+printf '%s\n' "$OUT"
+printf '%s\n' "$OUT" | grep -q 'construct-at=T0 effective=T0' \
+  && emit "PASS S4-decision genuine-T0-on-sealed-kernel" || { emit "FAIL S4-decision (no construct-at=T0)"; s4fail=1; }
+for g in t0-grant-readable t0-vault-landlock-denied t0-seccomp-mount-eperm t0-sys-landlock-denied; do
+  printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" && emit "PASS S4-$g" || { emit "FAIL S4-$g"; s4fail=1; }
+done
+[ "$s4fail" = 0 ] && emit "PASS S4 T0-plane VM gate" || emit "FAIL S4 T0-plane VM gate"
 verdict_done=1

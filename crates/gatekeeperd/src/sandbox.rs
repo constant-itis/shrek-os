@@ -23,6 +23,7 @@
 
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
 use crate::net_plane;
+use crate::proc_plane::{self, T0Spec, DEFAULT_MEM_MAX, DEFAULT_PIDS_MAX};
 use shrek_policy::egress::EgressProfile;
 use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
 use std::io;
@@ -341,11 +342,49 @@ pub fn cli(args: &[String]) -> i32 {
             Decision::Construct { effective, egress: e } => {
                 egress = e;
                 let egr = match e { Egress::Profile(p) => p.name, Egress::None => "none" };
-                eprintln!(
-                    "SANDBOX-DECISION cleared construct-at=T1 effective={} requested={} trust={} caps={} profile={} egress={egr}",
-                    effective.label(), requested.label(), trust.label(), caps.label(), profile.label()
-                );
-                // fall through to construction
+                // Slice-4: an effective==T0 cell now builds at GENUINE T0 (Landlock+seccomp+ns+cgroup).
+                // Fall-up to the stronger T1 wall is permitted ONLY here, from a clean Landlock
+                // preflight — a legal upward escalation, never a downgrade, and loudly audited. Any
+                // failure once proc_plane::construct starts fails closed (no fall-up mid-build).
+                if effective == Tier::T0 {
+                    match proc_plane::preflight() {
+                        proc_plane::Preflight::Ready { abi } => {
+                            eprintln!(
+                                "SANDBOX-DECISION cleared construct-at=T0 effective=T0 requested={} trust={} caps={} profile={} landlock-abi={abi}",
+                                requested.label(), trust.label(), caps.label(), profile.label()
+                            );
+                            let t0 = T0Spec {
+                                id: id.clone(),
+                                anchor: anchor.clone(),
+                                grants: grants.clone(),
+                                workload: workload.clone(),
+                                abi,
+                                mem_max: DEFAULT_MEM_MAX,
+                                pids_max: DEFAULT_PIDS_MAX,
+                            };
+                            return match proc_plane::construct(&t0) {
+                                Ok(code) => code,
+                                Err(e) => {
+                                    eprintln!("gatekeeperd/proc_plane: FAIL construction: {e}");
+                                    3
+                                }
+                            };
+                        }
+                        proc_plane::Preflight::Unavailable(why) => {
+                            eprintln!(
+                                "SANDBOX-DECISION cleared construct-at=T1 effective=T0 fell-up reason=landlock-unavailable ({why}) requested={} trust={} caps={} profile={} egress={egr}",
+                                requested.label(), trust.label(), caps.label(), profile.label()
+                            );
+                            // fall through: build the same cell at the stronger T1 nspawn wall.
+                        }
+                    }
+                } else {
+                    eprintln!(
+                        "SANDBOX-DECISION cleared construct-at=T1 effective={} requested={} trust={} caps={} profile={} egress={egr}",
+                        effective.label(), requested.label(), trust.label(), caps.label(), profile.label()
+                    );
+                }
+                // fall through to T1 construction (effective==T1, or a T0 cell that fell up)
             }
         }
     }

@@ -19,16 +19,78 @@ use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 // ---- syscall numbers (x86-64) ----
+pub const SYS_FORK: i64 = 57;
 pub const SYS_GETSOCKOPT: i64 = 55;
+pub const SYS_PRCTL: i64 = 157;
 pub const SYS_MOUNT: i64 = 165;
 pub const SYS_UMOUNT2: i64 = 166;
 pub const SYS_UNSHARE: i64 = 272;
+pub const SYS_SECCOMP: i64 = 317;
 pub const SYS_STATX: i64 = 332;
+pub const SYS_CLOSE_RANGE: i64 = 436;
 pub const SYS_OPENAT2: i64 = 437;
+// Landlock (Linux 5.13+). Verified against asm/unistd_64.h.
+pub const SYS_LANDLOCK_CREATE_RULESET: i64 = 444;
+pub const SYS_LANDLOCK_ADD_RULE: i64 = 445;
+pub const SYS_LANDLOCK_RESTRICT_SELF: i64 = 446;
 
 // ---- unshare / mount-propagation ----
 pub const CLONE_NEWNS: i64 = 0x00020000;
 pub const MS_PRIVATE: u64 = 1 << 18;
+// Namespace kinds unshared by the T0 process constructor (proc_plane). CLONE_NEWUSER puts the
+// CALLER into the new user ns immediately (so it must write uid_map before it can act as root
+// inside); CLONE_NEWPID does NOT — only the caller's first CHILD becomes PID 1 there, which is why
+// the constructor forks after unsharing.
+pub const CLONE_NEWCGROUP: i64 = 0x02000000;
+pub const CLONE_NEWUTS: i64 = 0x04000000;
+pub const CLONE_NEWIPC: i64 = 0x08000000;
+pub const CLONE_NEWUSER: i64 = 0x10000000;
+pub const CLONE_NEWPID: i64 = 0x20000000;
+pub const CLONE_NEWNET: i64 = 0x40000000;
+
+// ---- prctl (linux/prctl.h) ----
+pub const PR_SET_NO_NEW_PRIVS: i64 = 38;
+
+// ---- Landlock uapi (linux/landlock.h) ----
+// Passing attr=NULL,size=0,flags=VERSION returns the highest supported ABI version (>=1); the
+// filesystem access-right bits below are stable 1<<n in ABI-introduction order (v1: bits 0..=12,
+// v2: REFER, v3: TRUNCATE, v5: IOCTL_DEV). handled_access_fs must be masked to the probed ABI.
+pub const LANDLOCK_CREATE_RULESET_VERSION: u64 = 1 << 0;
+pub const LANDLOCK_RULE_PATH_BENEATH: i64 = 1;
+pub const LANDLOCK_ACCESS_FS_EXECUTE: u64 = 1 << 0;
+pub const LANDLOCK_ACCESS_FS_WRITE_FILE: u64 = 1 << 1;
+pub const LANDLOCK_ACCESS_FS_READ_FILE: u64 = 1 << 2;
+pub const LANDLOCK_ACCESS_FS_READ_DIR: u64 = 1 << 3;
+pub const LANDLOCK_ACCESS_FS_REMOVE_DIR: u64 = 1 << 4;
+pub const LANDLOCK_ACCESS_FS_REMOVE_FILE: u64 = 1 << 5;
+pub const LANDLOCK_ACCESS_FS_MAKE_CHAR: u64 = 1 << 6;
+pub const LANDLOCK_ACCESS_FS_MAKE_DIR: u64 = 1 << 7;
+pub const LANDLOCK_ACCESS_FS_MAKE_REG: u64 = 1 << 8;
+pub const LANDLOCK_ACCESS_FS_MAKE_SOCK: u64 = 1 << 9;
+pub const LANDLOCK_ACCESS_FS_MAKE_FIFO: u64 = 1 << 10;
+pub const LANDLOCK_ACCESS_FS_MAKE_BLOCK: u64 = 1 << 11;
+pub const LANDLOCK_ACCESS_FS_MAKE_SYM: u64 = 1 << 12;
+pub const LANDLOCK_ACCESS_FS_REFER: u64 = 1 << 13; // ABI v2
+pub const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14; // ABI v3
+pub const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15; // ABI v5
+
+// ---- seccomp uapi (linux/seccomp.h, linux/filter.h, linux/audit.h) ----
+pub const SECCOMP_SET_MODE_FILTER: i64 = 1;
+pub const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
+pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+pub const AUDIT_ARCH_X86_64: u32 = 0xC000_003E;
+// Byte offsets into `struct seccomp_data` for a BPF_LD|BPF_W|BPF_ABS load.
+pub const SECCOMP_DATA_NR_OFFSET: u32 = 0;
+pub const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
+// classic-BPF instruction encodings (linux/bpf_common.h) used to build the filter.
+pub const BPF_LD: u16 = 0x00;
+pub const BPF_W: u16 = 0x00;
+pub const BPF_ABS: u16 = 0x20;
+pub const BPF_JMP: u16 = 0x05;
+pub const BPF_JEQ: u16 = 0x10;
+pub const BPF_K: u16 = 0x00;
+pub const BPF_RET: u16 = 0x06;
 
 // ---- file-type bits (statx st_mode) ----
 pub const S_IFMT: u32 = 0o170000;
@@ -133,6 +195,46 @@ pub struct Ucred {
     pub gid: u32,
 }
 
+/// `struct landlock_ruleset_attr` (linux/landlock.h) — the set of access classes the ruleset
+/// *handles* (everything handled-but-not-explicitly-allowed is denied). Three u64 today; older
+/// kernels knew fewer fields, so the wrapper passes the size we fill and leaves the tail zeroed
+/// (a kernel that predates a field rejects a NON-zero unknown tail, never a zero one).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct LandlockRulesetAttr {
+    pub handled_access_fs: u64,
+    pub handled_access_net: u64,
+    pub scoped: u64,
+}
+
+/// `struct landlock_path_beneath_attr` (linux/landlock.h) — **PACKED**: u64 immediately followed by
+/// s32, 12 bytes, NO alignment padding. `#[repr(C, packed)]` is load-bearing — a natural 16-byte
+/// layout would feed the kernel a garbage `parent_fd` and silently mis-scope every rule.
+#[repr(C, packed)]
+#[derive(Default, Clone, Copy)]
+pub struct LandlockPathBeneathAttr {
+    pub allowed_access: u64,
+    pub parent_fd: i32,
+}
+
+/// `struct sock_filter` (linux/filter.h) — one classic-BPF instruction, 8 bytes.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct SockFilter {
+    pub code: u16,
+    pub jt: u8,
+    pub jf: u8,
+    pub k: u32,
+}
+
+/// `struct sock_fprog` (linux/filter.h) — a BPF program: count + pointer. 16 bytes on x86-64 (the
+/// u16 `len` is followed by 6 bytes of padding before the 8-byte-aligned pointer).
+#[repr(C)]
+pub struct SockFprog {
+    pub len: u16,
+    pub filter: *const SockFilter,
+}
+
 // -------------------------------------------------------------------------------------------------
 // Raw syscall primitives (x86-64). rax=nr; args rdi,rsi,rdx,r10,r8; rcx/r11 clobbered; ret in rax.
 // No `nomem`: the implied memory clobber is REQUIRED — several of these write through pointer args
@@ -140,11 +242,30 @@ pub struct Ucred {
 // -------------------------------------------------------------------------------------------------
 
 #[inline]
+unsafe fn sc0(n: i64) -> i64 {
+    let ret: i64;
+    core::arch::asm!("syscall",
+        inlateout("rax") n => ret,
+        lateout("rcx") _, lateout("r11") _, options(nostack));
+    ret
+}
+
+#[inline]
 unsafe fn sc1(n: i64, a1: i64) -> i64 {
     let ret: i64;
     core::arch::asm!("syscall",
         inlateout("rax") n => ret,
         in("rdi") a1,
+        lateout("rcx") _, lateout("r11") _, options(nostack));
+    ret
+}
+
+#[inline]
+unsafe fn sc3(n: i64, a1: i64, a2: i64, a3: i64) -> i64 {
+    let ret: i64;
+    core::arch::asm!("syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a1, in("rsi") a2, in("rdx") a3,
         lateout("rcx") _, lateout("r11") _, options(nostack));
     ret
 }
@@ -285,6 +406,84 @@ pub fn peer_cred(fd: RawFd) -> io::Result<Ucred> {
     Ok(cred)
 }
 
+/// `fork()`. Returns the child pid in the parent, 0 in the child. SAFETY: the caller MUST be
+/// single-threaded (the whole control plane is synchronous — no tokio/rayon), so the child owns a
+/// faithful copy of the one running thread and may use `std` normally between fork and execve.
+pub unsafe fn fork() -> io::Result<i64> {
+    res(sc0(SYS_FORK))
+}
+
+/// `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)` — the mandatory precondition for an unprivileged
+/// seccomp filter AND for `landlock_restrict_self` without CAP_SYS_ADMIN; also stops a setuid binary
+/// from ever regaining privilege inside the sandbox. Set once, irreversible, inherited across execve.
+pub fn set_no_new_privs() -> io::Result<()> {
+    let ret = unsafe { sc5(SYS_PRCTL, PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    res(ret).map(|_| ())
+}
+
+/// `close_range(first, last, flags)` — scrub inherited file descriptors. Landlock only governs the
+/// `open(2)` that happens AFTER `restrict_self`; a descriptor inherited from the privileged parent
+/// (e.g. an O_PATH dir fd) is exempt and would be an escape hatch, so the constructor closes
+/// everything above stderr before installing the walls. ENOSYS ⇒ caller falls back to a manual loop.
+pub fn close_range(first: u32, last: u32, flags: u32) -> io::Result<()> {
+    let ret = unsafe { sc3(SYS_CLOSE_RANGE, first as i64, last as i64, flags as i64) };
+    res(ret).map(|_| ())
+}
+
+/// `landlock_create_ruleset(NULL, 0, LANDLOCK_CREATE_RULESET_VERSION)` — probe the highest supported
+/// ABI version (>=1). ENOSYS = kernel has no Landlock; EOPNOTSUPP = compiled in but disabled at boot.
+/// Either way the caller decides (clean-preflight fall-up to T1); this is a pure query, no state.
+pub fn landlock_abi_version() -> io::Result<i64> {
+    let ret = unsafe { sc3(SYS_LANDLOCK_CREATE_RULESET, 0, 0, LANDLOCK_CREATE_RULESET_VERSION as i64) };
+    res(ret)
+}
+
+/// `landlock_create_ruleset(&attr, sizeof attr, 0)` — create an empty ruleset handling the given
+/// access classes; returns the ruleset fd. Rules are added beneath it, then it is enforced.
+pub fn landlock_create_ruleset(attr: &LandlockRulesetAttr) -> io::Result<OwnedFd> {
+    let ret = unsafe {
+        sc3(
+            SYS_LANDLOCK_CREATE_RULESET,
+            attr as *const LandlockRulesetAttr as i64,
+            core::mem::size_of::<LandlockRulesetAttr>() as i64,
+            0,
+        )
+    };
+    let fd = res(ret)? as RawFd;
+    // Safety: a successful create yields a fresh, owned ruleset fd.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `landlock_add_rule(ruleset_fd, LANDLOCK_RULE_PATH_BENEATH, &attr, 0)` — grant `allowed_access`
+/// on everything beneath `attr.parent_fd` (an O_PATH fd to the allowed directory/file).
+pub fn landlock_add_path_beneath(ruleset_fd: RawFd, attr: &LandlockPathBeneathAttr) -> io::Result<()> {
+    let ret = unsafe {
+        sc4(
+            SYS_LANDLOCK_ADD_RULE,
+            ruleset_fd as i64,
+            LANDLOCK_RULE_PATH_BENEATH,
+            attr as *const LandlockPathBeneathAttr as i64,
+            0,
+        )
+    };
+    res(ret).map(|_| ())
+}
+
+/// `landlock_restrict_self(ruleset_fd, 0)` — enforce the ruleset on the calling thread and all its
+/// future children/execs. Irreversible. Requires no_new_privs first (unless CAP_SYS_ADMIN).
+pub fn landlock_restrict_self(ruleset_fd: RawFd) -> io::Result<()> {
+    let ret = unsafe { sc2(SYS_LANDLOCK_RESTRICT_SELF, ruleset_fd as i64, 0) };
+    res(ret).map(|_| ())
+}
+
+/// `seccomp(SECCOMP_SET_MODE_FILTER, 0, &prog)` — install a classic-BPF syscall filter on the
+/// calling thread (inherited across execve). Requires no_new_privs first. The program is the curated
+/// deny-list built in proc_plane; it returns before any denied syscall executes.
+pub fn seccomp_set_mode_filter(prog: &SockFprog) -> io::Result<()> {
+    let ret = unsafe { sc3(SYS_SECCOMP, SECCOMP_SET_MODE_FILTER, 0, prog as *const SockFprog as i64) };
+    res(ret).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -297,6 +496,15 @@ mod tests {
         assert_eq!(size_of::<Statx>(), 256, "struct statx is 256 bytes");
         assert_eq!(size_of::<Ucred>(), 12, "struct ucred is 12 bytes, no padding");
         assert_eq!(align_of::<Statx>(), 8);
+        // Landlock ABI structs. The packed path_beneath is the load-bearing one: 8+4 = 12, and it
+        // MUST NOT round up to 16, or parent_fd lands at the wrong offset and every rule mis-scopes.
+        assert_eq!(size_of::<LandlockRulesetAttr>(), 24, "3×u64");
+        assert_eq!(size_of::<LandlockPathBeneathAttr>(), 12, "packed u64+s32 — no padding");
+        assert_eq!(offset_of!(LandlockPathBeneathAttr, allowed_access), 0);
+        assert_eq!(offset_of!(LandlockPathBeneathAttr, parent_fd), 8);
+        // seccomp ABI structs.
+        assert_eq!(size_of::<SockFilter>(), 8, "one classic-BPF insn");
+        assert_eq!(offset_of!(SockFilter, k), 4);
     }
 
     #[test]
