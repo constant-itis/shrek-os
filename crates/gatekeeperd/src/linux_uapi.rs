@@ -19,6 +19,7 @@ use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 // ---- syscall numbers (x86-64) ----
+pub const SYS_IOCTL: i64 = 16;
 pub const SYS_FORK: i64 = 57;
 pub const SYS_GETSOCKOPT: i64 = 55;
 pub const SYS_PRCTL: i64 = 157;
@@ -98,6 +99,7 @@ pub const S_IFDIR: u32 = 0o040000;
 
 // ---- open flags (subset used) ----
 pub const O_RDONLY: u64 = 0;
+pub const O_RDWR: u64 = 0o2;
 pub const O_CLOEXEC: u64 = 0o2000000;
 pub const O_DIRECTORY: u64 = 0o200000;
 pub const O_PATH: u64 = 0o10000000;
@@ -109,6 +111,13 @@ pub const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 pub const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 pub const RESOLVE_BENEATH: u64 = 0x08;
 pub const RESOLVE_IN_ROOT: u64 = 0x10;
+
+// ---- KVM ioctls (linux/kvm.h) — used ONLY to probe whether the KVM platform is genuinely usable
+// (device present is not enough; a nested host often has /dev/kvm but cannot create a VM). Request
+// codes are stable ABI: KVM_GET_API_VERSION = _IO(0xAE,0x00), KVM_CREATE_VM = _IO(0xAE,0x01). ----
+pub const KVM_GET_API_VERSION: u64 = 0xAE00;
+pub const KVM_CREATE_VM: u64 = 0xAE01;
+pub const KVM_API_VERSION: i64 = 12; // the kernel contract: applications must refuse any other value
 
 // ---- *at() dirfd + flags ----
 pub const AT_FDCWD: i64 = -100;
@@ -330,6 +339,21 @@ pub fn openat2(dirfd: RawFd, path: &CStr, how: &OpenHow) -> io::Result<OwnedFd> 
     let fd = res(ret)? as RawFd;
     // Safety: a successful openat2 yields a fresh, owned file descriptor.
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `open(path, O_RDWR | O_CLOEXEC)` via openat2 from AT_FDCWD, no resolve restrictions (the path is a
+/// trusted absolute device node, e.g. `/dev/kvm`, not attacker-influenced). Fails closed on any errno
+/// (ENOENT if the node is absent, EACCES if unreadable) — the caller treats that as "KVM unusable".
+pub fn open_rdwr(path: &CStr) -> io::Result<OwnedFd> {
+    let how = OpenHow { flags: O_RDWR | O_CLOEXEC, resolve: 0, ..Default::default() };
+    openat2(AT_FDCWD as RawFd, path, &how)
+}
+
+/// `ioctl(fd, request, arg)`. Thin raw wrapper — the KVM usability probe is the only caller, issuing
+/// KVM_GET_API_VERSION (arg ignored) and KVM_CREATE_VM (arg = machine type 0). Returns the raw ioctl
+/// result (an api-version int, or a new VM fd) or the errno.
+pub fn ioctl(fd: RawFd, request: u64, arg: u64) -> io::Result<i64> {
+    res(unsafe { sc3(SYS_IOCTL, fd as i64, request as i64, arg as i64) })
 }
 
 /// `statx` on an already-open fd via AT_EMPTY_PATH, requesting the identity mask (type+ino). Used to

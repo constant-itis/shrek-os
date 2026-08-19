@@ -24,6 +24,7 @@
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
 use crate::net_plane;
 use crate::proc_plane::{self, T0Spec, DEFAULT_MEM_MAX, DEFAULT_PIDS_MAX};
+use crate::t2_plane::{self, T2Spec};
 use shrek_policy::egress::EgressProfile;
 use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
 use std::io;
@@ -247,12 +248,21 @@ fn recheck(
         return Decision::Refuse { code: 11, reason: "caps-exceed-profile".into() };
     }
     let effective = requested; // >= bound; honor any upward escalation agentd applied
-    // (c) Constructibility. Only the T1 constructor exists; anything ≥ T2 FAILS CLOSED — never
-    // silently downgraded to T1 (security-model.md §7: no unconfined fallback, ever).
-    if effective >= Tier::T2 {
+    // (c) Constructibility. T0 (slice-4), T1 (slice-1/3), and T2 (slice-6, gVisor) build; T3 has no
+    // constructor yet and FAILS CLOSED — never silently downgraded (security-model.md §7). T2 never
+    // falls DOWN to T1: it is the floor for T-untrust/T-hostile.
+    if effective >= Tier::T3 {
         return Decision::Refuse {
             code: 12,
-            reason: format!("no-constructor-{} (slice-3)", effective.label()),
+            reason: format!("no-constructor-{} (slice-6: T3 pending)", effective.label()),
+        };
+    }
+    // T2 serves the no-egress caps only. A C-net cell at T2 needs the gVisor egress plane (deferred),
+    // so it fails closed here — NOT constructed via the T1 egress plane below (wrong wall).
+    if effective == Tier::T2 && matches!(caps, CapsProfile::Net) {
+        return Decision::Refuse {
+            code: 12,
+            reason: "no-gvisor-egress-plane-for-C-net-at-T2 (slice-6)".into(),
         };
     }
     // (d) Egress realization (slice-3). A ≤T1 C-net cell is now constructible IFF it names a SEALED
@@ -342,6 +352,34 @@ pub fn cli(args: &[String]) -> i32 {
             Decision::Construct { effective, egress: e } => {
                 egress = e;
                 let egr = match e { Egress::Profile(p) => p.name, Egress::None => "none" };
+                // Slice-6: an effective==T2 cell builds at genuine T2 via gVisor/runsc. No fall-DOWN:
+                // T2 is the floor for T-untrust/T-hostile, so a construction failure fails CLOSED and
+                // never degrades to T1. Platform (systrap/kvm) is chosen once here (both genuine T2).
+                if effective == Tier::T2 {
+                    let choice = t2_plane::select_platform();
+                    eprintln!(
+                        "SANDBOX-DECISION cleared construct-at=T2 effective=T2 platform={} why=\"{}\" requested={} trust={} caps={} profile={} egress=none",
+                        choice.platform.flag(), choice.why, requested.label(), trust.label(), caps.label(), profile.label()
+                    );
+                    let t2 = T2Spec {
+                        id: id.clone(),
+                        anchor: anchor.clone(),
+                        grants: grants.clone(),
+                        workload: workload.clone(),
+                        rootfs: t2_plane::sealed_rootfs_path(),
+                        runsc: t2_plane::sealed_runsc_path(),
+                        platform: choice.platform,
+                        mem_max: DEFAULT_MEM_MAX,
+                        pids_max: DEFAULT_PIDS_MAX,
+                    };
+                    return match t2_plane::construct(&t2) {
+                        Ok(code) => code,
+                        Err(err) => {
+                            eprintln!("gatekeeperd/t2_plane: FAIL construction (fail-closed, no fall-down): {err}");
+                            3
+                        }
+                    };
+                }
                 // Slice-4: an effective==T0 cell now builds at GENUINE T0 (Landlock+seccomp+ns+cgroup).
                 // Fall-up to the stronger T1 wall is permitted ONLY here, from a clean Landlock
                 // preflight — a legal upward escalation, never a downgrade, and loudly audited. Any

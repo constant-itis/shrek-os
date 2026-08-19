@@ -105,12 +105,14 @@ echo "$OUT2" | grep -q "construct-at=T1 effective=T1" && pass "decision=construc
 printf '%s\n' "$OUT2" | grep -q "^SHREK_T0: PASS gate=t1-ran" && pass "t1-constructed" || fail "t1-constructed"
 
 echo
-echo "=== G3: ≥T2 requirement still FAILS CLOSED (no weaker path opened) ==="
-OUT3=$(/gatekeeperd sandbox --tier T2 --trust T-untrust --caps C-ro-nosec --profile C-ro-nosec \
-        --id t2c --anchor /srv --grant project -- /usr/bin/sh -c 'echo LEAKED' 2>&1); rc3=$?
+# NOTE (slice-6): T2 now has a constructor (gVisor), so the fail-closed boundary moved to ≥T3.
+# This regression asserts a genuinely-unconstructible T3 cell still fails closed.
+echo "=== G3: ≥T3 requirement still FAILS CLOSED (no weaker path opened) ==="
+OUT3=$(/gatekeeperd sandbox --tier T3 --trust T-hostile --caps C-proj-rw --profile C-proj-rw \
+        --id t3c --anchor /srv --grant project -- /usr/bin/sh -c 'echo LEAKED' 2>&1); rc3=$?
 echo "$OUT3" | sed 's/^/    /'
-{ [ $rc3 -eq 12 ] && echo "$OUT3" | grep -q "no-constructor"; } && pass "t2-failed-closed rc=$rc3" || fail "t2-failed-closed rc=$rc3"
-printf '%s\n' "$OUT3" | grep -q "LEAKED" && fail "t2-workload-ran (LEAK!)" || pass "t2-workload-never-ran"
+{ [ $rc3 -eq 12 ] && echo "$OUT3" | grep -q "no-constructor"; } && pass "t3-failed-closed rc=$rc3" || fail "t3-failed-closed rc=$rc3"
+printf '%s\n' "$OUT3" | grep -q "LEAKED" && fail "t3-workload-ran (LEAK!)" || pass "t3-workload-never-ran"
 
 echo
 if [ $fails -eq 0 ]; then echo "T0-CONSTRUCT-PROOF: ALL PASS ✅"; exit 0; else echo "T0-CONSTRUCT-PROOF: $fails FAIL ❌"; exit 1; fi

@@ -1,0 +1,42 @@
+# gVisor runtime pin — Phase-5 slice-6 (T2 / gVisor constructor)
+#
+# Production/sealed builds MUST fetch this EXACT release and verify the recorded sha256.
+# NEVER use the 'latest' channel in a production build. 'latest' was used ONCE, for the
+# initial oracle bring-up; the exact release it resolved to is pinned below.
+# (docs/phase5-slice6-t2.md §Shipping.)
+#
+# Bring-up verification (2026-08-18, oracle): fetched from the official gVisor release
+# channel; sha512-over-TLS integrity check passed; and EMPIRICALLY PROVEN to drive
+# directly — `runsc run` with NO containerd shim, NO sidecar, NO runtime auto-download —
+# under our decided flags `--ignore-cgroups --network=none --platform=systrap`.
+
+[gvisor]
+release  = "release-20260810.0"
+oci_spec = "1.2.1"
+arch     = "x86_64"
+
+# The COMPLETE required runtime artifact set for direct OCI driving = runsc ALONE.
+# The gofer is the same binary re-executed; there is no separate sidecar to seal.
+[[artifact]]
+name     = "runsc"
+url      = "https://storage.googleapis.com/gvisor/releases/release/20260810.0/x86_64/runsc"
+sha256   = "670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e"
+bytes    = 104854508
+required = true
+seal     = true     # dm-verity sealed into /usr on the product image
+
+# Inventoried for provenance but NOT part of our runtime set: the containerd shim is only
+# for a containerd/CRI integration, which the direct-drive T2 constructor does not use.
+# NOT fetched or sealed by the product build.
+[[artifact]]
+name     = "containerd-shim-runsc-v1"
+url      = "https://storage.googleapis.com/gvisor/releases/release/20260810.0/x86_64/containerd-shim-runsc-v1"
+sha256   = "71b9e90897f39ee51fee8e0345cf675956d95bd1d6458c92f49d984097ffa327"
+required = false
+seal     = false
+
+[verification]
+method    = "sha256 (recorded here) + upstream sha512-over-TLS"
+pgp       = "none on the raw release bucket; PGP signing exists only on the apt channel"
+autodl    = "disabled — runsc needs no runtime download; do not enable any"
+proven_by = "scripts/t2-construct-proof.sh (oracle) + slice-6 bring-up smoke"
