@@ -25,6 +25,10 @@ echo "=== STAGE 1 (host): build binaries + stage the image overlay ==="
 cargo build --release
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
 install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl} image/overlay/usr/libexec/shrek/
+# Phase-5 slice-7 (B1): the sealed closed-world in-sandbox acceptance probe (spike-only, strip before
+# ship with the other gate scaffolding). Enrolled in gatekeeperd's compiled-in CLOSED_WORLD so it
+# legitimately derives T-first on the sealed image (a shell cannot — B1 treats it as open-world).
+install -m0755 target/release/gate-probe image/overlay/usr/libexec/shrek/gate-probe
 install -m0644 docs/*.md image/overlay/usr/share/doc/shrek/
 
 # S8: deliberately-broken build. BREAK=1 stages a poison marker into the sealed image; the boot

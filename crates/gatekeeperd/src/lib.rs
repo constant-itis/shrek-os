@@ -8,5 +8,6 @@ pub mod linux_uapi;
 pub mod mount_plane;
 pub mod net_plane;
 pub mod proc_plane;
+pub mod provenance_plane;
 pub mod sandbox;
 pub mod t2_plane;

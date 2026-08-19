@@ -1,0 +1,12 @@
+[package]
+name = "shrek-gate-probe"
+version.workspace = true
+edition.workspace = true
+
+# Spike-only acceptance fixture (Phase-5 slice-7 / B1): a sealed CLOSED-WORLD in-sandbox probe. It
+# exists because B1 correctly reclassifies /bin/sh as open-world, so a shell can no longer be a
+# T-first fixture (docs/phase5-slice7-trust-provenance.md §8.1). No dependencies by design; execs
+# nothing; strip before ship along with the other *-proof / gate scaffolding.
+[[bin]]
+name = "gate-probe"
+path = "src/main.rs"

@@ -130,12 +130,17 @@ of the isolation tier the agent runs under ([`isolation.md`](isolation.md) §5).
 this agent is fully hostile, how hard is the box?"*, independent of how small its profile is.
 
 ```
-trusted     first-party, signed, in-tree     → floor may be low (T0/T1); trust the code, box the caps
-semi        third-party but reviewed          → mid floor (T2 gVisor, the workhorse)
-hostile     unknown / unreviewed / untrusted  → T3 microVM
+T-first    first-party or Shrek-signed code    → floor T0; trust the code, box the caps
+T-pinned   third-party pinned & vetted at hash  → floor T0; trusted supply chain, not our code
+T-untrust  unreviewed cloned/downloaded code    → floor T2 (gVisor, the workhorse)
+T-hostile  adversarial-by-assumption / unknown  → floor T2 (never below)
 
-UNKNOWN band ⇒ treated as HOSTILE (fail-high) — never defaulted to trusted.
-(security-model.md; isolation.md "trust-band unknown ⇒ T-hostile".)
+The floor is NEVER below T2 for the two low-trust bands; the matrix + escalation raise a cell to T3
+where caps warrant (e.g. T-hostile + write/egress → T3, isolation.md §5) — but T3 is a matrix/
+escalation result, not the band floor. UNKNOWN or UNVERIFIABLE band ⇒ treated as T-hostile
+(fail-high) — never defaulted to trusted. The band is DERIVED from integrity-checked provenance,
+never caller-asserted (phase5-slice7-trust-provenance.md / B1; security-model.md §6). isolation.md
+§5.1 is the canonical floor table.
 ```
 
 The effective tier is `max(band floor, matrix, escalation)` — trust never *lowers* the wall below

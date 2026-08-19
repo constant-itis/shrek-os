@@ -10,6 +10,11 @@
 # closed because the host harness times out and never sees `PASS M4`.
 set -u
 GK=/usr/libexec/shrek/gatekeeperd
+# Slice-7 (B1): the sealed CLOSED-WORLD in-sandbox probe. gatekeeperd DERIVES the trust band from the
+# entrypoint measurement now, and a shell is open-world ⇒ T-hostile ⇒ cannot run at T0/T1. The probe
+# is sealed on dm-verity /usr + enrolled in gatekeeperd's CLOSED_WORLD, so it legitimately derives
+# T-first and drives the T0/T1 mechanics gates below. (docs/phase5-slice7-trust-provenance.md §8.1)
+GP=/usr/libexec/shrek/gate-probe
 SRV=/run/shrek-m4/srv
 verdict_done=0
 
@@ -61,27 +66,33 @@ fi
 s2fail=0
 emit "S2-BEGIN Phase-5 slice-2 decision plane"
 
-# G2: cleared T-pinned/C-proj-rw ⇒ T1 constructs, and the slice-1 caps property still holds through
-# the decision path (stdout-only capture; gatekeeperd's `exec …` echo goes to stderr/console).
-OUT=$("$GK" sandbox --tier T1 --trust T-pinned --caps C-proj-rw --profile C-proj-rw \
-        --id s2 --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE")
+# G2: slice-7 — the entrypoint is the sealed closed-world gate-probe, so gatekeeperd DERIVES T-first
+# (a shell would derive T-hostile). First/C-proj-rw floors at T0 and the requested T1 is a legal
+# upward escalation ⇒ constructs at T1, and the slice-1 caps property still holds through the derived
+# decision path. --trust T-first is only the audit proposal (matches the derivation). Same in-sandbox
+# gate assertions as before (stdout-only capture; gatekeeperd's `exec …` echo goes to stderr/console).
+OUT=$("$GK" sandbox --tier T1 --trust T-first --caps C-proj-rw --profile C-proj-rw \
+        --id s2 --anchor "$SRV" --grant project -- "$GP" mount-guest)
 s2rc=$?
 printf '%s\n' "$OUT"
 P2=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: PASS gate=in-')
 F2=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE: FAIL')
 if [ "$s2rc" = 0 ] && [ "$F2" = 0 ] && [ "$P2" -ge 4 ]; then
-  emit "PASS S2-cleared T-pinned/C-proj-rw constructed at T1 (${P2}/4 gates)"
+  emit "PASS S2-cleared derived-T-first escalated to T1 (${P2}/4 gates)"
 else
   emit "FAIL S2-cleared (rc=${s2rc} pass=${P2} fail=${F2})"; s2fail=1
 fi
 
-# G3*: refused ⇒T2 fails closed — exit 12 AND zero in-sandbox gate lines (the workload never ran).
-OUT=$("$GK" sandbox --tier T2 --trust T-untrust --caps C-net --profile C-net \
+# G3*: slice-7 — a shell entrypoint DERIVES T-hostile; T-hostile/C-net floors at T3, so a request for
+# the weaker T2 wall is a FORBIDDEN DOWNGRADE (rc=10) and the workload NEVER runs (0 in-sandbox gate
+# lines). This is the B1 form of the slice-2 fail-closed property: a networked untrusted workload
+# cannot obtain a wall weaker than its provenance+caps demand — no silent weaker fallback.
+OUT=$("$GK" sandbox --tier T2 --trust T-hostile --caps C-net --profile C-net \
         --id s2r --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE" 2>/dev/null)
 rrc=$?
 G2N=$(printf '%s\n' "$OUT" | grep -c '^SHREK_GATE')
-if [ "$rrc" = 12 ] && [ "$G2N" = 0 ]; then
-  emit "PASS S2-refused ->T2 failed closed (rc=12, 0 workload gates)"
+if [ "$rrc" = 10 ] && [ "$G2N" = 0 ]; then
+  emit "PASS S2-refused hostile/C-net@T2 downgrade-refused fail-closed (rc=10, 0 workload gates)"
 else
   emit "FAIL S2-refused (rc=${rrc} workload-gates=${G2N})"; s2fail=1
 fi
@@ -99,10 +110,10 @@ s3fail=0
 emit "S3-BEGIN Phase-5 slice-3 egress plane"
 
 # (a) no-net cell: a cleared C-ro-nosec sandbox owns a FRESH netns with ONLY loopback (the historical
-# host-netns hole — construct() used to pass no network flag — is shut on the sealed image).
-NETPROBE='ifs=$(ls /sys/class/net 2>/dev/null | tr "\n" ,); [ "$ifs" = "lo," ] && echo "SHREK_GATE: PASS gate=s3-nonet-loopback-only" || echo "SHREK_GATE: FAIL gate=s3-nonet ifs=$ifs"'
+# host-netns hole — construct() used to pass no network flag — is shut on the sealed image). Slice-7:
+# gate-probe derives T-first; First/C-ro-nosec floors T0, the requested T1 is a legal escalation.
 OUT=$("$GK" sandbox --tier T1 --trust T-first --caps C-ro-nosec --profile C-ro-nosec \
-        --id s3n --anchor "$SRV" --grant project -- /bin/sh -c "$NETPROBE")
+        --id s3n --anchor "$SRV" --grant project -- "$GP" nonet)
 printf '%s\n' "$OUT"
 if printf '%s\n' "$OUT" | grep -q '^SHREK_GATE: PASS gate=s3-nonet-loopback-only'; then
   emit "PASS S3-nonet C-ro-nosec is loopback-only (host-net hole closed on sealed image)"
@@ -112,13 +123,13 @@ fi
 
 # (b) unknown egress profile ⇒ REFUSED (rc 13) at the sealed re-check; the workload NEVER runs.
 "$GK" sandbox --tier T1 --trust T-first --caps C-net --egress-profile bogus-exfil --profile C-net \
-      --id s3u --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+      --id s3u --anchor "$SRV" --grant project -- "$GP" nonet >/dev/null 2>&1
 urc=$?
 [ "$urc" = 13 ] && emit "PASS S3-unknown-profile refused (rc=13)" || { emit "FAIL S3-unknown-profile (rc=$urc)"; s3fail=1; }
 
 # (b) C-broad ⇒ REFUSED (rc 13): no plane for unrestricted egress, no silent downgrade to loopback.
 "$GK" sandbox --tier T1 --trust T-first --caps C-broad --profile C-broad \
-      --id s3b --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+      --id s3b --anchor "$SRV" --grant project -- "$GP" nonet >/dev/null 2>&1
 brc=$?
 [ "$brc" = 13 ] && emit "PASS S3-cbroad refused (rc=13)" || { emit "FAIL S3-cbroad (rc=$brc)"; s3fail=1; }
 
@@ -126,7 +137,7 @@ brc=$?
 # construction FAILS CLOSED (nonzero) and hands back NO sandbox/egress — never a silent open network.
 # (The positive "resolves ⇒ injects ⇒ reaches allowed / drops denied" path is an oracle gate.)
 timeout 30 "$GK" sandbox --tier T1 --trust T-first --caps C-net --egress-profile github-https \
-      --profile C-net --id s3c --anchor "$SRV" --grant project -- /bin/true >/dev/null 2>&1
+      --profile C-net --id s3c --anchor "$SRV" --grant project -- "$GP" nonet >/dev/null 2>&1
 crc=$?
 [ "$crc" != 0 ] && emit "PASS S3-cnet-failclosed C-net did not egress w/o resolver (rc=$crc)" || { emit "FAIL S3-cnet-failclosed (constructed unexpectedly rc=0)"; s3fail=1; }
 
@@ -141,23 +152,18 @@ crc=$?
 s4fail=0
 emit "S4-BEGIN Phase-5 slice-4 T0 process sandbox"
 # T0 has NO mount remap (unlike T1's bind to /srv guest-prefix): the grant is Landlock-allowed at its
-# REAL anchor path, so the probe reads "$SRV/project", not "/srv/project". $SRV is expanded by THIS
-# shell into the probe string (double-quoted); the sandbox's own $m/$rc/$e are escaped to survive.
-T0PROBE="
-m=\$(cat $SRV/project/marker 2>/dev/null); [ \"\$m\" = PROJECT ] && echo \"SHREK_GATE: PASS gate=t0-grant-readable\" || echo \"SHREK_GATE: FAIL gate=t0-grant-readable m=\$m\"
-if cat $SRV/vault/marker 2>&1 | grep -qiE \"permission denied|denied|not permitted\"; then echo \"SHREK_GATE: PASS gate=t0-vault-landlock-denied\"; else echo \"SHREK_GATE: FAIL gate=t0-vault-landlock-denied\"; fi
-e=\$(mount -t tmpfs none /mnt 2>&1); rc=\$?; if [ \$rc -ne 0 ] && echo \"\$e\" | grep -qiE \"not permitted|permission denied\"; then echo \"SHREK_GATE: PASS gate=t0-seccomp-mount-eperm\"; else echo \"SHREK_GATE: FAIL gate=t0-seccomp-mount rc=\$rc\"; fi
-if ls /sys/class/net 2>&1 | grep -qiE \"permission denied|denied\"; then echo \"SHREK_GATE: PASS gate=t0-sys-landlock-denied\"; else echo \"SHREK_GATE: FAIL gate=t0-sys-landlock-denied\"; fi
-"
+# REAL anchor path, so the probe reads "$SRV/project", not "/srv/project". Slice-7: the sealed
+# closed-world gate-probe (derives T-first; First/C-ro-nosec ⇒ T0) runs the SAME four T0 mechanics
+# checks a shell used to; $SRV is passed as a DATA argument (the anchor to stat), never as code.
 # 2>&1 capture is safe here: the T0 path prints NO argv echo (unlike the nspawn path), so the only
 # SHREK_GATE lines are real in-sandbox results, and the construct-at=T0 decision line is grep-able.
 if command -v systemd-run >/dev/null 2>&1; then
   OUT=$(systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T0 --trust T-first \
           --caps C-ro-nosec --profile C-ro-nosec --id s4 --anchor "$SRV" --grant project \
-          -- /usr/bin/sh -c "$T0PROBE" 2>&1)
+          -- "$GP" landlock "$SRV" 2>&1)
 else
   OUT=$("$GK" sandbox --tier T0 --trust T-first --caps C-ro-nosec --profile C-ro-nosec \
-          --id s4 --anchor "$SRV" --grant project -- /usr/bin/sh -c "$T0PROBE" 2>&1)
+          --id s4 --anchor "$SRV" --grant project -- "$GP" landlock "$SRV" 2>&1)
 fi
 printf '%s\n' "$OUT"
 printf '%s\n' "$OUT" | grep -q 'construct-at=T0 effective=T0' \

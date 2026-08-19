@@ -96,6 +96,7 @@ pub const BPF_RET: u16 = 0x06;
 // ---- file-type bits (statx st_mode) ----
 pub const S_IFMT: u32 = 0o170000;
 pub const S_IFDIR: u32 = 0o040000;
+pub const S_IFREG: u32 = 0o100000;
 
 // ---- open flags (subset used) ----
 pub const O_RDONLY: u64 = 0;

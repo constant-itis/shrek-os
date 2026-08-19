@@ -24,6 +24,7 @@
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
 use crate::net_plane;
 use crate::proc_plane::{self, T0Spec, DEFAULT_MEM_MAX, DEFAULT_PIDS_MAX};
+use crate::provenance_plane;
 use crate::t2_plane::{self, T2Spec};
 use shrek_policy::egress::EgressProfile;
 use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
@@ -336,11 +337,29 @@ pub fn cli(args: &[String]) -> i32 {
             eprintln!("SANDBOX-DECISION refused reason=bad-request-tier={t:?}");
             return 14;
         };
-        // Fail-high on the security-relevant axes; a missing profile defaults to the requested caps.
-        let trust = TrustBand::parse(trust_s.as_deref().unwrap_or(""));
+        // Fail-high on the caps axis; a missing profile defaults to the requested caps.
         let caps = CapsProfile::parse(caps_s.as_deref().unwrap_or(""));
         let profile = profile_s.as_deref().map(CapsProfile::parse).unwrap_or(caps);
         let egress_name = egress_s.as_deref();
+        // Slice-7 (B1): the trust band is DERIVED from a measurement of the workload entrypoint, never
+        // taken from the caller. `--trust` is demoted to a NON-AUTHORITATIVE proposal — recorded for
+        // audit + mismatch detection ONLY, and it NEVER influences the effective band. gatekeeperd's
+        // derivation is the sole authority, extending the slice-2 independent re-check to the last
+        // caller-asserted input (ADV-8; docs §6). No override: an unsealed/foreign entrypoint that
+        // proposes `T-first` is corrected down to `T-hostile` here, before the tier arithmetic.
+        let proposed = TrustBand::parse(trust_s.as_deref().unwrap_or(""));
+        let der = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
+        let trust = der.band;
+        eprintln!(
+            "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} sealed_root={:?}",
+            trust.label(),
+            proposed.label(),
+            trust == proposed,
+            der.entrypoint,
+            der.evidence.entrypoint_sealed,
+            der.evidence.domain_execution_sealed,
+            der.sealed_root
+        );
         match recheck(requested, trust, caps, profile, egress_name) {
             Decision::Refuse { code, reason } => {
                 eprintln!(
@@ -433,6 +452,92 @@ pub fn cli(args: &[String]) -> i32 {
         Err(e) => {
             eprintln!("gatekeeperd/sandbox: FAIL construction: {e}");
             3
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The independent re-check arithmetic, exercised with SYNTHETIC trust bands — the pure seam for
+    //! decision-plane assertions (slice-7 moved these off the production `sandbox` CLI, whose band is
+    //! now DERIVED, not caller-asserted, so synthetic `T-pinned`/`T-untrust` inputs no longer reach
+    //! the constructor). `recheck` is pure (no I/O), so every refusal code and the upward-only
+    //! escalation are asserted here without a kernel. Mirrors the checks the old `tier-plane-repro`
+    //! drove through `--trust`.
+    use super::*;
+    use shrek_policy::{CapsProfile::*, TrustBand::*};
+
+    fn refusal(d: Decision) -> (i32, String) {
+        match d {
+            Decision::Refuse { code, reason } => (code, reason),
+            Decision::Construct { .. } => panic!("expected refusal, got construct"),
+        }
+    }
+
+    #[test]
+    fn forged_downgrade_below_floor_is_refused() {
+        // T-hostile/C-net floors at T3; a request for T0 is a forbidden downgrade (code 10).
+        let (code, reason) = refusal(recheck(Tier::T0, Hostile, Net, Net, None));
+        assert_eq!(code, 10);
+        assert!(reason.contains("downgrade-below-floor") && reason.contains("T3"));
+    }
+
+    #[test]
+    fn caps_exceed_profile_is_refused() {
+        // caps C-net ⊄ profile C-proj-rw (code 11), re-checked independently of the resolver.
+        let (code, _) = refusal(recheck(Tier::T1, First, Net, ProjRw, None));
+        assert_eq!(code, 11);
+    }
+
+    #[test]
+    fn t2_c_net_has_no_gvisor_egress_plane() {
+        // T-untrust/C-net resolves to T2, which has no gVisor egress plane yet ⇒ fail closed (code 12),
+        // never built at the T1 egress plane (wrong wall).
+        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, None));
+        assert_eq!(code, 12);
+        assert!(reason.contains("gvisor-egress"));
+    }
+
+    #[test]
+    fn t3_has_no_constructor() {
+        let (code, reason) = refusal(recheck(Tier::T3, Hostile, ProjRw, ProjRw, None));
+        assert_eq!(code, 12);
+        assert!(reason.contains("no-constructor-T3"));
+    }
+
+    #[test]
+    fn c_net_below_t2_requires_an_egress_profile() {
+        // T-first/C-net = T1; C-net with no named egress profile fails closed (code 13).
+        let (code, _) = refusal(recheck(Tier::T1, First, Net, Net, None));
+        assert_eq!(code, 13);
+    }
+
+    #[test]
+    fn c_broad_has_no_plane() {
+        let (code, reason) = refusal(recheck(Tier::T1, First, Broad, Broad, None));
+        assert_eq!(code, 13);
+        assert!(reason.contains("C-broad"));
+    }
+
+    #[test]
+    fn upward_escalation_is_honored_not_a_downgrade() {
+        // T-first/C-ro-nosec floors at T0; a request for the STRONGER T2 wall is a legal upward
+        // escalation and constructs at T2 (no min anywhere).
+        match recheck(Tier::T2, First, RoNosec, RoNosec, None) {
+            Decision::Construct { effective, .. } => assert_eq!(effective, Tier::T2),
+            Decision::Refuse { code, reason } => panic!("unexpected refusal {code}: {reason}"),
+        }
+    }
+
+    #[test]
+    fn cleared_t1_constructs_loopback() {
+        // The nominal cleared path: T-pinned/C-proj-rw = T1, loopback-only.
+        match recheck(Tier::T1, Pinned, ProjRw, ProjRw, None) {
+            Decision::Construct { effective, egress } => {
+                assert_eq!(effective, Tier::T1);
+                assert!(matches!(egress, Egress::None));
+            }
+            Decision::Refuse { code, reason } => panic!("unexpected refusal {code}: {reason}"),
         }
     }
 }

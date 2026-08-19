@@ -16,16 +16,28 @@
 //! is reached through its module (`shrek_policy::egress::…`) so the two policy vocabularies stay
 //! visibly distinct.
 //!
-//! What is NOT here (later slices, by design): how the trust band is derived/attested (OPEN B1);
-//! the T0/T2/T3 constructors; egress ENFORCEMENT (netns/veth/nftables, DNS pre-resolution, the
+//!   * [`provenance`] — `Evidence → TrustBand` (B1, slice-7): the band is DERIVED from an
+//!                  integrity-checked measurement of the code object, not asserted by the caller. The
+//!                  pure lattice lives here; gatekeeperd does the measuring.
+//!
+//! What is NOT here (later slices, by design): the deferred B1 evidence STORES (the sealed pin-
+//! manifest for T-pinned, the §4 provenance log for T-untrust — the MVP proves only T-first via the
+//! dm-verity root and fails everything else high); the T0/T2/T3 constructors; egress ENFORCEMENT
+//! (netns/veth/nftables, DNS pre-resolution, the
 //! ready-barrier — all gatekeeperd's, because it constructs); per-request DYNAMIC egress
 //! destinations (the later sealed grant protocol); the crypto seal + socket transport.
 
 #![forbid(unsafe_code)]
 
 pub mod egress;
+pub mod provenance;
 pub mod tier;
 
 // The tier vocabulary is the crate's original public surface — re-export it flat so existing
 // callers use `shrek_policy::{Tier, TrustBand, CapsProfile, effective_tier, …}` unchanged.
 pub use tier::*;
+
+// The B1 derivation (slice-7) is flat-exported alongside it: `shrek_policy::{Evidence, Origin,
+// derive_band}`. gatekeeperd measures the code object and calls `derive_band` instead of trusting a
+// caller-supplied band string.
+pub use provenance::{derive_band, Evidence, Origin};
