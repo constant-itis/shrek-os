@@ -269,6 +269,19 @@ audited proposal that `gatekeeperd`'s derivation overrides; a caller cannot infl
   anti-spoof) stay green — the pin arm only *adds* a positive-proof classification and never lowers a
   band, so T-first and hostile paths are unchanged.
 
+**Implementation (S6, `image/overlay/usr/lib/shrek/mount-plane-gate`):**
+- **Bake (build time, `build-in-container.sh`):** the sealed manifest is written into the overlay
+  *before* mkosi seals `/usr` under dm-verity, pinning gate-probe's digest from an **offline** `fsverity
+  digest --hash-alg=sha256 --block-size=4096`. fs-verity's digest is content-addressed (sha256 over
+  4096-byte Merkle blocks), so this offline value is bit-identical to the kernel `FS_IOC_MEASURE_VERITY`
+  measurement the gate takes at runtime — the gate proves the two agree on the sealed kernel, closing
+  the classification loop without a writable manifest. The baked file is gitignored (a build artifact).
+- **Runtime primitive:** the sealed root is *block-level* dm-verity (read-only), not per-file fs-verity,
+  so the gate provisions a dedicated `mkfs.ext4 -b 4096 -O verity` loopback on the writable `/run`
+  tmpfs (needs `e2fsprogs`, added to the image `Packages` for the gate — strip with the scaffolding),
+  enables verity on the sealed gate-probe copy via `gatekeeperd pin-verity enable`, and drives the
+  `sandbox --tier T0 --trust T-pinned` re-check against it.
+
 ## 9. Decisions — RESOLVED (boundary review, 2026-08-19)
 
 - **(A) Digest primitive — RESOLVED:** `FS_IOC_MEASURE_VERITY`; identity = `(digest_algorithm,

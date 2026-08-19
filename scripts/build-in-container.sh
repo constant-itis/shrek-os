@@ -92,10 +92,23 @@ docker run --rm --privileged \
     # sbsigntool provides sbsign for the S5 UKI signing (SecureBootSignTool=sbsign). busybox-static =
     # the T2 sandbox rootfs userland (Phase-5 slice-6 seal), static so it needs no in-rootfs libs.
     apt-get install -y --no-install-recommends \
-      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor busybox-static
+      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor busybox-static fsverity
     # Phase-5 slice-6: assemble the T2 gVisor artifacts into the mkosi.extra.t2 ExtraTree BEFORE mkosi
     # runs (30-t2-gvisor.conf seals it into /usr). Re-verifies the pinned runsc + builds the rootfs.
     bash /work/scripts/seal-t2-artifacts.sh /work/image/mkosi.extra.t2 /t2-runsc-verified
+    # Phase-5 slice-8 (S6 positive-pin VM gate, spike): bake the sealed pin-manifest BEFORE mkosi seals
+    # the overlay under dm-verity /usr. The gate copies the sealed gate-probe onto a runtime fs-verity fs
+    # and must DERIVE T-pinned, so the manifest pins gate-probe`s fs-verity digest. fs-verity digest is
+    # content-addressed (sha256 over 4096-byte Merkle blocks), so this OFFLINE `fsverity digest` equals
+    # the kernel FS_IOC_MEASURE_VERITY measurement the gate takes at runtime (verified — see #2589). The
+    # manifest grammar is `<algo> <hex> <class>`; fsverity prints `sha256:<hex>`, so split off the algo.
+    GP_OVL=/work/image/overlay/usr/libexec/shrek/gate-probe
+    PIN_HEX=$(fsverity digest --hash-alg=sha256 --block-size=4096 "$GP_OVL" | cut -d: -f2 | cut -d" " -f1)
+    [ "${#PIN_HEX}" = 64 ] || { echo "S6 bake: unexpected fsverity digest [$PIN_HEX]"; exit 1; }
+    install -d /work/image/overlay/usr/lib/shrek
+    printf "shrek-pin-manifest v1\nsha256 %s closed-world\n" "$PIN_HEX" \
+      > /work/image/overlay/usr/lib/shrek/pin-manifest
+    echo "--- baked pin-manifest (S6): sha256 $PIN_HEX closed-world ---"
     # S5 key/cert paths supplied here (harness knows the /work mount); SecureBoot=yes lives in config.
     mkosi --force \
       --secure-boot-key /work/keys/secureboot.key \

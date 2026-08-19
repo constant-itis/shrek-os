@@ -1,7 +1,8 @@
 #!/bin/sh
-# Phase-5 slice-1 M4 + slice-2 decision-plane + slice-3 egress-plane VM GATE. SPIKE ONLY: remove this
-# file, shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped
-# image (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md).
+# Phase-5 VM GATE: slice-1 M4 mount plane + slice-2 decision plane + slice-3 egress plane + slice-4 T0 +
+# slice-6 T2 (S5 block) + slice-8 positive pin (S6 block). SPIKE ONLY: remove this file,
+# shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped image
+# (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md, docs/phase5-slice8-pin-manifest.md §8).
 #
 # Runs on the sealed, enforcing-Secure-Boot image. Drives `gatekeeperd sandbox` to construct a
 # capability-enforced T1 sandbox from a grant, and asserts the four mount-plane properties from
@@ -234,4 +235,91 @@ if [ "$s5fail" != 0 ]; then
   done
 fi
 [ "$s5fail" = 0 ] && emit "PASS S5 T2-plane VM gate" || emit "FAIL S5 T2-plane VM gate"
+
+# ---- Phase-5 slice-8: POSITIVE PIN (B1 T-pinned) on the SEALED image (docs/phase5-slice8-pin-manifest.md §8) ----
+# The oracle (scripts/pin-manifest-proof.sh) drives the IDENTICAL release binary on a genuine fs-verity
+# fs and covers all five manifest cases (incl. the open-world/empty/malformed cases, which need a
+# WRITABLE manifest we cannot have on dm-verity /usr). The VM proves the one thing only the sealed image
+# can: the manifest BAKED under dm-verity /usr at build time (fsverity digest of the sealed gate-probe,
+# build-in-container.sh) matches the REAL kernel FS_IOC_MEASURE_VERITY measurement taken at runtime on
+# the sealed kernel ⇒ gatekeeperd DERIVES T-pinned, binds the measured fd, and REFUSES execution
+# fail-closed (rc=15, no constructor — classification-only slice). Anti-spoof: a second, one-byte-
+# different verity inode is not the pinned digest ⇒ T-hostile. fs-verity is per-file verity; the sealed
+# root is block-level dm-verity (read-only), so the gate provisions a DEDICATED ext4 -O verity loopback
+# on the writable tmpfs /run. FAIL, never skip (amendment D): if the sealed kernel/fs lacks fs-verity
+# the gate goes RED, not silently green.
+s6fail=0
+emit "S6-BEGIN Phase-5 slice-8 positive pin (T-pinned)"
+PINIMG=/run/shrek-pinfs.img
+PINMNT=/run/shrek-pinfs
+PINLOOP=
+if ! command -v mkfs.ext4 >/dev/null 2>&1; then
+  emit "FAIL S6 reason=mkfs.ext4-missing (e2fsprogs not in image)"; s6fail=1
+else
+  dd if=/dev/zero of="$PINIMG" bs=1M count=64 status=none 2>/dev/null
+  # -b 4096: fs-verity requires the Merkle block size to equal the page size; a small ext4 otherwise
+  # defaults to 1K blocks and FS_IOC_ENABLE_VERITY returns EINVAL.
+  if mkfs.ext4 -q -b 4096 -O verity "$PINIMG" 2>/dev/null; then
+    # loop nodes may be absent — pre-create a small range (same STM lesson as the oracle).
+    i=0; while [ "$i" -le 15 ]; do [ -e /dev/loop$i ] || mknod -m660 /dev/loop$i b 7 "$i"; i=$((i + 1)); done
+    mkdir -p "$PINMNT"
+    PINLOOP=$(losetup -f --show "$PINIMG" 2>/dev/null)
+    if [ -n "$PINLOOP" ] && mount "$PINLOOP" "$PINMNT" 2>/dev/null; then
+      # Copy the SEALED gate-probe; make the rogue differ BEFORE enabling verity (immutable after).
+      cp "$GP" "$PINMNT/pinned-probe"
+      cp "$GP" "$PINMNT/rogue-probe"
+      printf '\000' >> "$PINMNT/rogue-probe"
+      if "$GK" pin-verity enable "$PINMNT/pinned-probe" >/dev/null 2>&1 \
+         && "$GK" pin-verity enable "$PINMNT/rogue-probe" >/dev/null 2>&1; then
+        DL=$("$GK" pin-verity measure "$PINMNT/pinned-probe" 2>/dev/null)
+        emit "S6-provisioned fs-verity pinned-probe=[$DL] (vs baked /usr/lib/shrek/pin-manifest)"
+
+        # (1) positive: the baked closed-world pin ⇒ DERIVES T-pinned, fd bound, exec REFUSED fail-closed.
+        # (Pinned,RoNosec)=T0 and floor(Pinned)=T0, so a T0 request clears the re-check as Construct{T0}
+        # and hits the pin refusal guard rather than a floor/caps refusal.
+        OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+                --id s6 --anchor "$SRV" --grant project -- "$PINMNT/pinned-probe" 2>&1); prc=$?
+        printf '%s\n' "$OUT"
+        if printf '%s\n' "$OUT" | grep -q 'derived=T-pinned' \
+           && printf '%s\n' "$OUT" | grep -q 'pinned=true' \
+           && printf '%s\n' "$OUT" | grep -q 'exec_fd_bound=true'; then
+          emit "PASS S6-classify baked-manifest ⇒ derived=T-pinned exec_fd_bound=true (offline bake == kernel measure)"
+        else
+          emit "FAIL S6-classify (baked digest did not derive T-pinned)"; s6fail=1
+        fi
+        if [ "$prc" = 15 ] && printf '%s\n' "$OUT" | grep -q 'reason=pinned-exec-home-unavailable'; then
+          emit "PASS S6-failclosed exec refused (rc=15 pinned-exec-home-unavailable)"
+        else
+          emit "FAIL S6-failclosed (rc=$prc)"; s6fail=1
+        fi
+        if printf '%s\n' "$OUT" | grep -q 'construct-at='; then
+          emit "FAIL S6-no-constructor (a constructor ran)"; s6fail=1
+        else
+          emit "PASS S6-no-constructor (no up/down workaround)"
+        fi
+
+        # (2) anti-spoof: the one-byte-different second verity inode is not pinned ⇒ T-hostile. Its T0
+        # request is a downgrade-below-floor(T2) refusal, so assert the DERIVED band on the always-printed
+        # provenance line, not the rc.
+        OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+                --id s6r --anchor "$SRV" --grant project -- "$PINMNT/rogue-probe" 2>&1)
+        if printf '%s\n' "$OUT" | grep -q 'derived=T-hostile' \
+           && printf '%s\n' "$OUT" | grep -q 'pinned=false'; then
+          emit "PASS S6-antispoof rogue verity inode ⇒ T-hostile"
+        else
+          emit "FAIL S6-antispoof"; s6fail=1
+        fi
+      else
+        emit "FAIL S6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; s6fail=1
+      fi
+      umount "$PINMNT" 2>/dev/null
+    else
+      emit "FAIL S6 reason=losetup/mount"; s6fail=1
+    fi
+    [ -n "$PINLOOP" ] && losetup -d "$PINLOOP" 2>/dev/null
+  else
+    emit "FAIL S6 reason=mkfs-verity (ext4 -O verity unsupported on sealed kernel)"; s6fail=1
+  fi
+fi
+[ "$s6fail" = 0 ] && emit "PASS S6 pin-plane VM gate" || emit "FAIL S6 pin-plane VM gate"
 verdict_done=1
