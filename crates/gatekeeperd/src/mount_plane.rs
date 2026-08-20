@@ -151,6 +151,143 @@ pub fn relocate_ro(p: &Pinned, target: &Path) -> io::Result<()> {
     )
 }
 
+/// slice-9 — bind a pinned inode over its OWN existing anchor path and harden it
+/// `RO|NOSUID|NODEV|NOEXEC`, contained to the caller's private mount ns. Unlike `relocate_ro` this
+/// does NOT create the target (the grant already exists at its anchor) and does not relocate it — it
+/// re-asserts `MS_NOEXEC` in place so a `T-pinned` entrypoint cannot `execve` or `mmap(PROT_EXEC)`
+/// a mutable grant (mmap(2) `EPERM`), while leaving the path the workload sees unchanged (I2/I5). The
+/// bind is FROM the pinned fd, so a rename/symlink swap of the source cannot redirect it; identity is
+/// re-checked after the bind and any drift fails closed.
+pub fn seal_noexec_in_place(p: &Pinned, target: &Path) -> io::Result<()> {
+    let src = CString::new(format!("/proc/self/fd/{}", p.fd.as_raw_fd()))
+        .map_err(|_| io::Error::from_raw_os_error(EINVAL))?;
+    let tgt = path_cstr(target)?;
+
+    mount(&src, &tgt, None, MS_BIND, None)?;
+    match ident_at_path(target) {
+        Ok(id) if id == p.ident => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "identity drift after grant noexec bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(e);
+        }
+    }
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        None,
+    )
+}
+
+/// Measure an island target's fs-verity digest. Must open the path `O_RDONLY` (the verity ioctl is
+/// rejected on `O_PATH` fds) under `RESOLVE_NO_SYMLINKS` — the target is a broker-owned island path,
+/// so no symlink may sit on it, but we resolve strictly regardless.
+fn measure_at_path(p: &Path) -> io::Result<(u16, Vec<u8>)> {
+    let how = OpenHow {
+        flags: O_RDONLY | O_CLOEXEC,
+        resolve: RESOLVE_NO_SYMLINKS,
+        ..Default::default()
+    };
+    let fd = openat2(AT_FDCWD as RawFd, &path_cstr(p)?, &how)?;
+    measure_verity(fd.as_raw_fd())
+}
+
+/// slice-9 — bind a `T-pinned` entrypoint inode onto a broker-owned island path and harden it
+/// `RO|NOSUID|NODEV` **without `MS_NOEXEC`**. This one dropped flag — for exactly one re-verified
+/// inode — is the whole exec-home boundary (docs/phase5-slice9-pin-exec-home.md §3).
+///
+/// `oracle_fd` is `der.exec_fd`: the `O_RDONLY` fd measured during derivation — the identity + digest
+/// AUTHORITY. It cannot itself be the bind source: an `MS_BIND` of `/proc/self/fd/N` fails `EINVAL`
+/// when N's `vfsmount` belongs to a DIFFERENT mount namespace (the fd was opened in the gatekeeper's
+/// ns; this runs in the per-request private ns). So we re-open the entrypoint BY PATH here — inside
+/// this ns, giving an ns-local `vfsmount` that CAN be a bind source — and prove it is the same object:
+///   (a) `(dev,ino)` == the derived fd's inode (a rename/symlink swap resolves to a different inode →
+///       caught; `RESOLVE_NO_SYMLINKS|NO_MAGICLINKS` blocks link tricks); and
+///   (b) fs-verity digest == the derived fd's digest (forging this is a content-hash preimage). The
+///       island bind is then re-checked for (a)+(b) again, so drift at any step fails closed.
+/// The exec surface's identity therefore stays bound to the derived evidence, not the reopened path
+/// (I1/I3); the path is only a handle to fetch an ns-local reference to the SAME inode.
+pub fn relocate_exec_island(entry_path: &Path, oracle_fd: RawFd, target: &Path) -> io::Result<()> {
+    let lbl = |s: &str, e: io::Error| io::Error::new(e.kind(), format!("{s}: {e}"));
+
+    // Ground truth from the derived evidence fd.
+    let expect_ident = ident_of(&statx_fd(oracle_fd).map_err(|e| lbl("statx-oracle", e))?)?;
+    let expect_digest = measure_verity(oracle_fd).map_err(|e| lbl("measure-oracle", e))?;
+
+    // Re-open the entrypoint O_RDONLY in THIS mount ns (TOCTOU-safe: no symlink/magiclink). O_RDONLY
+    // both lets us re-measure fs-verity and gives an ns-local vfsmount usable as a bind source.
+    let how = OpenHow {
+        flags: O_RDONLY | O_CLOEXEC,
+        resolve: RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+        ..Default::default()
+    };
+    let local = openat2(AT_FDCWD as RawFd, &path_cstr(entry_path)?, &how).map_err(|e| lbl("reopen-entry", e))?;
+
+    // The re-opened path must be the EXACT inode + fs-verity digest the derivation pinned.
+    if ident_of(&statx_fd(local.as_raw_fd())?)? != expect_ident {
+        return Err(io::Error::new(io::ErrorKind::Other, "entrypoint inode drift vs derived fd"));
+    }
+    if measure_verity(local.as_raw_fd()).map_err(|e| lbl("measure-local", e))? != expect_digest {
+        return Err(io::Error::new(io::ErrorKind::Other, "entrypoint fs-verity digest drift vs derived fd"));
+    }
+
+    // The island mountpoint is a FILE (the entrypoint), not a directory: create the parent tree and
+    // an empty file to bind over.
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| lbl("mkdir-island", e))?;
+    }
+    std::fs::OpenOptions::new().create(true).write(true).truncate(false).open(target).map_err(|e| lbl("touch-island", e))?;
+
+    let src = CString::new(format!("/proc/self/fd/{}", local.as_raw_fd()))
+        .map_err(|_| io::Error::from_raw_os_error(EINVAL))?;
+    let tgt = path_cstr(target)?;
+
+    // Bind FROM the ns-local fd — the source inode is fixed, immune to a path swap.
+    mount(&src, &tgt, None, MS_BIND, None).map_err(|e| lbl("bind", e))?;
+
+    // (a) identity: whatever is now at target must be the exact inode we measured.
+    match ident_at_path(target) {
+        Ok(id) if id == expect_ident => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "identity drift after exec-island bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(e);
+        }
+    }
+
+    // (b) fs-verity: re-measure the island inode; the digest must still equal what the source carried.
+    match measure_at_path(target) {
+        Ok(d) if d == expect_digest => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "fs-verity digest drift after exec-island bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(lbl("measure-island", e));
+        }
+    }
+
+    // Read-only hardening WITHOUT MS_NOEXEC — the single deliberate omission, for this one inode that
+    // is now proven fs-verity-immutable + identity-matched. Every other mount keeps NOEXEC (I2/I5).
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV,
+        None,
+    )
+    .map_err(|e| lbl("remount-ro", e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

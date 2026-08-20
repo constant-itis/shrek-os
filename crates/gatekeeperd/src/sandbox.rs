@@ -348,7 +348,7 @@ pub fn cli(args: &[String]) -> i32 {
         // caller-asserted input (ADV-8; docs §6). No override: an unsealed/foreign entrypoint that
         // proposes `T-first` is corrected down to `T-hostile` here, before the tier arithmetic.
         let proposed = TrustBand::parse(trust_s.as_deref().unwrap_or(""));
-        let der = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
+        let mut der = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
         let trust = der.band;
         eprintln!(
             "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} pinned={} exec_fd_bound={} sealed_root={:?}",
@@ -371,15 +371,45 @@ pub fn cli(args: &[String]) -> i32 {
                 return code;
             }
             Decision::Construct { effective, egress: e } => {
-                // slice-8 is CLASSIFICATION-ONLY: a `T-pinned` band is correctly derived, but a pinned
-                // artifact has NO executable home (a writable grant is `MS_NOEXEC` + Landlock read-only,
-                // and this slice deliberately does NOT reopen that posture). So a `T-pinned`
-                // construction REFUSES deterministically at EVERY tier — no downward (T2) or upward
-                // (T1 fall-up) constructor workaround — pending a separately-reviewed exec-home slice.
+                // slice-9: a `T-pinned` static-PIE artifact now gets a T0 EXEC ISLAND — the only place
+                // pinned third-party bytes may run. Preconditions (else fail closed, rc=15, I4): the
+                // cell resolves to T0 (Fork B: floor(Pinned)=T0, shrek-policy frozen), gatekeeperd holds
+                // the measured entrypoint fd (`der.exec_fd`), and Landlock is enforceable at a clean
+                // preflight. A `T-pinned` build NEVER falls up to T1 (≥T1 pinned containment is a
+                // documented Fork-B follow-up, not v1) and NEVER falls down — any miss refuses exactly
+                // as slice-8 did (`pinned-exec-home-unavailable`). The island reopens NOTHING for grants
+                // or /usr: mutable grants stay `MS_NOEXEC`, only the re-verified pinned inode gains exec.
                 if trust == TrustBand::Pinned {
+                    let exec_fd_bound = der.exec_fd.is_some();
+                    let pf = if effective == Tier::T0 { Some(proc_plane::preflight()) } else { None };
+                    if let (Tier::T0, Some(proc_plane::Preflight::Ready { abi }), Some(exec_fd)) =
+                        (effective, pf, der.exec_fd.take())
+                    {
+                        eprintln!(
+                            "SANDBOX-DECISION cleared construct-at=T0 island=exec effective=T0 requested={} trust={} caps={} profile={} landlock-abi={abi}",
+                            requested.label(), trust.label(), caps.label(), profile.label()
+                        );
+                        let t0 = T0Spec {
+                            id: id.clone(),
+                            anchor: anchor.clone(),
+                            grants: grants.clone(),
+                            workload: workload.clone(),
+                            abi,
+                            mem_max: DEFAULT_MEM_MAX,
+                            pids_max: DEFAULT_PIDS_MAX,
+                            exec_island: Some(exec_fd),
+                        };
+                        return match proc_plane::construct(&t0) {
+                            Ok(code) => code,
+                            Err(e) => {
+                                eprintln!("gatekeeperd/proc_plane: FAIL island construction (fail-closed, no fall-up/down): {e}");
+                                3
+                            }
+                        };
+                    }
                     eprintln!(
-                        "SANDBOX-DECISION refused reason=pinned-exec-home-unavailable effective={} trust={} caps={} profile={} exec_fd_bound={}",
-                        effective.label(), trust.label(), caps.label(), profile.label(), der.exec_fd.is_some()
+                        "SANDBOX-DECISION refused reason=pinned-exec-home-unavailable effective={} trust={} caps={} profile={} exec_fd_bound={exec_fd_bound}",
+                        effective.label(), trust.label(), caps.label(), profile.label()
                     );
                     return 15;
                 }
@@ -432,6 +462,7 @@ pub fn cli(args: &[String]) -> i32 {
                                 abi,
                                 mem_max: DEFAULT_MEM_MAX,
                                 pids_max: DEFAULT_PIDS_MAX,
+                                exec_island: None,
                             };
                             return match proc_plane::construct(&t0) {
                                 Ok(code) => code,

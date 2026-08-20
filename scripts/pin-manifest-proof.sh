@@ -13,17 +13,32 @@
 #   (3) an open-world class matches the digest but FAILS the domain gate ⇒ `T-hostile` (no laundering).
 #   (4) an empty manifest ⇒ no pins ⇒ `T-hostile`.
 #   (5) a malformed manifest is REJECTED fail-high ⇒ no pins ⇒ `T-hostile`.
+# slice-9 (T0 exec island) extends the same oracle:
+#   (6) a closed-world pinned STATIC PIE now RUNS from a per-inode exec island at T0, while every
+#       mutable grant stays MS_NOEXEC — proven by the pinned workload's own mmap(PROT_EXEC)+execve of a
+#       mutable grant both returning EPERM (the mmap case is the load-bearing no-laundering control).
+#   (7) a rogue (unpinned) verity inode ⇒ T-hostile ⇒ no island is constructed and it never runs.
+#   (8) a DYNAMIC (PT_INTERP) pinned binary is rejected — island construction fails closed (Fork A:
+#       static-PIE only; no dynamic-loader/library closure is authenticated in v1).
 set -uo pipefail
 
 if [ "${IN_CONTAINER:-0}" != "1" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
   echo "=== building release gatekeeperd + gate-probe (host) ==="
-  ( cd "$REPO_ROOT" && cargo build --release -p gatekeeperd -p shrek-gate-probe ) || exit 3
+  # The pinned entrypoint MUST be a static PIE (slice-9 Fork A) — build gate-probe with crt-static so
+  # it has NO PT_INTERP. Keep a DYNAMIC copy too (default build = PT_INTERP) to prove the static-PIE
+  # gate fails closed on a dynamically-linked pin (section 8).
+  ( cd "$REPO_ROOT" \
+      && cargo build --release -p gatekeeperd \
+      && cargo build --release -p shrek-gate-probe \
+      && cp target/release/gate-probe target/release/gate-probe-dyn \
+      && RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p shrek-gate-probe ) || exit 3
   echo "=== launching privileged debian:trixie oracle ==="
-  exec docker run --rm --privileged -e IN_CONTAINER=1 \
+  exec docker run --rm --privileged --cgroupns=private -e IN_CONTAINER=1 \
     -v "$REPO_ROOT/scripts/pin-manifest-proof.sh:/proof.sh:ro" \
     -v "$REPO_ROOT/target/release/gatekeeperd:/gatekeeperd:ro" \
     -v "$REPO_ROOT/target/release/gate-probe:/gate-probe:ro" \
+    -v "$REPO_ROOT/target/release/gate-probe-dyn:/gate-probe-dyn:ro" \
     debian:trixie bash /proof.sh
 fi
 
@@ -31,9 +46,36 @@ fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
 apt-get install -y --no-install-recommends e2fsprogs util-linux >/dev/null 2>&1
+mount --make-rshared / 2>/dev/null || true
+
+# cgroup-v2 delegation for the slice-9 exec-island CONSTRUCTION (slice-8's refusal path never built,
+# so this is new here). gatekeeperd moves ITSELF into a `_daemon` leaf then creates the per-sandbox
+# leaf beside it — a dance that needs its base cgroup to contain ONLY gatekeeperd. So (a) evacuate the
+# container root into `init`, (b) delegate memory+pids from the root, and (c) launch each island
+# gatekeeperd into a FRESH empty `shrek-gk-<pid>` base via the wrapper below (one per invocation, so
+# repeated island runs never collide on a base that already has subtree_control enabled).
+if [ -w /sys/fs/cgroup/cgroup.subtree_control ]; then
+  mkdir -p /sys/fs/cgroup/init
+  for p in $(cat /sys/fs/cgroup/cgroup.procs 2>/dev/null); do
+    echo "$p" > /sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true
+  done
+  echo "+memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null \
+    && echo "  cgroup: root delegates memory+pids" \
+    || echo "  [warn] cgroup root subtree_control not writable — island cgroup step will fail closed"
+fi
+cat > /run/gk-isl.sh <<'EOF'
+#!/bin/sh
+B=/sys/fs/cgroup/shrek-gk-$$
+mkdir -p "$B"
+echo $$ > "$B/cgroup.procs" 2>/dev/null || true
+exec /gatekeeperd "$@"
+EOF
+chmod +x /run/gk-isl.sh
 
 GK=/gatekeeperd
+GKISL=/run/gk-isl.sh
 GP=/gate-probe
+GPDYN=/gate-probe-dyn
 fails=0
 pass() { echo "PASS [$1]"; }
 fail() { echo "FAIL [$1]"; [ -n "${2:-}" ] && sed 's/^/    /' "$2"; fails=$((fails + 1)); }
@@ -68,22 +110,29 @@ mkdir -p /usr/lib/shrek
 manifest() { printf 'shrek-pin-manifest v1\n%s\n' "$1" > /usr/lib/shrek/pin-manifest; }
 
 # Request T0/C-ro-nosec: (Pinned,RoNosec)=T0 and floor(Pinned)=T0, so a T-pinned band clears the
-# re-check as Construct{T0} and hits the pin refusal guard (rather than a floor/caps refusal). For a
-# T-hostile derivation the same request is a downgrade-below-floor(T2) refusal — we assert the DERIVED
-# band on the always-printed SANDBOX-PROVENANCE line, not the rc, for those cases.
+# re-check as Construct{T0}. A closed-world static-PIE pin then constructs the exec island; a
+# T-hostile derivation is instead a downgrade-below-floor(T2) refusal — we assert the DERIVED band on
+# the always-printed SANDBOX-PROVENANCE line, not the rc, for those refusal cases.
 run() { OUT=$("$GK" sandbox --tier T0 --trust "$1" --caps C-ro-nosec --profile C-ro-nosec \
         --anchor /tmp --grant x -- "$2" 2>&1); RC=$?; printf '%s\n' "$OUT" > /tmp/out; }
 
-echo "== (1) closed-world pin ⇒ T-pinned, fd bound, exec REFUSED fail-closed =="
+# slice-9 exec-island driver. A mutable grant: a real +x executable on an ORDINARY (writable,
+# non-verity) fs, so the ONLY thing that can stop execve/mmap(PROT_EXEC) of it is the sandbox's
+# MS_NOEXEC bind (I2/I5), not file perms. Driven through the cgroup wrapper (genuine T0 construction).
+GDIR=/tmp/isl; mkdir -p "$GDIR"; cp "$GP" "$GDIR/evil"; chmod +x "$GDIR/evil"
+island_run() { OUT=$("$GKISL" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+        --anchor "$GDIR" --grant evil -- "$1" island "$GDIR/evil" 2>&1); RC=$?; printf '%s\n' "$OUT" > /tmp/out; }
+
+echo "== (1) EXEC ISLAND: closed-world pinned static-PIE ⇒ T-pinned AND RUNS; mutable grant NOEXEC =="
 manifest "$ALGO $HEX closed-world"
-run T-pinned "$MNT/pinned-probe"
+island_run "$MNT/pinned-probe"
 if grep -q 'derived=T-pinned' /tmp/out && grep -q 'pinned=true' /tmp/out && grep -q 'exec_fd_bound=true' /tmp/out; then
   pass "classification: derived=T-pinned pinned=true exec_fd_bound=true"
 else fail "classification T-pinned" /tmp/out; fi
-if [ "$RC" = 15 ] && grep -q 'reason=pinned-exec-home-unavailable' /tmp/out; then
-  pass "execution refused deterministically (rc=15 pinned-exec-home-unavailable)"
-else fail "exec refusal (rc=$RC)" /tmp/out; fi
-if ! grep -q 'construct-at=' /tmp/out; then pass "no constructor ran (no up/down workaround)"; else fail "a constructor ran" /tmp/out; fi
+if grep -q 'construct-at=T0 island=exec' /tmp/out; then pass "island constructor ran at T0 (exec surface opened for exactly one inode)"; else fail "island route not taken (rc=$RC)" /tmp/out; fi
+if grep -q 'SHREK_GATE: PASS gate=island-ran' /tmp/out; then pass "pinned static-PIE executed from the re-verified exec island"; else fail "pinned bytes did not run" /tmp/out; fi
+if grep -q 'SHREK_GATE: PASS gate=island-grant-mmap-exec-eperm' /tmp/out; then pass "mutable grant mmap(PROT_EXEC) ⇒ EPERM (MS_NOEXEC blocks library-load laundering)"; else fail "grant mmap-exec not EPERM" /tmp/out; fi
+if grep -q 'SHREK_GATE: PASS gate=island-grant-execve-denied' /tmp/out; then pass "mutable grant execve ⇒ denied (NOEXEC + Landlock no-EXECUTE)"; else fail "grant execve not denied" /tmp/out; fi
 
 echo "== (2) anti-spoof: one-byte-different verity inode ⇒ T-hostile =="
 run T-pinned "$MNT/rogue-probe"
@@ -111,6 +160,28 @@ run T-pinned "$MNT/pinned-probe"
 if grep -q 'MANIFEST REJECTED' /tmp/out && grep -q 'derived=T-hostile' /tmp/out; then
   pass "malformed manifest rejected fail-high ⇒ T-hostile"
 else fail "malformed fail-high" /tmp/out; fi
+
+# ================================ slice-9: T0 exec island ========================================
+# (section 1 above is the positive island run; these two are the negative/fail-closed island cases.)
+
+echo "== (6) rogue inode: an unpinned verity inode never reaches the island =="
+manifest "$ALGO $HEX closed-world"   # section 5 left it malformed; restore the valid closed-world pin
+island_run "$MNT/rogue-probe"
+if grep -q 'derived=T-hostile' /tmp/out && ! grep -q 'island=exec' /tmp/out && ! grep -q 'gate=island-ran' /tmp/out; then
+  pass "rogue (unpinned) inode ⇒ T-hostile, no island constructed, pinned bytes never ran"
+else fail "rogue reached the island" /tmp/out; fi
+
+echo "== (7) fail-closed: a DYNAMIC (PT_INTERP) pinned binary is rejected — static-PIE only (Fork A) =="
+cp "$GPDYN" "$MNT/dyn-probe"
+"$GK" pin-verity enable "$MNT/dyn-probe" >/dev/null || { echo "FAIL provision: enable-verity dyn"; exit 2; }
+DDL=$("$GK" pin-verity measure "$MNT/dyn-probe"); DALGO=${DDL%% *}; DHEX=${DDL##* }
+manifest "$DALGO $DHEX closed-world"
+island_run "$MNT/dyn-probe"
+# derived=T-pinned (digest matches, closed-world class) and the island ROUTE is entered, but the
+# static-PIE gate rejects PT_INTERP ⇒ construction fails closed, workload never runs, rc!=0.
+if grep -q 'derived=T-pinned' /tmp/out && ! grep -q 'gate=island-ran' /tmp/out && [ "$RC" != 0 ]; then
+  pass "dynamic pin ⇒ island construction fails closed, pinned bytes never ran (rc=$RC)"
+else fail "dynamic pin not fail-closed" /tmp/out; fi
 
 echo
 if [ "$fails" = 0 ]; then

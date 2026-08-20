@@ -28,6 +28,10 @@ install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl} image/
 # Phase-5 slice-7 (B1): the sealed closed-world in-sandbox acceptance probe (spike-only, strip before
 # ship with the other gate scaffolding). Enrolled in gatekeeperd's compiled-in CLOSED_WORLD so it
 # legitimately derives T-first on the sealed image (a shell cannot — B1 treats it as open-world).
+# Phase-5 slice-9: rebuild it as a STATIC PIE (no PT_INTERP) so the S7 exec-island gate can RUN it as a
+# pinned entrypoint (Fork A rejects a dynamically-linked pin). A static binary runs anywhere a dynamic
+# one does, so S4/S6 are unaffected, and the S6 manifest bake measures whatever is installed here.
+RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p shrek-gate-probe
 install -m0755 target/release/gate-probe image/overlay/usr/libexec/shrek/gate-probe
 install -m0644 docs/*.md image/overlay/usr/share/doc/shrek/
 

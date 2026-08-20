@@ -1,6 +1,6 @@
 #!/bin/sh
 # Phase-5 VM GATE: slice-1 M4 mount plane + slice-2 decision plane + slice-3 egress plane + slice-4 T0 +
-# slice-6 T2 (S5 block) + slice-8 positive pin (S6 block). SPIKE ONLY: remove this file,
+# slice-6 T2 (S5 block) + slice-8 positive pin (S6) + slice-9 exec island (S7). SPIKE ONLY: remove this file,
 # shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped image
 # (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md, docs/phase5-slice8-pin-manifest.md §8).
 #
@@ -236,20 +236,19 @@ if [ "$s5fail" != 0 ]; then
 fi
 [ "$s5fail" = 0 ] && emit "PASS S5 T2-plane VM gate" || emit "FAIL S5 T2-plane VM gate"
 
-# ---- Phase-5 slice-8: POSITIVE PIN (B1 T-pinned) on the SEALED image (docs/phase5-slice8-pin-manifest.md §8) ----
-# The oracle (scripts/pin-manifest-proof.sh) drives the IDENTICAL release binary on a genuine fs-verity
-# fs and covers all five manifest cases (incl. the open-world/empty/malformed cases, which need a
-# WRITABLE manifest we cannot have on dm-verity /usr). The VM proves the one thing only the sealed image
-# can: the manifest BAKED under dm-verity /usr at build time (fsverity digest of the sealed gate-probe,
-# build-in-container.sh) matches the REAL kernel FS_IOC_MEASURE_VERITY measurement taken at runtime on
-# the sealed kernel ⇒ gatekeeperd DERIVES T-pinned, binds the measured fd, and REFUSES execution
-# fail-closed (rc=15, no constructor — classification-only slice). Anti-spoof: a second, one-byte-
-# different verity inode is not the pinned digest ⇒ T-hostile. fs-verity is per-file verity; the sealed
-# root is block-level dm-verity (read-only), so the gate provisions a DEDICATED ext4 -O verity loopback
-# on the writable tmpfs /run. FAIL, never skip (amendment D): if the sealed kernel/fs lacks fs-verity
-# the gate goes RED, not silently green.
+# ---- Phase-5 slice-8/9: POSITIVE PIN (B1 T-pinned) + T0 EXEC ISLAND on the SEALED image ----
+# (docs/phase5-slice8-pin-manifest.md §8 + docs/phase5-slice9-pin-exec-home.md §7 build step 5)
+# The oracles drive the IDENTICAL release binary on a genuine fs-verity fs and cover the cases a sealed
+# image cannot (open-world/empty/malformed need a WRITABLE manifest; dynamic-pin fail-closed needs a
+# PT_INTERP pin). The VM proves what only the sealed image can: the manifest BAKED under dm-verity /usr
+# at build time (fsverity digest of the sealed gate-probe, build-in-container.sh) matches the REAL kernel
+# FS_IOC_MEASURE_VERITY at runtime ⇒ gatekeeperd DERIVES T-pinned (S6), and — slice-9 — the closed-world
+# static-PIE pin then RUNS from a per-inode T0 exec island while mutable grants stay MS_NOEXEC (S7).
+# fs-verity is per-file; the sealed root is block-level dm-verity (RO), so the gate provisions a DEDICATED
+# ext4 -O verity loopback on the writable tmpfs /run. FAIL, never skip (amendment D): if the sealed
+# kernel/fs lacks fs-verity the gate goes RED, not silently green.
 s6fail=0
-emit "S6-BEGIN Phase-5 slice-8 positive pin (T-pinned)"
+emit "S6-BEGIN Phase-5 slice-8/9 positive pin + exec island (T-pinned)"
 PINIMG=/run/shrek-pinfs.img
 PINMNT=/run/shrek-pinfs
 PINLOOP=
@@ -274,40 +273,55 @@ else
         DL=$("$GK" pin-verity measure "$PINMNT/pinned-probe" 2>/dev/null)
         emit "S6-provisioned fs-verity pinned-probe=[$DL] (vs baked /usr/lib/shrek/pin-manifest)"
 
-        # (1) positive: the baked closed-world pin ⇒ DERIVES T-pinned, fd bound, exec REFUSED fail-closed.
-        # (Pinned,RoNosec)=T0 and floor(Pinned)=T0, so a T0 request clears the re-check as Construct{T0}
-        # and hits the pin refusal guard rather than a floor/caps refusal.
-        OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
-                --id s6 --anchor "$SRV" --grant project -- "$PINMNT/pinned-probe" 2>&1); prc=$?
+        emit "PASS S6 pin-manifest classification provisioned (baked-manifest == kernel measure)"
+
+        # ---- Phase-5 slice-9: the pinned EXECUTION home — the T0 exec ISLAND, on the sealed kernel ----
+        # The oracle (pin-manifest-proof.sh §1,§6,§7) proves the full mechanism (island runs, mutable-
+        # grant mmap/execve EPERM, rogue no-island, dynamic-pin fail-closed) on genuine fs-verity. The VM
+        # proves the SAME positive path on the SEALED kernel: a closed-world static-PIE pin RUNS from a
+        # per-inode exec island (NOEXEC dropped for that ONE re-verified inode) while every mutable grant
+        # stays MS_NOEXEC — shown by the pinned workload's own mmap(PROT_EXEC)+execve of a mutable grant
+        # both returning EPERM (the mmap case is the load-bearing no-laundering control Landlock does not
+        # govern). gatekeeperd runs in a systemd-delegated scope so its cgroup self-management has a base
+        # it alone occupies (as S4/S5). Dynamic-pin fail-closed is oracle-only (needs a PT_INTERP pin the
+        # sealed image does not carry) — not silently skipped, stated here.
+        # A mutable grant: a real +x executable on the writable grant dir, so ONLY the island's MS_NOEXEC
+        # bind can stop execve/mmap(PROT_EXEC) of it (not file perms). $SRV is writable (S4 staged it).
+        install -m0755 "$GP" "$SRV/project/evil"
+        if command -v systemd-run >/dev/null 2>&1; then
+          OUT=$(systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T0 --trust T-pinned \
+                  --caps C-ro-nosec --profile C-ro-nosec --id s7 --anchor "$SRV" --grant project \
+                  -- "$PINMNT/pinned-probe" island "$SRV/project/evil" 2>&1); prc=$?
+        else
+          OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+                  --id s7 --anchor "$SRV" --grant project -- "$PINMNT/pinned-probe" island "$SRV/project/evil" 2>&1); prc=$?
+        fi
         printf '%s\n' "$OUT"
         if printf '%s\n' "$OUT" | grep -q 'derived=T-pinned' \
-           && printf '%s\n' "$OUT" | grep -q 'pinned=true' \
            && printf '%s\n' "$OUT" | grep -q 'exec_fd_bound=true'; then
-          emit "PASS S6-classify baked-manifest ⇒ derived=T-pinned exec_fd_bound=true (offline bake == kernel measure)"
+          emit "PASS S7-classify baked-manifest ⇒ derived=T-pinned exec_fd_bound=true (offline bake == kernel measure)"
         else
-          emit "FAIL S6-classify (baked digest did not derive T-pinned)"; s6fail=1
+          emit "FAIL S7-classify (baked digest did not derive T-pinned)"; s6fail=1
         fi
-        if [ "$prc" = 15 ] && printf '%s\n' "$OUT" | grep -q 'reason=pinned-exec-home-unavailable'; then
-          emit "PASS S6-failclosed exec refused (rc=15 pinned-exec-home-unavailable)"
-        else
-          emit "FAIL S6-failclosed (rc=$prc)"; s6fail=1
-        fi
-        if printf '%s\n' "$OUT" | grep -q 'construct-at='; then
-          emit "FAIL S6-no-constructor (a constructor ran)"; s6fail=1
-        else
-          emit "PASS S6-no-constructor (no up/down workaround)"
-        fi
+        printf '%s\n' "$OUT" | grep -q 'construct-at=T0 island=exec' \
+          && emit "PASS S7-island-construct (exec surface opened for exactly one inode on the sealed kernel)" \
+          || { emit "FAIL S7-island-construct (no construct-at=T0 island=exec, rc=$prc)"; s6fail=1; }
+        for g in island-ran island-grant-mmap-exec-eperm island-grant-execve-denied; do
+          printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" \
+            && emit "PASS S7-$g" || { emit "FAIL S7-$g"; s6fail=1; }
+        done
 
-        # (2) anti-spoof: the one-byte-different second verity inode is not pinned ⇒ T-hostile. Its T0
-        # request is a downgrade-below-floor(T2) refusal, so assert the DERIVED band on the always-printed
-        # provenance line, not the rc.
+        # anti-spoof: the one-byte-different second verity inode is not pinned ⇒ T-hostile ⇒ no island is
+        # constructed and the pinned bytes never run. Its T0 request is a downgrade-below-floor(T2)
+        # refusal, so assert the DERIVED band on the always-printed provenance line, not the rc.
         OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
-                --id s6r --anchor "$SRV" --grant project -- "$PINMNT/rogue-probe" 2>&1)
+                --id s7r --anchor "$SRV" --grant project -- "$PINMNT/rogue-probe" island "$SRV/project/evil" 2>&1)
         if printf '%s\n' "$OUT" | grep -q 'derived=T-hostile' \
-           && printf '%s\n' "$OUT" | grep -q 'pinned=false'; then
-          emit "PASS S6-antispoof rogue verity inode ⇒ T-hostile"
+           && ! printf '%s\n' "$OUT" | grep -q 'island=exec' \
+           && ! printf '%s\n' "$OUT" | grep -q 'gate=island-ran'; then
+          emit "PASS S7-antispoof rogue verity inode ⇒ T-hostile, no island, pinned bytes never ran"
         else
-          emit "FAIL S6-antispoof"; s6fail=1
+          emit "FAIL S7-antispoof"; s6fail=1
         fi
       else
         emit "FAIL S6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; s6fail=1
@@ -321,5 +335,5 @@ else
     emit "FAIL S6 reason=mkfs-verity (ext4 -O verity unsupported on sealed kernel)"; s6fail=1
   fi
 fi
-[ "$s6fail" = 0 ] && emit "PASS S6 pin-plane VM gate" || emit "FAIL S6 pin-plane VM gate"
+[ "$s6fail" = 0 ] && emit "PASS S7 pin-exec-plane VM gate" || emit "FAIL S7 pin-exec-plane VM gate"
 verdict_done=1

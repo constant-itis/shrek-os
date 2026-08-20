@@ -50,11 +50,19 @@ fn dir_names(p: &str) -> Result<Vec<String>, ErrorKind> {
     Ok(v)
 }
 
-// x86_64 raw `mount(2)` (syscall 165) — the ONE thing std cannot express. Used only to prove seccomp
-// DENIES it at T0; on error the kernel returns `-errno`. No libc dependency (minimal-deps convention).
+// x86_64 raw syscalls std cannot express — used only to prove the kernel DENIES them; on error the
+// kernel returns `-errno`. No libc dependency (minimal-deps convention).
 const SYS_MOUNT: i64 = 165;
+const SYS_MMAP: i64 = 9;
+const SYS_EXECVE: i64 = 59;
 const EPERM: i64 = 1;
 const EACCES: i64 = 13;
+const PROT_READ: i64 = 1;
+const PROT_EXEC: i64 = 4;
+const MAP_PRIVATE: i64 = 2;
+const O_RDONLY: i64 = 0;
+const SYS_OPEN: i64 = 2;
+const SYS_CLOSE: i64 = 3;
 
 unsafe fn syscall5(n: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
     let ret: i64;
@@ -67,6 +75,56 @@ unsafe fn syscall5(n: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64) -> i64 {
         options(nostack)
     );
     ret
+}
+
+unsafe fn syscall6(n: i64, a1: i64, a2: i64, a3: i64, a4: i64, a5: i64, a6: i64) -> i64 {
+    let ret: i64;
+    core::arch::asm!(
+        "syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a1, in("rsi") a2, in("rdx") a3,
+        in("r10") a4, in("r8") a5, in("r9") a6,
+        lateout("rcx") _, lateout("r11") _,
+        options(nostack)
+    );
+    ret
+}
+
+/// slice-9 exec-island mode: this program IS the pinned static-PIE entrypoint, so merely REACHING
+/// `main` proves the exec island executed re-verified pinned bytes. It then probes the load-bearing
+/// no-laundering property (I2, docs/phase5-slice9 §1, kernel-fact #2624): a MUTABLE grant is on an
+/// `MS_NOEXEC` mount, so both `mmap(PROT_EXEC)` (library-load) AND `execve` of it must fail — the
+/// `mmap` case is the one Landlock does NOT govern, so it is the critical assertion. `grant` is a path
+/// to a real executable file on a mutable grant; it is DATA only (opened + probed, never our loader).
+fn mode_island(grant: &str) {
+    pass("island-ran"); // reaching here = the pinned static PIE ran from the exec island
+
+    // Open the grant read-only (Landlock grants READ on a mutable grant). If even the open fails the
+    // probe cannot make its point — surface it rather than silently passing.
+    let cpath = match CString::new(grant) {
+        Ok(c) => c,
+        Err(_) => return fail("island-grant-open", "bad path"),
+    };
+    let fd = unsafe { syscall5(SYS_OPEN, cpath.as_ptr() as i64, O_RDONLY, 0, 0, 0) };
+    if fd < 0 {
+        return fail("island-grant-open", &format!("open ret={fd}"));
+    }
+
+    // (a) mmap(PROT_EXEC) of the mutable grant ⇒ EPERM on a noexec mount (mmap(2): "the mapped area
+    //     belongs to a file on a filesystem mounted no-exec"). THIS is what stops mutable bytes from
+    //     being loaded as a shared library, and it is not governed by Landlock EXECUTE.
+    let m = unsafe { syscall6(SYS_MMAP, 0, 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0) };
+    check("island-grant-mmap-exec-eperm", m == -EPERM, &format!("mmap ret={m}"));
+    unsafe {
+        syscall5(SYS_CLOSE, fd, 0, 0, 0, 0);
+    }
+
+    // (b) execve of the mutable grant ⇒ denied (noexec EPERM and/or Landlock no-EXECUTE EACCES). On
+    //     success execve never returns; any return is a failure code we assert is a denial.
+    let argv = [cpath.as_ptr() as i64, 0i64];
+    let envp = [0i64];
+    let e = unsafe { syscall5(SYS_EXECVE, cpath.as_ptr() as i64, argv.as_ptr() as i64, envp.as_ptr() as i64, 0, 0) };
+    check("island-grant-execve-denied", e == -EPERM || e == -EACCES, &format!("execve ret={e}"));
 }
 
 /// Attempt `mount -t tmpfs none /mnt`. Returns the raw syscall result (0 = succeeded, `-errno` else).
@@ -147,6 +205,7 @@ fn main() {
         "mount-guest" => mode_mount_guest(),
         "nonet" => mode_nonet(),
         "landlock" => mode_landlock(&std::env::args().nth(2).unwrap_or_else(|| "/srv".into())),
+        "island" => mode_island(&std::env::args().nth(2).unwrap_or_default()),
         other => {
             // Unknown mode: emit nothing actionable (fixed output), exit nonzero. Used by the refusal
             // gates where the workload must never run anyway.

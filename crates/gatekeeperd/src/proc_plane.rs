@@ -38,12 +38,12 @@ use crate::linux_uapi::{
     SECCOMP_RET_KILL_PROCESS,
 };
 use crate::linux_uapi::{openat2, OpenHow, AT_FDCWD, O_CLOEXEC, O_PATH};
-use crate::mount_plane::{open_anchor, pin_beneath, Pinned};
+use crate::mount_plane::{open_anchor, pin_beneath, relocate_exec_island, seal_noexec_in_place, Pinned};
 use std::ffi::CString;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// x32 syscalls carry this bit; the filter kills anything in that range so a denied syscall cannot
@@ -195,6 +195,86 @@ pub struct T0Spec {
     pub abi: i64,
     pub mem_max: u64,
     pub pids_max: u64,
+    /// slice-9 exec island: `Some` ⇒ this is a `T-pinned` static-PIE build. The fd is `der.exec_fd`
+    /// (the `O_RDONLY` fd measured during derivation, bound to the exact pinned inode). When set, the
+    /// constructor re-binds every mutable grant `MS_NOEXEC` and gives the pinned inode alone a
+    /// re-verified exec-capable island + a single-inode Landlock EXECUTE rule; the workload execs the
+    /// island, not the source fd (docs/phase5-slice9-pin-exec-home.md). `None` ⇒ ordinary T0 (no exec
+    /// home for third-party bytes; grants Landlock-read only).
+    pub exec_island: Option<OwnedFd>,
+}
+
+/// The broker-owned exec-island path for a request: the single re-verified inode the pinned
+/// entrypoint is bound to and the ONLY non-`noexec` third-party surface in the sandbox.
+fn island_path(id: &str) -> PathBuf {
+    PathBuf::from(format!("/run/shrek/{id}/exec/entry"))
+}
+
+/// Reject anything that is not a static (loader-free) ELF64 — Fork A, slice-9. A `PT_INTERP` program
+/// header means the binary asks a dynamic loader to pull in shared libraries, an exec/library closure
+/// v1 deliberately does not authenticate. We parse the ELF header + program headers directly (dep-free)
+/// and fail closed on a bad magic, a non-ELF64 class, ANY `PT_INTERP`, or any read/parse error.
+fn reject_if_dynamic(path: &Path) -> io::Result<()> {
+    const PT_INTERP: u32 = 3;
+    let fail = |m: &str| io::Error::new(io::ErrorKind::Other, format!("not a static ELF64: {m}"));
+
+    let mut f = std::fs::File::open(path)?;
+    let mut eh = [0u8; 64];
+    f.read_exact(&mut eh)?;
+    if &eh[0..4] != b"\x7fELF" {
+        return Err(fail("bad magic"));
+    }
+    if eh[4] != 2 {
+        return Err(fail("not ELFCLASS64"));
+    }
+    if eh[5] != 1 {
+        return Err(fail("not little-endian"));
+    }
+    let e_phoff = u64::from_le_bytes(eh[32..40].try_into().unwrap());
+    let e_phentsize = u16::from_le_bytes(eh[54..56].try_into().unwrap()) as usize;
+    let e_phnum = u16::from_le_bytes(eh[56..58].try_into().unwrap()) as usize;
+    if e_phnum == 0 || e_phentsize < 4 {
+        return Err(fail("no program headers"));
+    }
+    // Cap the header table we read (defends a hostile e_phnum) — 4096 phdrs is far beyond any real ELF.
+    if e_phnum > 4096 {
+        return Err(fail("implausible program-header count"));
+    }
+    f.seek(SeekFrom::Start(e_phoff))?;
+    let mut ph = vec![0u8; e_phentsize];
+    for _ in 0..e_phnum {
+        f.read_exact(&mut ph)?;
+        let p_type = u32::from_le_bytes(ph[0..4].try_into().unwrap());
+        if p_type == PT_INTERP {
+            return Err(fail("PT_INTERP present (dynamically linked)"));
+        }
+    }
+    Ok(())
+}
+
+/// Construct the exec island in the per-request child's private mount ns (slice-9). Fail-closed
+/// throughout: on ANY error the caller aborts the build (no workload runs). Runs in P1 AFTER the
+/// unshare + mount-private, BEFORE the P2 fork — the results are mounts (path-based) that survive P2's
+/// fd scrub; the source `exec_fd` is inherited here and is never handed to the workload.
+fn build_exec_island(spec: &T0Spec, exec_fd: RawFd) -> io::Result<()> {
+    // 1. Re-assert MS_NOEXEC on every mutable grant, in place + TOCTOU-safe. This — not Landlock — is
+    //    what stops the pinned binary from executing or mmap(PROT_EXEC)-loading mutable bytes (I2/I5).
+    let ctx = |label: &str, r: io::Result<()>| -> io::Result<()> {
+        r.map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))
+    };
+    let anchor = open_anchor(&spec.anchor).map_err(|e| io::Error::new(e.kind(), format!("open-anchor: {e}")))?;
+    for name in &spec.grants {
+        let p = pin_beneath(&anchor, name).map_err(|e| io::Error::new(e.kind(), format!("pin-grant {name}: {e}")))?;
+        ctx(&format!("seal-grant {name}"), seal_noexec_in_place(&p, &spec.anchor.join(name)))?;
+    }
+    // 2. Bind the pinned entrypoint inode onto its island, re-verify (dev,ino)+fs-verity digest, and
+    //    harden RO|NOSUID|NODEV WITHOUT NOEXEC (the one deliberate exception, for this one inode). The
+    //    entrypoint is re-opened by path IN THIS ns (bind sources must be ns-local) and re-verified
+    //    against the derived exec_fd (the identity+digest authority) — see relocate_exec_island.
+    ctx("relocate-island", relocate_exec_island(Path::new(&spec.workload[0]), exec_fd, &island_path(&spec.id)))?;
+    // 3. Static-PIE only (Fork A): reject a PT_INTERP entrypoint before it can run.
+    ctx("static-pie-check", reject_if_dynamic(&island_path(&spec.id)))?;
+    Ok(())
 }
 
 /// A cgroup-v2 leaf that bounds the sandbox. Created by the (host-root) gatekeeper BEFORE any user
@@ -283,9 +363,17 @@ fn install_landlock(spec: &T0Spec) -> io::Result<()> {
     let ruleset = landlock_create_ruleset(&attr)?;
     let mut dev_fds: Vec<OwnedFd> = Vec::new(); // keep alive until enforced
 
-    // Base runtime: /usr (exec+read). Opened O_PATH here, used as the rule's parent_fd.
+    // Base runtime: /usr. Opened O_PATH here, used as the rule's parent_fd. Ordinary T0 gets exec+read
+    // (first-party workload runs from /usr). The slice-9 exec-island (static-PIE, Fork A) gets READ
+    // ONLY — the pinned binary links nothing, so /usr is NOT an exec surface; EXECUTE is scoped to the
+    // island inode alone (added below). This keeps the reopened exec surface a single frozen inode.
     let usr = open_anchor(std::path::Path::new("/usr"))?;
-    let usr_rule = LandlockPathBeneathAttr { allowed_access: usr_access(handled), parent_fd: usr.as_raw_fd() };
+    let usr_allow = if spec.exec_island.is_some() {
+        (LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR) & handled
+    } else {
+        usr_access(handled)
+    };
+    let usr_rule = LandlockPathBeneathAttr { allowed_access: usr_allow, parent_fd: usr.as_raw_fd() };
     landlock_add_path_beneath(ruleset.as_raw_fd(), &usr_rule)?;
 
     // Minimal /dev — best-effort (skip absent nodes; a missing allowance only tightens the sandbox).
@@ -317,12 +405,32 @@ fn install_landlock(spec: &T0Spec) -> io::Result<()> {
         pins.push(p); // keep fds alive until the ruleset is enforced
     }
 
+    // slice-9 exec island: the ONE third-party inode allowed to execve. EXECUTE|READ_FILE scoped to
+    // exactly the island path via a single-file O_PATH parent_fd (the per-file rule form proven for
+    // /dev above). The island mount already dropped NOEXEC for this inode alone and re-verified it to
+    // the pinned (dev,ino)+fs-verity digest; every other path stays no-exec (grants + /usr read-only).
+    let mut island_fd: Option<OwnedFd> = None;
+    if spec.exec_island.is_some() {
+        let island = island_path(&spec.id);
+        let ipath = island
+            .to_str()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "island path not utf-8"))?;
+        let fd = open_opath(ipath)?;
+        let rule = LandlockPathBeneathAttr {
+            allowed_access: (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE) & handled,
+            parent_fd: fd.as_raw_fd(),
+        };
+        landlock_add_path_beneath(ruleset.as_raw_fd(), &rule)?;
+        island_fd = Some(fd);
+    }
+
     // no_new_privs is required before restrict_self without CAP_SYS_ADMIN and is a defence in depth
     // regardless; then enforce. The O_PATH fds (all O_CLOEXEC) vanish at execve.
     set_no_new_privs()?;
     landlock_restrict_self(ruleset.as_raw_fd())?;
     drop(pins);
     drop(dev_fds);
+    drop(island_fd);
     drop(anchor);
     drop(usr);
     drop(ruleset);
@@ -366,9 +474,17 @@ fn sandbox_init_and_exec(spec: &T0Spec) -> ! {
         std::process::exit(126);
     }
 
-    // (4) execve in place (absolute path — no PATH search, which Landlock would deny anyway).
-    let err = Command::new(&spec.workload[0]).args(&spec.workload[1..]).exec();
-    eprintln!("proc_plane/P2: FAIL exec {}: {err} — failed closed", spec.workload[0]);
+    // (4) execve (absolute path — no PATH search, which Landlock would deny anyway). For a slice-9
+    // pinned build the target is the re-verified EXEC ISLAND, not the original entrypoint path
+    // (whose source mount may be noexec) nor the source fd — the island is the exec-capable bind of
+    // the same inode, re-verified (dev,ino)+fs-verity in build_exec_island and the sole EXECUTE inode.
+    let exec_target: PathBuf = if spec.exec_island.is_some() {
+        island_path(&spec.id)
+    } else {
+        PathBuf::from(&spec.workload[0])
+    };
+    let err = Command::new(&exec_target).args(&spec.workload[1..]).exec();
+    eprintln!("proc_plane/P2: FAIL exec {}: {err} — failed closed", exec_target.display());
     std::process::exit(127);
 }
 
@@ -404,11 +520,19 @@ pub fn construct(spec: &T0Spec) -> io::Result<i32> {
                 ),
             )?;
             step("id-maps", write_id_maps())?;
-            // Contain any future mounts to this ns (belt-and-suspenders; T0 mounts nothing today).
+            // Contain any future mounts to this ns (belt-and-suspenders; base T0 mounts nothing).
             step(
                 "mount-private",
                 linux_uapi::mount(c"none", c"/", None, linux_uapi::MS_REC | linux_uapi::MS_PRIVATE, None),
             )?;
+
+            // slice-9: build the exec island for a T-pinned static-PIE entrypoint — inside THIS private
+            // mount ns (never touches the host mount table). Re-binds every mutable grant MS_NOEXEC and
+            // gives the pinned inode alone a re-verified exec-capable island. Fail-closed: an error here
+            // aborts P1 (exit 125) so no half-built exec home ever runs.
+            if let Some(exec_fd) = spec.exec_island.as_ref() {
+                step("exec-island", build_exec_island(spec, exec_fd.as_raw_fd()))?;
+            }
 
             // P2: pid 1 of the new pid ns. It installs the walls and execs (or _exits non-zero).
             let p2 = unsafe { fork()? };
@@ -463,6 +587,64 @@ mod tests {
         LANDLOCK_ACCESS_FS_MAKE_DIR, LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_REMOVE_DIR,
         LANDLOCK_ACCESS_FS_REMOVE_FILE,
     };
+
+    /// Build a minimal in-memory ELF64 (little-endian): a 64-byte header at `e_phoff=64` followed by
+    /// `p_types.len()` program headers of 56 bytes each, only `p_type` populated. Enough to exercise
+    /// the static-PIE gate without a real toolchain.
+    fn synth_elf64(e_type: u16, p_types: &[u32]) -> Vec<u8> {
+        const PHENT: usize = 56;
+        let mut v = vec![0u8; 64 + p_types.len() * PHENT];
+        v[0..4].copy_from_slice(b"\x7fELF");
+        v[4] = 2; // ELFCLASS64
+        v[5] = 1; // little-endian
+        v[6] = 1; // version
+        v[16..18].copy_from_slice(&e_type.to_le_bytes());
+        v[32..40].copy_from_slice(&64u64.to_le_bytes()); // e_phoff
+        v[54..56].copy_from_slice(&(PHENT as u16).to_le_bytes()); // e_phentsize
+        v[56..58].copy_from_slice(&(p_types.len() as u16).to_le_bytes()); // e_phnum
+        for (i, &t) in p_types.iter().enumerate() {
+            let off = 64 + i * PHENT;
+            v[off..off + 4].copy_from_slice(&t.to_le_bytes());
+        }
+        v
+    }
+
+    fn write_tmp(name: &str, bytes: &[u8]) -> PathBuf {
+        let p = std::env::temp_dir().join(format!("shrek-elf-{}-{name}", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    #[test]
+    fn static_pie_gate_accepts_loader_free_elf64_and_rejects_pt_interp() {
+        const PT_LOAD: u32 = 1;
+        const PT_INTERP: u32 = 3;
+        const PT_GNU_STACK: u32 = 0x6474_e551;
+        const ET_DYN: u16 = 3;
+        const ET_EXEC: u16 = 2;
+
+        // static PIE (ET_DYN, no INTERP) and static non-PIE (ET_EXEC, no INTERP) both pass.
+        let pie = write_tmp("pie", &synth_elf64(ET_DYN, &[PT_LOAD, PT_LOAD, PT_GNU_STACK]));
+        assert!(reject_if_dynamic(&pie).is_ok(), "static PIE must be accepted");
+        let exec = write_tmp("exec", &synth_elf64(ET_EXEC, &[PT_LOAD, PT_GNU_STACK]));
+        assert!(reject_if_dynamic(&exec).is_ok(), "static ET_EXEC must be accepted");
+
+        // ANY PT_INTERP ⇒ dynamically linked ⇒ reject (Fork A).
+        let dynamic = write_tmp("dyn", &synth_elf64(ET_DYN, &[PT_INTERP, PT_LOAD]));
+        assert!(reject_if_dynamic(&dynamic).is_err(), "PT_INTERP must be rejected");
+
+        // Not ELF64 / not ELF ⇒ fail closed.
+        let bad_magic = write_tmp("bad", b"#!/bin/sh\necho hi\n");
+        assert!(reject_if_dynamic(&bad_magic).is_err(), "non-ELF must be rejected");
+        let mut elf32 = synth_elf64(ET_DYN, &[PT_LOAD]);
+        elf32[4] = 1; // ELFCLASS32
+        let p32 = write_tmp("elf32", &elf32);
+        assert!(reject_if_dynamic(&p32).is_err(), "ELFCLASS32 must be rejected");
+
+        for p in [pie, exec, dynamic, bad_magic, p32] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 
     #[test]
     fn abi_mask_grows_monotonically_and_never_exceeds_known_bits() {
