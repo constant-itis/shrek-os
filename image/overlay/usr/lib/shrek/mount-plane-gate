@@ -37,15 +37,22 @@ echo PROJECT > "$SRV/project/marker"
 echo VAULT   > "$SRV/vault/marker"
 
 # In-sandbox probe: assert the caps-enforced mount set and emit a gate per property.
+# F-M4 hygiene (docs/phase5-consolidation.md §1c/§2b): the token is assembled from parts (`$G $P`/`$G
+# $F`) so the probe SOURCE contains NO literal `SHREK_GATE: FAIL`/`PASS`. gatekeeperd echoes the nspawn
+# argv (incl. this `-c` body) to its stderr/console; with the literal removed, that echo no longer
+# prints a stray `SHREK_GATE: FAIL` line. Runtime stdout still expands to the real tokens, so the
+# anchored `^SHREK_GATE: PASS` parser is unchanged. (Acceptance for the NEXT image cycle: 0 raw
+# SHREK_GATE:FAIL on the console — VM-confirmation of this cosmetic change is deferred to that cycle.)
 PROBE='
-m=$(cat /srv/project/marker 2>/dev/null); [ "$m" = PROJECT ] && echo "SHREK_GATE: PASS gate=in-project-readable" || echo "SHREK_GATE: FAIL gate=in-project-readable m=$m"
-if cat /srv/vault/marker 2>&1 | grep -qi "No such file"; then echo "SHREK_GATE: PASS gate=in-vault-enoent"; else echo "SHREK_GATE: FAIL gate=in-vault-enoent"; fi
-l=$(ls /srv | tr "\n" ,); [ "$l" = "project," ] && echo "SHREK_GATE: PASS gate=in-vault-absent" || echo "SHREK_GATE: FAIL gate=in-vault-absent l=$l"
-o=$(stat -c %u /srv/project/marker); [ "$o" = 65534 ] && echo "SHREK_GATE: PASS gate=in-private-users" || echo "SHREK_GATE: FAIL gate=in-private-users o=$o"
+G="SHREK_GATE:"; P="PASS"; F="FAIL"
+m=$(cat /srv/project/marker 2>/dev/null); [ "$m" = PROJECT ] && echo "$G $P gate=in-project-readable" || echo "$G $F gate=in-project-readable m=$m"
+if cat /srv/vault/marker 2>&1 | grep -qi "No such file"; then echo "$G $P gate=in-vault-enoent"; else echo "$G $F gate=in-vault-enoent"; fi
+l=$(ls /srv | tr "\n" ,); [ "$l" = "project," ] && echo "$G $P gate=in-vault-absent" || echo "$G $F gate=in-vault-absent l=$l"
+o=$(stat -c %u /srv/project/marker); [ "$o" = 65534 ] && echo "$G $P gate=in-private-users" || echo "$G $F gate=in-private-users o=$o"
 '
 # Capture the workload's STDOUT only (the in-sandbox gate lines); let gatekeeperd's diagnostics flow
-# to the console via stderr. Capturing 2>&1 would fold in the `exec …` echo, whose embedded probe
-# source literally contains SHREK_GATE strings and would corrupt the counts.
+# to the console via stderr. (Historically the 2>&1 argv-echo folded literal SHREK_GATE strings into
+# the console; the F-M4 token-assembly above removes that literal at the source.)
 OUT=$("$GK" sandbox --id m4 --anchor "$SRV" --grant project -- /bin/sh -c "$PROBE")
 gkrc=$?
 printf '%s\n' "$OUT"
