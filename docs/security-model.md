@@ -44,7 +44,7 @@ Each layer, the primitive it uses, what it *guarantees*, and — critically — 
 
 | Layer | Primitive | Guarantees | Does NOT guarantee |
 |---|---|---|---|
-| Boot trust | signed UKI (Shrek key) · dm-verity · MOK Secure Boot · TPM PCRs | base image + kernel are authentic and unmodified at boot | writable-partition integrity (§4); anti-rollback unless §8/C1 |
+| Boot trust | signed UKI (Shrek key) · dm-verity · UEFI db Secure Boot · TPM PCRs | base image + kernel are authentic and unmodified at boot | writable-partition integrity (§4); anti-rollback unless §8/C1 |
 | Sealed policy | static baked into the verity image + mutable grants under fs-verity with a TPM NV monotonic counter (§4) | the *definition* of every wall is authentic and rollback-fresh | correctness of a policy the operator authored (right-sizing = `agents.md`) |
 | Agent wall | Landlock + seccomp (per-process, incl. swampd-as-subject) | named domains are unreachable to the confined process, kernel-enforced | survival of a kernel LPE at T0/T1 (N1) |
 | System MAC | AppArmor (path-based) | belt-and-suspenders system confinement | the primary agent wall (that is Landlock) |
@@ -72,7 +72,7 @@ fully answers it), `MITIGATED` (bounded, residual named), `AMEND` (needs a decis
 | ADV-2 sandbox tier/caps escape | tier matrix + downward-forbidden floor; caps tier-independent | isolation + radius | MITIGATED (→ §6/B1 trust-band) |
 | ADV-3 compromised swampd | swampd is a **subject** of Landlock, default-deny read scope | agent wall | CLOSED for A1 bytes (→ §5) |
 | ADV-4 supply-chain on layer/image | Verity + signature + reproducible-build pin | sealed policy + update | MITIGATED (valid-but-malicious = N2) |
-| ADV-5 evil-maid / boot | signed UKI + dm-verity + MOK + TPM | boot trust | MITIGATED (→ §4 writable parts, §8/C1 rollback) |
+| ADV-5 evil-maid / boot | signed UKI + dm-verity + UEFI db key enrollment + TPM | boot trust | MITIGATED (→ §4 writable parts, §8/C1 rollback) |
 | ADV-6 malicious app | Flatpak portals + routing rule; native ⇒ mandatory sandbox | isolation | CLOSED (§8/D1 — no unconfined path) |
 | ADV-7 DLP evasion | *by design advisory*; wall holds the catastrophic set | tripwire | ACCEPTED (N8) + §7 placement |
 | ADV-8 confused-deputy via gatekeeperd | independent re-check from **sealed** policy source | broker | CLOSED via §4/§6 (B4 rename race → MITIGATED) |
@@ -104,7 +104,7 @@ actually fits it, neither on a plain writable partition:**
 STATIC POLICY  (identical for all installs of a Shrek version — version-static)
   Landlock ruleset templates · AppArmor profiles · the (trust×caps) matrix · the floor table
   · oniond trust roots · swampd indexable-tree allow-list template · base agent-profile schemas
-  ⇒ BAKED INTO THE bootc IMAGE, under the dm-verity sealed root. This is what architecture.md
+  ⇒ BAKED INTO THE sealed IMAGE, under the dm-verity sealed root. This is what architecture.md
     §3's routing rule ALREADY dictates — "base + security-critical + boot-path → baked into the
     IMAGE" — and static policy is the most security-critical, version-static bytes in the system.
     NOT a confext: confext is the routing rule's OPTIONAL-composable middle row, lives under
@@ -162,7 +162,7 @@ WRITE PATH  — the grant API is the ONLY mutator of authority, and is itself gu
 - The single write path is privileged, sandbox-unreachable, trusted-path-gated, and audited.
 
 ```
-⇒ AMENDS architecture.md — static policy is BAKED INTO THE bootc IMAGE per the EXISTING §3
+⇒ AMENDS architecture.md — static policy is BAKED INTO THE sealed IMAGE per the EXISTING §3
   routing rule (no routing change; the rule already covers it). ADD to the §1 layer stack that
   policy is AUTHORITY sealed with the base, and mutable grants are counter-anchored state, NOT
   ordinary writable state. Cross-refs isolation.md §7 (gatekeeperd source), base-selection.md
@@ -239,6 +239,15 @@ UNKNOWN or UNVERIFIABLE provenance ⇒ T-hostile.  (fail-safe HIGH, per isolatio
 This makes provenance *spoofing* (threat-model §7.2, the #1 soft spot) a non-event: forging
 "T-first" requires forging a trusted signature (= N2, out of scope for the wall) or writing the
 sealed log (= defeating §4). Absent both, unverifiable code lands at T-hostile with a T2 floor.
+
+> **As-built (Phase-5).** B1 is implemented: gatekeeperd derives the band from integrity evidence
+> bound to the execution object — `st_dev` on the sealed root (`T-first`) or a per-file fs-verity
+> digest vs the sealed pin-manifest (`T-pinned`), the caller's `--trust` being audit-only. A
+> `T-pinned` artifact runs from an exact-inode **exec island** (static PIE) or an authenticated
+> **N-inode closure island** (dynamic), every member re-verified `(dev,ino)`+digest; the writable
+> island root is `MS_NOEXEC` with exec re-added only per authenticated member. The precise
+> guarantees and their limits are the **§11 execution contract**; mechanism/evidence records are
+> `phase5-slice{8,9,10}*.md` (historical) and the traceability map in `phase5-consolidation.md` §1.
 
 **B3 — recheck source independence: closed by §4.** gatekeeperd reads granted profile + matrix
 + floor from the sealed policy plane (§4), not from anything agentd or an agent can write. The
@@ -390,8 +399,8 @@ a forced downgrade to a validly-signed, known-vulnerable version (threat-model �
 ```
 
 **TP1 — the trusted-path grant channel.** §4's grant API requires "operator trusted-path
-confirmation." That channel is defined HERE (it does not otherwise exist — and MOK/MokManager is
-*pre-boot*, so it cannot be the grant-time channel). Without a real definition, an injected agent
+confirmation." That channel is defined HERE (it does not otherwise exist — and firmware enrollment
+is *pre-boot*, so it cannot be the grant-time channel). Without a real definition, an injected agent
 (ADV-9) driving the UI could complete a grant.
 
 ```
@@ -556,7 +565,7 @@ bump, revocation = re-taint. Coalescing now carries the taint bit (no tainted-ri
 
 | # | Amends | Change |
 |---|---|---|
-| §4 | architecture.md §1,§3; isolation.md §7; base-selection.md | **Sealed policy plane**: static policy **baked into the bootc image** (per the existing §3 routing rule, not confext); mutable grants fs-verity-sealed + **TPM NV monotonic-counter** freshness checked *every load*; single **grant API** — sandbox-unreachable, trusted-path-gated, audited; enforcers **fail closed on absent static policy** |
+| §4 | architecture.md §1,§3; isolation.md §7; base-selection.md | **Sealed policy plane**: static policy **baked into the sealed image** (per the existing §3 routing rule, not confext); mutable grants fs-verity-sealed + **TPM NV monotonic-counter** freshness checked *every load*; single **grant API** — sandbox-unreachable, trusted-path-gated, audited; enforcers **fail closed on absent static policy** |
 | §5 | architecture.md §5, §6 | swampd (and agent profiles) enforce **default-deny allow-lists**, not deny-lists; allow set is static signed policy |
 | §6 | isolation.md §7, §9 | recheck reads sealed policy; mounts **pin the subtree root & resolve beneath it** (parent-rename race, not just symlink) + non-attacker-writable-parent invariant; trust band integrity-sourced, **fails to T-hostile** on doubt |
 | §7 | architecture.md §9 | **two planes**: availability fails-open, agent-execution fails-**closed**; gatekeeperd **systemd-supervised restart** so fail-closed isn't a permanent DoS; DLP at the egress chokepoint (**blind on any non-cooperative C-net workload's ciphertext** — accepted) |
@@ -615,3 +624,88 @@ The model is strongest exactly where Theorem 1 reaches — **byte-level reachabi
 human-only domains by agents and sandboxed code** — and every remaining risk is now either a
 named, bounded channel or an explicit non-goal, not a silent gap. `security-model.md`'s job was
 to convert threat-model.md's OPENs into decisions; §4–§8b are those decisions.
+
+---
+
+## 11. Phase-5 execution contract — the interface higher layers build against
+
+§1–§10 state the *model*. This section states what Phase-5 **as built and gate-proven** actually
+guarantees, and — just as load-bearing — what it explicitly does **not**. This is the stable
+interface the layers above (the Swamp semantic plane, the Donkey agent runtime, the desktop) build
+against: Shrek's motivating workload is **AI/LLM agents and the untrusted, often model-generated
+code they run**, so "what may a caller rely on when it asks gatekeeperd to run something" is the
+contract those layers depend on. Evidence: the invariant→implementation→gate traceability map and
+the adversarial cross-slice review in [`phase5-consolidation.md`](phase5-consolidation.md) §1–§2;
+mechanism/derivation records in `phase5-slice{8,9,10}*.md` (historical); proof gates = gatekeeperd/
+shrek-policy unit tests, the host oracle `scripts/pin-manifest-proof.sh` §1–§9, and the sealed-VM
+`mount-plane-gate` M4/S2–S8.
+
+A guarantee here means: enforced by named code AND demonstrated by a passing gate. Labels are
+namespaced `PG*`/`PN*` to avoid collision with §10's residual register.
+
+### Guarantees (PG)
+
+- **PG1 — Derived trust.** Effective trust is **gatekeeper-derived from integrity evidence bound to
+  the actual execution object/closure** — `st_dev` residency on the sealed root for `T-first`; the
+  per-file fs-verity digest of the entrypoint (and, for a dynamic pin, *every* closure member)
+  matched against the sealed manifest for `T-pinned`. A caller `--trust` is an audit/proposal input
+  only and never influences the effective band. **Unknown, malformed, unverifiable, or mismatched
+  evidence ⇒ `T-hostile`** (fail-high).
+- **PG2 — Downward-forbidden tiering.** `effective = max(matrix[trust][caps], floor(trust),
+  explicit-upward-escalation)`. Capabilities may never *reduce* the required wall; a request below
+  `floor(trust)` is refused; **below-floor construction is impossible.**
+- **PG3 — `T-pinned` no-laundering (file-backed).** Within a constructed `T-pinned` exec-island
+  workload, no mutable/unmeasured **file-backed** byte becomes an executable mapping: existing
+  file-backed bytes (`/usr`, writable grants, the writable island root) are `MS_NOEXEC` (blocks
+  `execve` *and* `mmap(PROT_EXEC)`), and creation/write of new files into any exec-capable namespace
+  is **independently** blocked by Landlock `MAKE_REG`/`WRITE` deny-all. The two are independent,
+  co-load-bearing barriers. **Scope: file-backed mappings only** — anonymous/JIT executable memory
+  is *not* covered (see PN5).
+- **PG4 — Exact-identity pinned execution.** A `T-pinned` workload executes only its
+  manifest-pinned identities: a **static PIE from a one-inode exec island**, or a dynamically-linked
+  entrypoint from an **authenticated N-inode closure island** (entrypoint + the exact `PT_INTERP` +
+  every enumerated transitive `DT_NEEDED`). Every member is re-verified `(dev,ino)` + fs-verity
+  digest against the sealed manifest at construction; **any mismatch, drift, or tamper fails closed.**
+- **PG5 — Fail-closed construction.** Policy-permitted tier escalation may go **only upward and only
+  before construction begins** (a clean preflight). **Once a constructor starts, any setup failure**
+  (measure, bind, verity re-assert, Landlock, seccomp, closure authentication, island-flag
+  self-check) **aborts** — it never substitutes an unauthenticated exec home, an unpinned object, or
+  a weaker tier.
+- **PG6 — Sealed, caller-immutable policy.** The `(trust×caps)→tier` matrix, the floor table, and
+  the egress allow-list are compiled-in and dm-verity-sealed; the pin-manifest is baked under the
+  sealed root. **No caller-controlled state can mutate the effective tier, egress, or trust policy**
+  of a request; changing policy requires the sealed-image / policy-update path.
+- **PG7 — Boot integrity (authenticity, not freshness).** Enforcing Secure Boot (Shrek key in the
+  UEFI **db**) + a signed UKI + kernel `lockdown=integrity` + a dm-verity-sealed root **authenticate
+  and integrity-protect the loaded sealed system** at boot. This does **not** by itself provide
+  rollback/freshness protection — anti-rollback is a separate concern owned by **PN8**.
+- **PG8 — Production strips the privileged fixture verb.** The shipped **default-feature** binary
+  does not contain the `pin-verity` spike verb (privileged `FS_IOC_ENABLE_VERITY` + its dispatch);
+  it is compiled out and present only under `--features spike` (oracle/VM gate only). This is the
+  narrow proven property — **not** a claim that all fixture/test scaffolding is stripped (the gate
+  overlay is a separate pre-ship strip item).
+
+### Non-guarantees (PN) — higher layers must NOT assume these
+
+- **PN1 — Writable grants are realized bind-read-only; write-back of workload mutations is deferred**
+  (both T0 and T1).
+- **PN2 — T3 (microVM) has no constructor.** A request whose effective tier is T3 fails closed.
+- **PN3 — Runtime loader extension is out of contract.** v1 authenticates the *build-enumerated*
+  `PT_INTERP` + transitive `DT_NEEDED` closure; runtime `dlopen` or any closure extension after
+  construction is **outside** the Phase-5 contract — higher layers must not rely on defined support
+  or security semantics for it.
+- **PN4 — ≥T1 containment of a pinned artifact is deferred** (`floor(Pinned)=T0`). A pinned workload
+  whose threat model warrants a container wall around it is not yet served.
+- **PN5 — Anonymous / JIT executable memory is not covered** by the file-backed no-laundering
+  guarantee (PG3's counterpart). It is excluded upstream by **classification** (a JIT/interpreter
+  over open-world input is open-world and cannot earn `T-pinned`), not by a runtime memory control.
+- **PN6 — Transitive-closure completeness is build-enumerated, not runtime-proven-complete.** An
+  incomplete manifest **fails closed** (an un-enumerated dependency lands on a `noexec` mount and the
+  workload fails to load), never open — the risk is **availability, not a laundering hole.**
+- **PN7 — A kernel LPE at T0/T1 (shared kernel) defeats the wall** (pre-existing acceptance; §10 N1).
+- **PN8 — Writable-partition integrity, anti-rollback/freshness (beyond the SVN floor), and
+  TPM-absent behavior** remain pre-existing OPEN items, unchanged by Phase-5.
+
+This contract is the deliverable Phase-6 (Swamp/Donkey/desktop) builds on: it says exactly what the
+execution substrate promises and what it pointedly does not, so no layer above mistakes a deferred
+item or a classification-based exclusion for an enforced wall.

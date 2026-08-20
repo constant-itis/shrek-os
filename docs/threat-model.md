@@ -52,7 +52,7 @@ below is table-stakes OS integrity.
 |---|---|---|---|---|
 | A1 | **Human-only domains** | `~/Vault`, `~/Identity`, `~/.ssh`, `~/.gnupg`, credentials, `~/Private` | The invariant's whole subject. Leak = total loss of the property Shrek sells. Must be unreachable by bytes AND by inference. | Landlock deny on agents *and on swampd itself* (architecture.md §5,§7) |
 | A2 | **The semantic index** | swampd's metadata + FTS + embeddings + relationships (SQLite, vectors) | It is a **derivative of everything readable** and thus a side channel around the file wall. Its read-scope == its exposure-scope. | swampd Landlocked out of A1; query-time authorization (architecture.md §5) |
-| A3 | **Boot integrity** | sealed dm-verity root, signed UKI (Shrek key), MOK Secure Boot, TPM state | Root of all other guarantees. Broken here ⇒ every wall below is theater. | UKI signature + dm-verity + MOK + TPM (base-selection.md) |
+| A3 | **Boot integrity** | sealed dm-verity root, signed UKI (Shrek key), UEFI db Secure Boot, TPM state | Root of all other guarantees. Broken here ⇒ every wall below is theater. | UKI signature + dm-verity + UEFI db key enrollment + TPM (base-selection.md) |
 | A4 | **The policy store** | agent capability profiles (`agents.md`), the (trust×caps)→tier matrix inputs, Landlock rulesets, AppArmor profiles, oniond trust roots, nftables egress lists | **This is the definition of every wall.** If it is mutable by the attacker, the wall reconfigures itself. Ranks above the log because it is *live authority*, not a record. | See `OPEN:` A4 below — storage location unspecified |
 | A5 | **Provenance / audit log** | per-action chain: `artifact, prev_hash→new_hash, actor, model, operation, reason, capabilities, network, ts` (architecture.md §8) | Both a defense (forensics) AND an asset that can be tampered (cover tracks) or itself leak (the `reason`/summary fields can quote sensitive content). | append-only chain integrity; read-ACL on the log |
 | A6 | **System availability** | boot, login, desktop, FS, net, apps, dev — the "Shrek is an OS not an AI appliance" guarantee | The critical-failure test (architecture.md §9) is a security property: degrading swampd/agentd must not degrade the OS, and must **fail closed for the wall**. | fail-closed agent execution; §9 test |
@@ -73,8 +73,8 @@ them.
 ```
 AS1  Kernel LSMs are sound.  Landlock, seccomp, namespaces, cgroups v2 enforce as documented.
      A kernel LPE at T0/T1 (shared kernel) defeats the wall — acknowledged, see §9.
-AS2  Secure Boot chain intact.  User enrolls the Shrek MOK correctly at first boot
-     (base-selection.md); firmware is not already implanted; shim→UKI trust holds.
+AS2  Secure Boot chain intact.  The Shrek key is enrolled into the UEFI db correctly at first boot
+     (base-selection.md); firmware is not already implanted; UEFI db→UKI trust holds.
 AS3  TPM present and used for measured/sealed boot.   OPEN: base-selection.md names TPM in the
      boot band but does not specify what is sealed to PCRs, nor behavior when TPM is ABSENT.
 AS4  Signing keys are secret.  The Shrek UKI key and the sysext/confext layer-signing keys are
@@ -147,13 +147,13 @@ how Shrek-specific (vs generic) the threat is.
   one steers *which* content is returned without any extracted instruction. That remains an open
   integrity residual (the living-graph threat pass, filesystem-intelligence.md §8).
 
-### ADV-4 — Supply-chain attack on a sysext Onion layer or the bootc image
+### ADV-4 — Supply-chain attack on a sysext Onion layer or the sealed image
 
 - **Capability:** injects malicious content into a layer's build inputs, or MITMs/poisons the
   update transport.
 - **Goal:** persistent, reboot-surviving foothold that re-seals as "trusted."
 - **Stopped by:** Verity-authenticated, signed sysext/confext (architecture.md §3); signed
-  bootc image + A/B; the reproducible-build lab (roadmap R1) pins source hashes → output
+  sealed image + A/B; the reproducible-build lab (roadmap R1) pins source hashes → output
   hashes. oniond refuses unsigned/untrusted-authority layers.
 - **Soft spot:** a layer **validly signed by us but malicious** (compromised build pipeline
   or key) is out of scope (§9, AS4) and passes every check. Signature proves origin, not
@@ -165,13 +165,13 @@ how Shrek-specific (vs generic) the threat is.
 - **Capability:** physical access, offline disk write, firmware tamper, reboot control.
 - **Goal:** defeat A3; boot a modified or downgraded system; read data at rest.
 - **Stopped by:** signed UKI (Shrek key), dm-verity sealed root (offline root tamper →
-  verity fails), MOK-enrolled Secure Boot, TPM (base-selection.md). A tampered root image
+  verity fails), UEFI-db-enrolled Secure Boot, TPM (base-selection.md). A tampered root image
   does not verify; a tampered UKI does not have a valid signature.
 - **Soft spot:** (a) **anti-rollback is unspecified** — bootc keeps the previous image for
   A/B rollback; nothing described prevents an attacker forcing a boot of an *older, validly
   signed, known-vulnerable* image (OPEN: C1). (b) The **writable partitions are not
   Verity-sealed** — offline modification of /home,/var,/srv (which hold A2/A4/A5) is not
-  caught by dm-verity (OPEN: A4). (c) TPM-absent behavior (AS3). (d) MOK enrollment is a
+  caught by dm-verity (OPEN: A4). (c) TPM-absent behavior (AS3). (d) UEFI db enrollment is a
   manual step; a user who clicks through incorrectly self-downgrades (AS2). Cold-boot/DMA on
   keys at rest: out of scope (§9).
 
@@ -327,7 +327,7 @@ B-swamp   swampd  ↔  index  ↔  querier(agent/user)
 B-boot    firmware → shim → UKI → sealed root → sysext layers
   crosses:  signature/verity checks at each stage; measurements → TPM
   trusted:  each stage trusts only a valid signature from the prior. Shrek key at UKI.
-  surface:  MOK enrollment correctness (AS2); anti-rollback (OPEN C1); TPM-absent (AS3)
+  surface:  UEFI db enrollment correctness (AS2); anti-rollback (OPEN C1); TPM-absent (AS3)
   ref:      base-selection.md, architecture.md §2
 
 B-layer   oniond  ↔  sysext/confext layer authority
@@ -497,6 +497,15 @@ Until pinned, the matrix and the floor rule both index off an attacker-influence
 Provenance spoofing (fake signed manifest, poisoned provenance DB entry) collapses T-hostile
 → T-first and drops the floor to T0. **This is the number-one thing to harden.** (OPEN: B1)
 
+> **As-built (Phase-5) — B1 RESOLVED.** The trust band is no longer an attacker-influenceable
+> label: gatekeeperd **derives** it from integrity evidence bound to the execution object —
+> `st_dev` on the dm-verity root (`T-first`) or a per-file fs-verity digest measured against the
+> sealed pin-manifest (`T-pinned`); a caller `--trust` is audit-only. Unknown/malformed/mismatched
+> evidence fails high to `T-hostile`. Spoofing now requires forging a content-hash preimage or
+> defeating the sealed root — not writing a label. See `security-model.md` §11 (PG1) for the
+> guarantee and its limits; mechanism in `phase5-slice{7,8,9,10}*.md` (historical). (A4 —
+> writable-partition integrity, §7.3 — remains OPEN; unchanged by Phase-5.)
+
 **7.3 The policy/definition store has weaker stated integrity than the walls it defines.**
 dm-verity seals the base root; agent profiles, Landlock rulesets, nftables egress lists, and
 swampd's index all live on writable, unverified partitions. §6.4 is cheaper than every
@@ -620,7 +629,7 @@ N4  Microarchitectural side channels (Spectre/Meltdown/MDS-class, cache/timing).
     core-scheduling/mitigation flags — not specified here.
 
 N5  Physical extraction of keys/data at rest beyond boot integrity.  Cold-boot RAM attacks,
-    DMA/Thunderbolt, chip decapping, firmware implants predating MOK enrollment (AS2). dm-
+    DMA/Thunderbolt, chip decapping, firmware implants predating UEFI db enrollment (AS2). dm-
     verity + Secure Boot defend BOOT INTEGRITY and offline ROOT tamper, not data
     confidentiality at rest against a well-equipped physical adversary. (Disk encryption, if
     any, is a base concern not specified in these docs — OPEN, but out of this doc's scope.)

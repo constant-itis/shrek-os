@@ -3,8 +3,8 @@
 > Ogres have layers.
 
 This supersedes the original single-file roadmap. It folds in the base-platform decision
-(bootc, not LFS-as-product), the graduated isolation model, and the two enforcement
-refinements (swampd confinement, DLP-as-tripwire).
+(Debian package provenance via `mkosi`, not LFS-as-product), the graduated isolation model,
+and the two enforcement refinements (swampd confinement, DLP-as-tripwire).
 
 ---
 
@@ -26,10 +26,10 @@ refinements (swampd confinement, DLP-as-tripwire).
 │ The Onion         signed sysext layers        │
 │   desktop · graphics · dev · gaming · ai      │
 ├─────────────────────────────────────────────┤
-│ Immutable base    Debian → mkosi → bootc OCI  │
+│ Immutable base    Debian → mkosi sealed image │
 │   dm-verity sealed (composefs upgrade path)   │
 ├─────────────────────────────────────────────┤
-│ Boot trust        Secure Boot(MOK) · UKI · TPM│
+│ Boot trust        UEFI db Secure Boot · UKI · TPM│
 ├─────────────────────────────────────────────┤
 │ Linux kernel      LSM · Landlock · seccomp · BPF│
 └─────────────────────────────────────────────┘
@@ -43,7 +43,7 @@ Two refinements the stack diagram elides (both in [`security-model.md`](security
 
 - **Policy is authority, not writable state — it is sealed with the base, not left in `/var`.**
   Static policy (the matrix, floor, Landlock/AppArmor templates, oniond trust roots) is **baked
-  into the bootc image** under the dm-verity root; per-machine grants are **counter-anchored**
+  into the sealed image** under the dm-verity root; per-machine grants are **counter-anchored**
   (fs-verity + a TPM NV monotonic counter checked every load), mutated only through the
   privileged, trusted-path-gated grant API (§4). The *definition* of every wall must be at least
   as protected as the walls it defines.
@@ -52,7 +52,7 @@ Two refinements the stack diagram elides (both in [`security-model.md`](security
   signature is what's trusted, not the code's restraint. **There is no unconfined execution path
   on Shrek** (§8/D1).
 
-## 2. The base — Debian + bootc, not LFS
+## 2. The base — Debian + mkosi, not LFS
 
 Decision recorded in [`base-selection.md`](base-selection.md) (ADR-001, committed). Summary:
 
@@ -62,16 +62,17 @@ Decision recorded in [`base-selection.md`](base-selection.md) (ADR-001, committe
 - **Builder:** **`mkosi`** assembles the image. (Speaks both Debian and Fedora, so a base
   swap is a `distro=` + package-list delta, not a rewrite — keeps Fedora a cheap escape
   hatch.)
-- **Transport & updates:** ships as a **bootc OCI image**; transactional A/B with rollback.
-  `systemd` is still PID 1 — no container wraps the OS. bootc is distro-independent
-  (`ubuntu-bootc` proves the Debian-family path). *Fallback if bootc-on-Debian is janky:*
-  `mkosi` + `systemd-sysupdate` raw A/B.
+- **Transport & updates:** the resolved transport is **`systemd-sysupdate` raw A/B** with boot
+  assessment rollback. The original bootc/OCI route is deferred because bootc/composefs was not
+  packaged cleanly enough on the target Debian base during the Phase-1 spike. `systemd` is still
+  PID 1 — no container wraps the OS.
 - **Integrity:** **dm-verity** sealed root (via `systemd-repart`) — proven, turnkey on
   Debian today. **composefs** (whole-tree, content-addressed) is a later upgrade, not a
   blocker; it's upstream, so Debian can adopt it.
 - **Boot chain:** `UKI (systemd-stub, Shrek key) → sealed root → verified sysext layers`,
-  with **MOK enrollment** for Secure Boot now (shim-review only if Shrek is publicly
-  distributed later — see base-selection.md). **Custom-compiling the kernel is a late,
+  with the Shrek key enrolled into the UEFI **db** in the VM spike. There is no shim/MOK in the
+  current boot chain because Shrek signs the UKI and `systemd-boot` directly. Shim review only
+  matters if the project later distributes pre-signed public binaries. **Custom-compiling the kernel is a late,
   expensive, opt-in decision** — forking it risks stepping off the signed chain.
 - **MAC / agent wall:** **Landlock-first** (kernel-native, distro-agnostic — the *real*
   wall, enforced per-process by `agentd`/`gatekeeperd`) + **AppArmor** as the system MAC.
@@ -105,7 +106,7 @@ systemd-sysext / dm-verity / mount / kernel VFS   do the dangerous low-level wor
 Three mechanisms can put software on the machine. Each has one job:
 
 ```
-base + security-critical + boot-path      → baked into the bootc IMAGE
+base + security-critical + boot-path      → baked into the sealed IMAGE
 optional composable SYSTEM capability      → sysext LAYER   (drivers, toolchains, dev tools)
    (/usr,/opt; /etc via confext)
 user-facing APPLICATION                    → FLATPAK
@@ -128,7 +129,7 @@ profile**. They answer different questions and are enforced at different points:
   network egress is allowed)
 
 A microVM is a sealed box; it does **not** enforce "read Projects but not `~/.ssh`." That
-policy lives entirely in **what you mount in (virtio-fs) and what network you attach.** A
+policy lives entirely in **what you mount in (binds for T0/T1, virtio-fs for T3) and what network you attach.** A
 hardware-isolated agent with `$HOME` mounted in has bought you nothing. So both dials are
 always set independently.
 
@@ -170,9 +171,10 @@ to you.
 
 ~80% of the engineering behind `shrek run` is *not* choosing the VMM. It's:
 
-- **virtio-fs/9p file passing** — also the capability-enforcement point (§4 above).
-- **networking** — each microVM needs a tap device + the "restricted network" realized as
-  actual nftables rules.
+- **file passing** — bind mounts for T1, Landlock rules over pinned grants for T0, and virtio-fs
+  for T3; this is also the capability-enforcement point (§4 above).
+- **networking** — each isolated workload needs a private network namespace or tap device + the
+  "restricted network" realized as actual nftables rules.
 - **rootfs supply** — Tier 3 needs a tiny signed kernel + minimal rootfs per workload
   class. (Synergy: the Onion/build-system feeds this.)
 - **cold start / pooling** — pre-warm a pool for ephemeral per-task agents.
@@ -290,7 +292,7 @@ systemctl stop agentd
 
 Boot, login, desktop, filesystem, networking, applications, layers, shell, and dev work
 must **all still function.** Only enhanced capabilities (semantic search, relationships,
-AI assistants, provenance enrichment, auto-embeddings) disappear. This is what prevents
+agent helpers, provenance enrichment, auto-embeddings) disappear. This is what prevents
 Shrek from becoming an AI appliance pretending to be an OS.
 
 But this is the **availability plane**, and it fails **open** by design (the OS survives the
