@@ -28,8 +28,10 @@ if [ "${IN_CONTAINER:-0}" != "1" ]; then
   # The pinned entrypoint MUST be a static PIE (slice-9 Fork A) — build gate-probe with crt-static so
   # it has NO PT_INTERP. Keep a DYNAMIC copy too (default build = PT_INTERP) to prove the static-PIE
   # gate fails closed on a dynamically-linked pin (section 8).
+  # gatekeeperd built with `--features spike`: this oracle drives `pin-verity enable/measure` to mint
+  # fs-verity fixtures. That surface is default-OFF in production (finding F1); the oracle opts in.
   ( cd "$REPO_ROOT" \
-      && cargo build --release -p gatekeeperd \
+      && cargo build --release -p gatekeeperd --features spike \
       && cargo build --release -p shrek-gate-probe \
       && cp target/release/gate-probe target/release/gate-probe-dyn \
       && RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/lib -C link-arg=-Wl,--disable-new-dtags' cargo build --release -p shrek-gate-probe \

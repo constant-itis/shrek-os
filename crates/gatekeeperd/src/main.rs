@@ -391,8 +391,12 @@ fn main() {
     if argv.first().map(String::as_str) == Some("sandbox") {
         std::process::exit(gatekeeperd::sandbox::cli(&argv[1..]));
     }
-    // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Stripped before
-    // ship with the rest of the gate scaffolding.
+    // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Compiled out of
+    // production/default builds — this whole dispatch arm exists ONLY under `--features spike` (finding
+    // F1). A default build has no `pin-verity` verb: the argument falls through to the broker path and
+    // is treated as an unknown invocation, never a privileged verity-enable. (Regression:
+    // scripts/spike-stripped-proof.sh asserts the verb is absent from a default artifact.)
+    #[cfg(feature = "spike")]
     if argv.first().map(String::as_str) == Some("pin-verity") {
         std::process::exit(gatekeeperd::provenance_plane::pin_verity_cli(&argv[1..]));
     }

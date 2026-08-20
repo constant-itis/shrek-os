@@ -391,7 +391,10 @@ pub fn measure_verity(fd: RawFd) -> io::Result<(u16, Vec<u8>)> {
 
 /// `struct fsverity_enable_arg` (linux/fsverity.h) — 128 bytes. Only `version`, `hash_algorithm`, and
 /// `block_size` are set; salt/signature are unused (0). SPIKE-ONLY: used by the fixture helper to turn
-/// on fs-verity for the pin oracle / VM gate, never on the shipped path.
+/// on fs-verity for the pin oracle / VM gate, never on the shipped path — the whole enable surface
+/// (`FsverityEnableArg` / `FS_IOC_ENABLE_VERITY` / `enable_verity`) is `#[cfg(feature = "spike")]` and
+/// absent from a default/production build (finding F1). `measure_verity` (read-only) stays in prod.
+#[cfg(feature = "spike")]
 #[repr(C)]
 pub struct FsverityEnableArg {
     pub version: u32,
@@ -406,12 +409,15 @@ pub struct FsverityEnableArg {
 }
 
 /// `FS_IOC_ENABLE_VERITY = _IOW('f', 133, struct fsverity_enable_arg)` — dir=1, size=128, type='f',
-/// nr=133 ⇒ `(1<<30)|(128<<16)|(0x66<<8)|0x85 = 0x4080_6685`.
+/// nr=133 ⇒ `(1<<30)|(128<<16)|(0x66<<8)|0x85 = 0x4080_6685`. SPIKE-ONLY (finding F1).
+#[cfg(feature = "spike")]
 pub const FS_IOC_ENABLE_VERITY: u64 = 0x4080_6685;
 
 /// Turn on fs-verity (SHA-256, 4K blocks) for a file — SPIKE-ONLY fixture helper (the pin oracle / VM
 /// gate creates a real verity inode to measure). The fd must be `O_RDONLY` with no other writers, on a
 /// filesystem that has the verity feature. After this the file is immutable + block-verified.
+/// Compiled out of default/production builds (`#[cfg(feature = "spike")]`, finding F1).
+#[cfg(feature = "spike")]
 pub fn enable_verity(fd: RawFd) -> io::Result<()> {
     let arg = FsverityEnableArg {
         version: 1,

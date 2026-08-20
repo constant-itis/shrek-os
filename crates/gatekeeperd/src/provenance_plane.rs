@@ -227,10 +227,12 @@ fn pin_arm(entrypoint: &Path) -> (bool, bool, Option<OwnedFd>, Option<Closure>) 
     }
 }
 
-/// SPIKE-ONLY fixture helper (stripped before ship, with the gate scaffolding): `pin-verity enable
-/// <path>` turns on fs-verity for a fixture file; `pin-verity measure <path>` prints `<algo> <hex>` so
-/// the oracle / VM gate can write the fixture into the sealed pin-manifest. NOT a production verb — the
-/// shipped image has no writable verity fixtures and the real manifest is baked under dm-verity `/usr`.
+/// SPIKE-ONLY fixture helper — COMPILED OUT of default/production builds (`#[cfg(feature = "spike")]`,
+/// finding F1). `pin-verity enable <path>` turns on fs-verity for a fixture file; `pin-verity measure
+/// <path>` prints `<algo> <hex>` so the oracle / VM gate can write the fixture into the sealed
+/// pin-manifest. NOT a production verb — a shipped (default-feature) binary does not contain this
+/// function or its `enable_verity` syscall at all; the real manifest is baked under dm-verity `/usr`.
+#[cfg(feature = "spike")]
 pub fn pin_verity_cli(args: &[String]) -> i32 {
     let (Some(op), Some(path)) = (args.first().map(String::as_str), args.get(1)) else {
         eprintln!("usage: gatekeeperd pin-verity <enable|measure> <path>");

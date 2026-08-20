@@ -5,3 +5,11 @@ edition.workspace = true
 
 [dependencies]
 shrek-policy = { path = "../shrek-policy" }
+
+[features]
+# `spike` gates the fs-verity FIXTURE surface (pin-verity CLI + FS_IOC_ENABLE_VERITY) used ONLY by the
+# host oracle and the sealed-VM gate to mint verity inodes to measure. It is DEFAULT-OFF: a production
+# build compiles the entire pin-verity dispatch + `enable_verity` out of the binary (finding F1,
+# docs/phase5-consolidation.md §2). The oracle/VM builds opt in with `--features spike`;
+# scripts/spike-stripped-proof.sh regresses that a default build has no pin-verity surface.
+spike = []

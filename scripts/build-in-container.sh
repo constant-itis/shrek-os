@@ -23,6 +23,11 @@ echo "=== building Shrek OS version ${VERSION} → ${RAW} ==="
 
 echo "=== STAGE 1 (host): build binaries + stage the image overlay ==="
 cargo build --release
+# The sealed-VM gate (S6/S8) drives `gatekeeperd pin-verity` at runtime to provision fs-verity
+# fixtures, so the IMAGE gatekeeperd is the spike build (finding F1: pin-verity is default-OFF). The
+# whole gate is spike-only scaffolding on the pre-ship strip list; a production ship build omits both
+# `--features spike` AND the gate, so the shipped gatekeeperd has no pin-verity surface.
+cargo build --release -p gatekeeperd --features spike
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
 install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl} image/overlay/usr/libexec/shrek/
 # Phase-5 slice-7 (B1): the sealed closed-world in-sandbox acceptance probe (spike-only, strip before
