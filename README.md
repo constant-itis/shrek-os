@@ -6,7 +6,8 @@ A memory-safe, immutable, capability-oriented Linux system built around verified
 layers, explicit human/agent trust boundaries, semantic filesystem intelligence, and
 transactional system updates.
 
-Status: **Design / pre-implementation.** This repo currently holds architecture only.
+Status: **in-progress implementation.** The repo holds the architecture docs, image build
+spikes, and the first Rust control-plane slices.
 
 ---
 
@@ -37,8 +38,8 @@ demoted from *foundation* to *laboratory*.
 |                   | **Shrek Research Base**        | **Shrek OS (product)**                 |
 | ----------------- | ------------------------------ | -------------------------------------- |
 | Purpose           | understand the whole stack     | an actually usable, distributable OS   |
-| Foundation        | LFS (frozen reference build)   | **Debian Stable** provenance, imaged via **mkosi** + **bootc** |
-| Updates           | experimental                   | transactional bootc / OCI (sysupdate fallback) |
+| Foundation        | LFS (frozen reference build)   | **Debian Stable** provenance, imaged via **mkosi** |
+| Updates           | experimental                   | **systemd-sysupdate** raw A/B (bootc deferred) |
 | Layers            | sysext experiments             | signed sysext ("the Onion")            |
 | Integrity         | hand-rolled dm-verity          | **dm-verity** sealed (composefs upgrade path) |
 | MAC / agent wall  | —                              | **Landlock**-first + AppArmor          |
@@ -51,26 +52,28 @@ the lesson to the product image — never the code. This preserves the reason we
 (bottom-up understanding of what Shrek stands on) without making Sebastian the personal
 security-advisory-response-team and package repository for a full distribution forever.
 
-See [`docs/base-selection.md`](docs/base-selection.md) (ADR-001) for why Debian + bootc wins.
+See [`docs/base-selection.md`](docs/base-selection.md) (ADR-001) for why Debian
+via `mkosi` won, and [`docs/update-model.md`](docs/update-model.md) for why the
+current transport is `systemd-sysupdate` raw A/B with bootc deferred.
 
 ## Repository layout
 
 ```
 shrek-os/
-├── reference-lfs/      ← FROZEN research build (learn/prove fundamentals; not shipped)
-├── image/              ← production bootc image definition (Containerfile + config)
-├── layers/             ← sysext Onion layers (graphics, desktop, dev, gaming, ai)
-├── rust/
+├── image/              ← mkosi image definition + sealed-root overlay
+├── layers/             ← sysext/confext Onion fixtures used by the proofs
+├── crates/
 │   ├── shrekctl/       ← system CLI
 │   ├── oniond/         ← layer policy/orchestration around systemd-sysext
 │   ├── swampd/         ← filesystem intelligence daemon (metadata → semantic)
 │   ├── gatekeeperd/    ← privileged capability broker
-│   └── agentd/         ← AI/agent execution broker
-├── policies/           ← agent / application / semantic policy definitions
-├── tests/              ← security · performance · updates · recovery
-├── benchmarks/         ← A/B/C profiles (baseline / core / full intelligence)
+│   ├── agentd/         ← agent identity + tier/caps resolver
+│   ├── shrek-gate-probe/ ← small probe binary used by proof scripts
+│   └── shrek-policy/   ← sealed compiled-in tier + egress policy
+├── scripts/            ← build, VM, rollback, Onion, and sandbox proof gates
 └── docs/
     ├── architecture.md ← revised core architecture + invariants
+    ├── concept-to-code.md ← implementation/proof crosswalk for contributors
     ├── base-selection.md ← ADR-001: chosen immutable base
     └── roadmap.md      ← phased build order
 ```

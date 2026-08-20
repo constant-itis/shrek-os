@@ -314,5 +314,5 @@ follow-up; they are left untouched (not deleted) for now.
   assertions unchanged); a planted foreign/`/bin/sh` entrypoint proposing `T-first` re-derives
   `T-hostile` and is refused or floored (audited rc, no T0/T1 downgrade). The `SANDBOX-PROVENANCE`
   line records `derived`/`proposed`/`match` for the mismatch audit.
-- Commit selectively (this doc + slice code only; never sweep Codex's uncommitted docs). No AI/Claude
-  refs in-tree.
+- Commit selectively (this doc + slice code only; never sweep unrelated uncommitted docs). No
+  third-party tooling attributions in-tree.

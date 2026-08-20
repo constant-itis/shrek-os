@@ -90,7 +90,7 @@ the wall** — the unprivileged side cannot widen the merge (ADV-8). This is G3.
 - **deactivate `<name>`**: remove the symlink and `refresh`; return `deactivated`.
 - Both go through the same sealed re-check, so even the operator (shrekctl) cannot activate a
   non-policy or unsigned layer. Finer operator trusted-path gating (security-model: privileged grant
-  ops are MOK/trusted-path class) is **deferred** — the sealed-policy+signature gate is this slice's
+  ops are trusted-path class) is **deferred** — the sealed-policy+signature gate is this slice's
   wall.
 
 ## Fail model (locked by security-model §7 — two planes)
@@ -140,7 +140,7 @@ merge outcomes now proxied through the broker.
 
 ## Deferred (later Phase-4 / Phase-5 slices)
 
-- Operator trusted-path / MOK-class gating for runtime activate (privileged-grant policy).
+- Operator trusted-path gating for runtime activate (privileged-grant policy).
 - gatekeeperd's Phase-5 role: sandbox construction (pin-subtree-root + resolve-beneath mounts, tap +
   nftables egress) — this slice teaches it only the merge op, establishing the broker skeleton.
 - TPM NV monotonic counter / signed grant manifest / anti-rollback (security-model §4) — policy stays

@@ -1,8 +1,9 @@
 # Shrek OS — Roadmap (revised)
 
 Revised from the original 11-phase plan to reflect the two-track decision: the product is
-built on **bootc**, not LFS. LFS work moves to a frozen research track that runs *in
-parallel and does not block* the product.
+built from **Debian package provenance via mkosi**, not LFS. The first transport branch
+resolved to `systemd-sysupdate` raw A/B; bootc/composefs is deferred. LFS work moves to a
+frozen research track that runs *in parallel and does not block* the product.
 
 ## Guiding order (when forced to choose)
 
@@ -81,11 +82,22 @@ mutable grants (TPM NV-counter). The rendered prompt is the Phase-10 agent permi
 
 ### Phase 5 — Isolation runtime
 Wire the four-tier `shrek run --trust=<tier> --caps=<profile>` model: Tier 0 (Landlock/
-seccomp), Tier 1 (nspawn/Incus), Tier 2 (**gVisor**), Tier 3 (libkrun/Kata). Build the
-plumbing the one-liner hides: virtio-fs capability mounts, per-VM tap + nftables egress,
-signed minimal rootfs supply, pooled cold-start.
-**Milestone:** the same workload runs at any tier by flag; caps are enforced at the mount/
-net layer independent of tier.
+seccomp + full namespaces + cgroups, no rootfs), Tier 1 (`systemd-nspawn`), Tier 2
+(**gVisor**), Tier 3 (libkrun/Kata). Build the plumbing the one-liner hides: capability
+mounts, private networking + nftables egress, signed minimal rootfs supply for later VM
+tiers, pooled cold-start.
+
+**Current state:** Slice 1 shipped T1 mount construction (pin→verify→relocate, synthetic root);
+slice 2 shipped the compiled trust×caps decision plane and broker re-check; slice 3 shipped
+T1 private-netns egress with sealed named profiles; slice 4 shipped genuine T0 Landlock/seccomp
+construction for the T0 matrix cells; slice 6 shipped the T2 gVisor constructor; slice 7 shipped
+trust-band provenance derivation; slice 8 shipped static pin-manifest classification for
+`T-pinned`; slice 9 shipped the `T-pinned` execution home (static PIE from a one-inode exec
+island); slice 10 shipped sealed-dynamic `T-pinned` execution (dynamically-linked entrypoint
+from an authenticated N-inode closure island). **≥T1 containment of a pinned artifact**
+(floor(Pinned)=T0), **T3**, and **T2 egress** remain deferred.
+**Milestone:** the same workload runs at constructed tiers by flag; caps are enforced at the mount/
+net layer independent of tier, and unbuilt stronger tiers fail closed.
 
 ### Phase 6 — Swamp metadata layer (no AI yet)
 `swampd`: coalesced FS events, SQLite metadata, hashes, MIME, FTS, provenance, ignore

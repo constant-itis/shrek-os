@@ -7,6 +7,17 @@ This is the executable plan for roadmap **Phase 1**. It is a *timeboxed spike*, 
 build — its job is to answer one question: **does Debian + bootc, sealed with dm-verity and
 booted under a MOK-enrolled UKI, hold together cleanly enough to stay on it?**
 
+> **Resolved by the spike (as-built annotation — the plan text below is preserved as the
+> historical spike record):** both forks this plan hedged on were settled in Shrek's favour of
+> the simpler path. **Boot:** the shipped boot chain signs the UKI and `systemd-boot` directly
+> and enrolls the Shrek key into the UEFI **db** in the VM — there is no shim/MOK path.
+> **Transport:** the `bootc`/OCI route was *not* adopted; the resolved transport is
+> `systemd-sysupdate` raw A/B (bootc/composefs deferred). So where the body below reads
+> "MOK" and "bootc", read the as-built as "UEFI-db-enrolled key" and "mkosi image +
+> systemd-sysupdate raw A/B" respectively. Canonical current truth lives in
+> [`base-selection.md`](base-selection.md), [`update-model.md`](update-model.md), and
+> [`architecture.md`](architecture.md).
+
 ```
 ACCEPTANCE TEST (breaks the base tie — base-selection.md ADR-001):
   clean   → STAY on Debian + bootc.                       (most likely)

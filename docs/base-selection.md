@@ -8,10 +8,12 @@ plane (the hard 85%) is base-agnostic.
 
 ## Decision
 
-**Build Shrek on Debian Stable as package provenance, delivered as an immutable image via
-`bootc`, authored with `mkosi`. Agent wall enforced Landlock-first (portable), with
-AppArmor as the system MAC. dm-verity sealing now, composefs upgrade path open. Secure Boot
-via MOK enrollment now, shim-review later if Shrek is ever publicly distributed.**
+**Build Shrek on Debian Stable as package provenance, authored with `mkosi` and delivered as
+an immutable sealed image.** The original transport preference was `bootc`; the Phase-1 spike
+resolved that fork to `systemd-sysupdate` raw A/B, with bootc/composefs deferred. Agent wall is
+Landlock-first (portable), with AppArmor as the system MAC. dm-verity sealing is current.
+Secure Boot uses direct UEFI db enrollment in the current spike; shim-review only matters if
+Shrek ever ships pre-signed public binaries.
 
 Debian is **package provenance, not the runtime package manager**. The live base is
 immutable; `apt` lives only inside dev containers where mutability is desirable.
@@ -23,9 +25,9 @@ minimal Debian root image
       ↓  systemd-repart
 dm-verity sealed  (→ composefs later)
       ↓  systemd-stub
-signed UKI  (Shrek key; MOK-enrolled)
-      ↓  bootc
-transactional A/B + rollback + health-check
+signed UKI  (Shrek key; enrolled into UEFI db)
+      ↓  systemd-sysupdate
+transactional raw A/B + rollback + health-check
       ↓
 SHREK BASE (read-only, verified, versioned)
       +
@@ -39,9 +41,9 @@ The honest weighing (all things considered):
 | Factor | Verdict |
 |---|---|
 | Verified-boot integrity | **Tie** — dm-verity (Debian, turnkey via mkosi today) is adequate & proven (Android/ChromeOS use it); composefs (Fedora, newer) is a *bonus*, not a requirement, and is upstream so Debian can adopt it later |
-| Update/rollback engine | **bootc edge** — more mature than `systemd-sysupdate`; **but bootc is distro-independent** (`ubuntu-bootc` proves the Debian-family path), so we take it *on Debian* |
+| Update/rollback engine | **Resolved after spike** — `bootc` was preferred on paper, but the accepted shipped path is `systemd-sysupdate` raw A/B on Debian; bootc/composefs stays a later upgrade |
 | MAC | **Slight Debian** — AppArmor is **path-based**, which fits the deterministic wall (`deny ~/Vault/**`) more naturally than SELinux labels |
-| Secure Boot | **Tie** — cost is identical and distro-independent (see below); MOK now |
+| Secure Boot | **Tie** — cost is identical and distro-independent (see below); UEFI db enrollment now |
 | Desktop HW freshness | Fedora edge, but only bites at Phase 10; mitigable via Debian backports/trixie |
 | Builder fluency | **Debian** — a real velocity term on a multi-year solo build, compounding across the base-agnostic 85% |
 
@@ -63,7 +65,7 @@ by that cert`. Debian's `shim-signed` embeds **Debian's** cert; Fedora's embeds 
 distro-independent:
 
 ```
-MOK enrollment    user confirms Shrek's key at first boot (MokManager)  → FREE, no Microsoft.
+UEFI db enrollment  Shrek key enrolled directly into firmware db in setup-mode VM spike → no Microsoft.
                   Per-install manual step. → OUR CHOICE for homelab/personal now.
 Own MS-signed shim  shim-review (github rhboot/shim-review), embed our cert → for PUBLIC
                   distribution only; weeks-months, needs a real entity. → defer.
@@ -103,7 +105,7 @@ hatch and the Debian decision is low-risk:
 
 ```
 0. Study a stock Fedora bootc image in a VM   ← oracle ("what correct looks like"), 1 afternoon, don't build on it
-1. Timeboxed spike: Debian + bootc, Phase 1   ← mkosi image, dm-verity sealed, MOK boot, empty scaffold
+1. Timeboxed spike: Debian + bootc/sysupdate fork, Phase 1   ← mkosi image, dm-verity sealed, UEFI-db boot, empty scaffold
 2. Clean?    → STAY on Debian. Never build Fedora.        (most likely)
 3. Janky?    → Debian + mkosi + systemd-sysupdate fallback
 4. Blocked?  → build oracle on Fedora, finish hard parts, port to Debian (cheap via mkosi move #1)
@@ -118,7 +120,7 @@ hatch and the Debian decision is low-risk:
   wall)**. Landlock is the real wall; AppArmor is belt-and-suspenders.
 - Integrity starts as **dm-verity** (fixed-size sealed root, proven), composefs as a later
   upgrade — not a blocker.
-- First milestone = "hardened Debian mkosi/bootc image boots sealed under MOK with an empty
+- First milestone = "hardened Debian mkosi image boots sealed under UEFI Secure Boot with an empty
   control-plane scaffold" (Phase 1 acceptance test above).
 - **Security-model amendments incorporated** (see [`security-model.md`](security-model.md) §4,
   §8): (a) **TPM PCR sealing** targets are specified for the boot measurement, the mutable-policy

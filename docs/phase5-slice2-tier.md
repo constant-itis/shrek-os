@@ -11,17 +11,21 @@ downgrading. It adds no new isolation technology — the one constructor is stil
 
 ## What this slice is (and is NOT)
 
-The matrix outputs T0/T1/T2/T3, but only **T1 is constructible today** (T2/T3 = slice-3; a real T0
-Landlock sandbox is a later slice). So this slice is the **decision + floor + fail-closed refusal**,
-not the tiers themselves. Most of the matrix therefore **refuses**, and that refusal *is* the
-security property — it hardens ADV-2's downstream half (the floor re-check).
+At slice-2 time the matrix output T0/T1/T2/T3 but only T1 was constructible. Later slices changed
+that: slice 3 added T1 egress, slice 4 added a genuine T0 Landlock constructor, and slice 6 added
+the T2 gVisor constructor. Read this file as the **decision + floor + fail-closed refusal** slice;
+[`phase5-slice4-t0.md`](phase5-slice4-t0.md), [`phase5-slice6-t2.md`](phase5-slice6-t2.md), and
+[`phase5-slice7-trust-provenance.md`](phase5-slice7-trust-provenance.md) are the current sources for
+constructor and provenance state.
 
 **In scope:** the pure decision crate; agentd's resolver; gatekeeperd's independent re-check +
 constructibility gate; empirical proof on host, oracle, and the sealed VM.
 
-**Out of scope (later slices, by explicit decision):** trust-band inference / provenance sourcing
+**Out of scope at slice-2 time, by explicit decision:** trust-band inference / provenance sourcing
 (OPEN B1, owed to agents.md); the T2 (gVisor) / T3 (libkrun) constructors; a real T0 (Landlock)
-constructor; the egress plane (nftables/tap); the crypto seal + socket transport (slice-5).
+constructor; the egress plane (nftables/tap); the crypto seal + socket transport (slice-5). T1
+egress, real T0, T2, and B1 provenance have since landed; T3 and the socket/crypto seal remain
+deferred.
 
 ## The decision — `crates/shrek-policy` (`tier` module)
 
@@ -69,8 +73,8 @@ Refusal exit codes: `10` downgrade-below-floor · `11` caps-exceed-profile · `1
 
 ## The constructible set today
 
-Only `effective ∈ {T0,T1}` **and** `caps ∈ {C-ro-nosec, C-proj-rw}` builds (at T1). That is 4 of
-16 cells; the other 12 fail closed:
+At slice-2 commit time, only `effective ∈ {T0,T1}` **and** `caps ∈ {C-ro-nosec, C-proj-rw}` built
+(at T1). That was 4 of 16 cells; the other 12 failed closed:
 
 ```
               C-ro-nosec   C-proj-rw   C-net        C-broad
@@ -80,8 +84,9 @@ Only `effective ∈ {T0,T1}` **and** `caps ∈ {C-ro-nosec, C-proj-rw}` builds (
  T-hostile    ≥T2✗         ≥T2✗        ≥T2✗         ≥T2✗
 ```
 
-A ≥T2 requirement is NEVER satisfied by a T1 box just because T2/T3 aren't built — that is the
-load-bearing negative (security-model.md §7: "no unconfined fallback, ever").
+A stronger-tier requirement is NEVER satisfied by a weaker box just because the target constructor is
+missing — that is the load-bearing negative (security-model.md §7: "no unconfined fallback, ever").
+Current state differs only by adding real T0, T1 egress, and no-network T2 constructors.
 
 ## Gates
 
