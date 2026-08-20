@@ -66,7 +66,7 @@ The design tiers are:
 |---|---|---|
 | T0 | Landlock + seccomp + user/mount/pid/net/uts/ipc/cgroup namespaces + cgroups v2; no rootfs | shipped for the T0 matrix cells in Phase-5 slice 4 |
 | T1 | `systemd-nspawn` with synthetic root, read-only grant binds, private users, private network | shipped for mount and egress slices |
-| T2 | gVisor `runsc` userspace kernel with sealed runtime artifacts | shipped for no-network T2 cells in Phase-5 slice 6 |
+| T2 | gVisor `runsc` userspace kernel with sealed runtime artifacts | shipped in Phase-5 slice 6; Phase-6 added **named egress** and the untrusted-ingest **coding session** on the T2 wall (P6-1a/1b/1c) |
 | T3 | libkrun/Firecracker/Kata microVM, with virtio-fs-style file passing | designed; constructor deferred |
 
 The matrix and floor are the design-of-record in [`isolation.md`](isolation.md) §5 and the executable policy in [`crates/shrek-policy/src/tier.rs`](../crates/shrek-policy/src/tier.rs). Constructor details are in [`phase5-slice1-mount.md`](phase5-slice1-mount.md), [`phase5-slice2-tier.md`](phase5-slice2-tier.md), [`phase5-slice4-t0.md`](phase5-slice4-t0.md), and [`phase5-slice6-t2.md`](phase5-slice6-t2.md).
@@ -119,12 +119,21 @@ Shipped and VM-proven:
 - Phase 5 slice 10: `T-pinned` dynamically-linked execution from an authenticated N-inode **closure island** (entrypoint + `PT_INTERP` + transitive `DT_NEEDED`).
 - Phase 5 consolidation: pin-verity fixture surface compiled out of production (F1); exec-island root sealed `MS_NOEXEC` with a fail-closed self-check (F2). The **§11 execution contract** in [`security-model.md`](security-model.md) states the resulting guarantees and non-guarantees.
 
+**Phase-6 — coding-agent enablement (completed track; VM-proven in [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate)):**
+
+- P6-1a: an integrity-bound **untrusted-ingest T2 coding session** entered through the shipped `shrek run` front door. The `runsc` harness fs-verity-measures into the sealed admit-list ⇒ `T-untrust` (not the `T-hostile` floor), with project-scoped write-through. See [`phase6-slice1a-untrusted-ingest.md`](phase6-slice1a-untrusted-ingest.md).
+- P6-1b: **named egress** wired into the T2 ingest constructor — a sealed one-destination profile reaches its pinned dst, drops the rest, and fails closed without a resolver. See [`phase6-slice1b-egress.md`](phase6-slice1b-egress.md).
+- P6-1c: the T2 rootfs is staged on a **fresh exec tmpfs** (`mount_plane::stage_tmpfs`) so a compiled ELF runs from the exec build grant while the project grant stays `MS_NOEXEC`, even on hosts whose `/run` is `noexec`.
+- P6-2: the first real **coding-agent workload** ([`crates/coder`](../crates/coder/src/main.rs)) — a bounded inspect→model→edit→build/test→return loop that runs AS the `shrek run` workload, sealed into the dm-verity T2 rootfs, and frozen as the v1 workload contract. See [`phase6-slice2-coder-agent.md`](phase6-slice2-coder-agent.md).
+- P6-3: the **model-provider abstraction** — the same coder drives a local model or a hosted Anthropic model. The hosted key never enters the sandbox: it lives in a broker-side authenticated egress proxy ([`crates/model-proxy`](../crates/model-proxy/src/main.rs), [`security-model.md`](security-model.md) §7) that the box reaches over the sealed `model-anthropic` egress in plaintext, while the proxy injects auth and terminates TLS. See [`phase6-slice3-provider-abstraction.md`](phase6-slice3-provider-abstraction.md).
+
+This completed **coding-agent enablement** work is distinct from the roadmap's original **Phase 6+ semantic-filesystem (Swamp)** designation — the `swampd` semantic indexing/query layer — which remains a separate, upcoming track (scaffold only today; the semantic-view invariant it will enforce is [`security-model.md`](security-model.md) §5 / [`swamp.md`](swamp.md)).
+
 Deferred by design, not bugs:
 
 - T0 write realization for `C-proj-rw`; both T0 and T1 are read-only today.
 - T0 subuid privilege drop; slice 4 maps container-root to real root and relies on Landlock/seccomp as the wall.
 - T0 clone/clone3 argument filtering for user-namespace creation.
-- T2 egress for `C-net`; current T2 is no-network only.
 - T3 microVM constructor.
 - `dlopen`/runtime closure extension for a pinned dynamic workload (v1 authenticates the build-enumerated closure only).
 - `≥T1` containment of a pinned artifact (`floor(Pinned)=T0` today).
@@ -162,6 +171,9 @@ Concrete code seams:
 - `crates/gatekeeperd/src/net_plane.rs`: T1 netns/veth/nftables egress plane.
 - `crates/gatekeeperd/src/proc_plane.rs`: T0 Landlock/seccomp constructor.
 - `crates/gatekeeperd/src/t2_plane.rs`: T2 gVisor constructor.
+- `crates/shrek/src/main.rs`: the `shrek run` front door — composes the `gatekeeperd sandbox` argv for a coding session (P6-1a).
+- `crates/coder/src/main.rs`: the coding-agent workload and the `Provider` seam — local and hosted-Anthropic wire adapters (P6-2/P6-3).
+- `crates/model-proxy/src/main.rs`: the broker-side authenticated egress proxy for a hosted model — key + TLS held outside the sandbox (P6-3).
 
 ## 7. Where to read next
 

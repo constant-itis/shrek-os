@@ -21,7 +21,12 @@ be checked against the tree whenever the control plane changes.
 | T1 mount plane | [`phase5-slice1-mount.md`](phase5-slice1-mount.md), [`trust-bands.md`](trust-bands.md) | [`crates/gatekeeperd/src/mount_plane.rs`](../crates/gatekeeperd/src/mount_plane.rs), [`crates/gatekeeperd/src/linux_uapi.rs`](../crates/gatekeeperd/src/linux_uapi.rs) | [`scripts/mount-plane-repro.sh`](../scripts/mount-plane-repro.sh), then [`scripts/sandbox-proof.sh`](../scripts/sandbox-proof.sh) for broader broker coverage |
 | T1 egress plane | [`phase5-slice2-tier.md`](phase5-slice2-tier.md), [`trust-bands.md`](trust-bands.md) | [`crates/shrek-policy/src/egress.rs`](../crates/shrek-policy/src/egress.rs), [`crates/gatekeeperd/src/net_plane.rs`](../crates/gatekeeperd/src/net_plane.rs) | [`scripts/egress-plane-repro.sh`](../scripts/egress-plane-repro.sh), [`scripts/egress-construct-proof.sh`](../scripts/egress-construct-proof.sh) |
 | T2 gVisor constructor | [`phase5-slice6-t2.md`](phase5-slice6-t2.md), [`trust-bands.md`](trust-bands.md) | [`crates/gatekeeperd/src/t2_plane.rs`](../crates/gatekeeperd/src/t2_plane.rs), [`image/mkosi.conf.d/30-t2-gvisor.conf`](../image/mkosi.conf.d/30-t2-gvisor.conf) | [`scripts/t2-construct-proof.sh`](../scripts/t2-construct-proof.sh) |
-| Semantic filesystem boundary | [`filesystem-intelligence.md`](filesystem-intelligence.md), [`swamp.md`](swamp.md), [`security-model.md`](security-model.md) | [`crates/swampd/src/main.rs`](../crates/swampd/src/main.rs) | not shipped past the current scaffold |
+| **Coding-agent enablement (P6-1a):** `shrek run` front door + integrity-bound untrusted-ingest T2 coding session | [`phase6-slice1a-untrusted-ingest.md`](phase6-slice1a-untrusted-ingest.md) | [`crates/shrek/src/main.rs`](../crates/shrek/src/main.rs), [`crates/gatekeeperd/src/t2_plane.rs`](../crates/gatekeeperd/src/t2_plane.rs) | [`scripts/shrek-run-proof.sh`](../scripts/shrek-run-proof.sh), [`scripts/p6-coder-proof.sh`](../scripts/p6-coder-proof.sh), [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate) (P6) |
+| Named egress on the ingest session (P6-1b) | [`phase6-slice1b-egress.md`](phase6-slice1b-egress.md) | [`crates/shrek-policy/src/egress.rs`](../crates/shrek-policy/src/egress.rs), [`crates/gatekeeperd/src/net_plane.rs`](../crates/gatekeeperd/src/net_plane.rs) | [`scripts/p6-egress-proof.sh`](../scripts/p6-egress-proof.sh), [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate) (P6B) |
+| Exec-tmpfs rootfs staging for the session (P6-1c) | [`phase6-slice1a-untrusted-ingest.md`](phase6-slice1a-untrusted-ingest.md) (as-built hardening) | [`crates/gatekeeperd/src/mount_plane.rs`](../crates/gatekeeperd/src/mount_plane.rs) `stage_tmpfs()`, [`crates/gatekeeperd/src/t2_plane.rs`](../crates/gatekeeperd/src/t2_plane.rs) | [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate) (P6) |
+| Coding-agent workload (P6-2) | [`phase6-slice2-coder-agent.md`](phase6-slice2-coder-agent.md) | [`crates/coder/src/main.rs`](../crates/coder/src/main.rs) | [`scripts/p6-coder-agent-proof.sh`](../scripts/p6-coder-agent-proof.sh), [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate) (P6-2) |
+| Model-provider abstraction + broker proxy (P6-3) | [`phase6-slice3-provider-abstraction.md`](phase6-slice3-provider-abstraction.md) | [`crates/coder/src/main.rs`](../crates/coder/src/main.rs) `Provider`, [`crates/model-proxy/src/main.rs`](../crates/model-proxy/src/main.rs), [`crates/shrek-policy/src/egress.rs`](../crates/shrek-policy/src/egress.rs) `model-anthropic` | [`scripts/p6-anthropic-proxy-proof.sh`](../scripts/p6-anthropic-proxy-proof.sh), [`mount-plane-gate`](../image/overlay/usr/lib/shrek/mount-plane-gate) (P6-3) |
+| Semantic filesystem boundary — the **upcoming Swamp/semantic Phase-6** track, distinct from the coding-agent enablement rows above | [`filesystem-intelligence.md`](filesystem-intelligence.md), [`swamp.md`](swamp.md), [`security-model.md`](security-model.md) | [`crates/swampd/src/main.rs`](../crates/swampd/src/main.rs) | not shipped past the current scaffold |
 
 ## 2. Trust and capability path
 
@@ -48,7 +53,7 @@ Code path:
 Useful tests are embedded near the policy code. Look for cases such as
 `effective_is_never_below_floor_or_matrix`,
 `forged_downgrade_below_floor_is_refused`, `t3_has_no_constructor`, and
-`t2_c_net_has_no_gvisor_egress_plane`.
+`hostile_with_write_or_net_is_always_t3_except_readonly`.
 
 ## 3. Constructor path
 
