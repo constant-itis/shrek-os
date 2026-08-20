@@ -1,7 +1,8 @@
 #!/bin/sh
 # Phase-5/6 VM GATE: slice-1 M4 mount plane + slice-2 decision plane + slice-3 egress plane + slice-4 T0 +
 # slice-6 T2 (S5 block) + slice-8 positive pin (S6) + slice-9 exec island (S7) + slice-10 closure (S8) +
-# Phase-6 slice-1a untrusted-ingest coding session (P6). SPIKE ONLY: remove this file, shrek-mount-gate.service,
+# Phase-6 slice-1a untrusted-ingest coding session (P6) + slice-1b named egress on that session (P6B, inside
+# P6). SPIKE ONLY: remove this file, shrek-mount-gate.service,
 # and the multi-user.target.wants symlink before any real/shipped image
 # (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md, docs/phase5-slice8-pin-manifest.md §8, docs/phase6-slice1a-*.md).
 #
@@ -571,6 +572,40 @@ else
         printf '%s\n' "$OUT5" | grep -q 'construct-at=' && { emit "FAIL P6-G5 constructed (should refuse)"; p6fail=1; } || emit "PASS P6-G5 never-constructed"
         printf '%s\n' "$OUT5" | grep -q 'LEAKED' && { emit "FAIL P6-G5 workload-ran (LEAK)"; p6fail=1; } || emit "PASS P6-G5 workload-never-ran"
         [ -e "$P6SRV/project/leak.txt" ] && { emit "FAIL P6-G5 workload wrote to host (LEAK)"; p6fail=1; } || emit "PASS P6-G5 no-host-write"
+
+        # ---- Phase-6 slice-1b: NAMED EGRESS wired into the T2 ingest constructor (sealed kernel) ----
+        # The oracle (scripts/p6-egress-proof.sh) proves the POSITIVE path on the IDENTICAL binary:
+        # netstack egresses from the pre-created netns to the sealed profile's pinned dst, drops the rest,
+        # tears down clean. The VM (no NIC, RO /etc ⇒ no resolver) proves the sealed-kernel WIRING +
+        # fail-closed: a C-net ingest cell reaches the T2 constructor WITH the resolved egress profile,
+        # then FAILS CLOSED rather than silently opening a network; unknown/broad still refuse. (Same
+        # split as S3: the endpoint-free VM cannot show reach, so reach lives in the oracle.)
+        # (a) C-net + sealed profile: the decision carries egress=github-https at construct-at=T2 (egress
+        #     WIRED into the T2 constructor on the sealed kernel), then construction FAILS CLOSED (no NIC ⇒
+        #     resolve_profile_v4 finds no A-record), the workload NEVER runs.
+        OUTB=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
+                 --caps C-net --profile C-net --ingest-harness --id p6be --anchor "$P6SRV" --grant project \
+                 --egress-profile github-https -- /bin/sh -c 'echo SHOULD-NOT-RUN' 2>&1); rcb=$?
+        printf '%s\n' "$OUTB"
+        printf '%s\n' "$OUTB" | grep -q 'construct-at=T2 effective=T2 .*egress=github-https' \
+          && emit "PASS P6B-wired egress=github-https reached the T2 constructor (sealed kernel)" || { emit "FAIL P6B-wired (egress not wired into T2 constructor)"; p6fail=1; }
+        { [ "$rcb" != 0 ] && ! printf '%s\n' "$OUTB" | grep -q 'SHOULD-NOT-RUN'; } \
+          && emit "PASS P6B-failclosed C-net did not egress w/o resolver (rc=$rcb, workload never ran)" || { emit "FAIL P6B-failclosed (rc=$rcb or workload ran)"; p6fail=1; }
+        # (b) unknown egress profile ⇒ REFUSED (rc 13), nothing constructed.
+        SHREK_T2_RUNSC="$P6MNT/runsc" "$GK" sandbox --tier T2 --trust T-hostile --caps C-net --profile C-net \
+              --ingest-harness --id p6bu --anchor "$P6SRV" --grant project --egress-profile bogus-exfil \
+              -- /bin/sh -c 'echo SHOULD-NOT-RUN' >/dev/null 2>&1; ubrc=$?
+        [ "$ubrc" = 13 ] && emit "PASS P6B-unknown-profile refused (rc=13)" || { emit "FAIL P6B-unknown-profile (rc=$ubrc)"; p6fail=1; }
+        # (c) C-broad ⇒ (T-untrust,C-broad)=T3 ⇒ no constructor; naming a profile does NOT buy egress.
+        SHREK_T2_RUNSC="$P6MNT/runsc" "$GK" sandbox --tier T3 --trust T-hostile --caps C-broad --profile C-broad \
+              --ingest-harness --id p6bb --anchor "$P6SRV" --grant project --egress-profile github-https \
+              -- /bin/sh -c 'echo SHOULD-NOT-RUN' >/dev/null 2>&1; bbrc=$?
+        [ "$bbrc" = 12 ] && emit "PASS P6B-cbroad refused (rc=12 no-constructor-T3)" || { emit "FAIL P6B-cbroad (rc=$bbrc)"; p6fail=1; }
+        # (d) no residual netns / veth / nft after the fail-closed run.
+        rns=$(ip netns list 2>/dev/null | grep -oE 'shrek-p6b[a-z]+' | tr '\n' ,)
+        rif=$(ip -o link show 2>/dev/null | grep -oE 'skh[0-9a-f]{4}' | tr '\n' ,)
+        rtb=$(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*' | tr '\n' ,)
+        { [ -z "$rns" ] && [ -z "$rif" ] && [ -z "$rtb" ]; } && emit "PASS P6B-teardown no residual egress plumbing" || { emit "FAIL P6B-teardown ns=[$rns] if=[$rif] tb=[$rtb]"; p6fail=1; }
       else
         emit "FAIL P6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; p6fail=1
       fi
