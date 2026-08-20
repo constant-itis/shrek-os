@@ -1,0 +1,12 @@
+[package]
+name = "shrek"
+version.workspace = true
+edition.workspace = true
+
+# The user-facing CLI (`shrek run|find|…`), distinct from `shrekctl` (operator/onion ops).
+# Phase-6: `shrek run` is the first front door — an ergonomic composer over the existing
+# `gatekeeperd sandbox` construct. It owns NO isolation mechanism; every plane (mount grants,
+# tier derivation, T2, egress) stays in gatekeeperd. Dependency-free by design (minimal-deps).
+[[bin]]
+name = "shrek"
+path = "src/main.rs"

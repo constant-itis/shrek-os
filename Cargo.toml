@@ -12,6 +12,7 @@ members = [
     "crates/gatekeeperd", # privileged broker; only sandbox builder (Phase 4/5)
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
     "crates/shrekctl",    # operator CLI
+    "crates/shrek",       # user-facing CLI: `shrek run` front door       (Phase 6)
     "crates/shrek-gate-probe", # spike-only sealed closed-world in-sandbox acceptance probe (P5/B1)
 ]
 
