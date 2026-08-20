@@ -23,7 +23,8 @@
 
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
 use crate::net_plane;
-use crate::proc_plane::{self, T0Spec, DEFAULT_MEM_MAX, DEFAULT_PIDS_MAX};
+use crate::pin_manifest::Closure;
+use crate::proc_plane::{self, ClosureMemberSpec, ClosureSpec, T0Spec, DEFAULT_MEM_MAX, DEFAULT_PIDS_MAX};
 use crate::provenance_plane;
 use crate::t2_plane::{self, T2Spec};
 use shrek_policy::egress::EgressProfile;
@@ -32,6 +33,25 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
+
+/// slice-10 — lower a derived, sealed-manifest [`Closure`] into the constructor's [`ClosureSpec`]:
+/// the interpreter keyed by its absolute `PT_INTERP` path, each library by its bare SONAME, every
+/// member carrying its fs-verity `(algo_id, digest)` for construct-time re-measure (I10).
+fn closure_to_spec(c: Closure) -> ClosureSpec {
+    ClosureSpec {
+        interp: ClosureMemberSpec {
+            algo_id: c.interp.algo.to_verity_id(),
+            digest: c.interp.digest,
+            name: c.interp.path,
+            is_interp: true,
+        },
+        libs: c
+            .libs
+            .into_iter()
+            .map(|l| ClosureMemberSpec { algo_id: l.algo.to_verity_id(), digest: l.digest, name: l.path, is_interp: false })
+            .collect(),
+    }
+}
 
 /// Egress decision for a constructed sandbox. `None` = loopback-only (`--private-network`, no
 /// injection) — every no-net cell, and the slice-1 mount-plane path. `Profile` = a ≤T1 C-net cell
@@ -381,12 +401,16 @@ pub fn cli(args: &[String]) -> i32 {
                 // or /usr: mutable grants stay `MS_NOEXEC`, only the re-verified pinned inode gains exec.
                 if trust == TrustBand::Pinned {
                     let exec_fd_bound = der.exec_fd.is_some();
+                    // slice-10: a dynamically-linked pin carries an authenticated closure; map it into
+                    // the constructor's spec. `None` ⇒ slice-9 static-PIE single-inode island.
+                    let closure_spec = der.closure.take().map(closure_to_spec);
+                    let island_kind = if closure_spec.is_some() { "closure" } else { "exec" };
                     let pf = if effective == Tier::T0 { Some(proc_plane::preflight()) } else { None };
                     if let (Tier::T0, Some(proc_plane::Preflight::Ready { abi }), Some(exec_fd)) =
                         (effective, pf, der.exec_fd.take())
                     {
                         eprintln!(
-                            "SANDBOX-DECISION cleared construct-at=T0 island=exec effective=T0 requested={} trust={} caps={} profile={} landlock-abi={abi}",
+                            "SANDBOX-DECISION cleared construct-at=T0 island={island_kind} effective=T0 requested={} trust={} caps={} profile={} landlock-abi={abi}",
                             requested.label(), trust.label(), caps.label(), profile.label()
                         );
                         let t0 = T0Spec {
@@ -398,6 +422,7 @@ pub fn cli(args: &[String]) -> i32 {
                             mem_max: DEFAULT_MEM_MAX,
                             pids_max: DEFAULT_PIDS_MAX,
                             exec_island: Some(exec_fd),
+                            closure: closure_spec,
                         };
                         return match proc_plane::construct(&t0) {
                             Ok(code) => code,
@@ -463,6 +488,7 @@ pub fn cli(args: &[String]) -> i32 {
                                 mem_max: DEFAULT_MEM_MAX,
                                 pids_max: DEFAULT_PIDS_MAX,
                                 exec_island: None,
+                                closure: None,
                             };
                             return match proc_plane::construct(&t0) {
                                 Ok(code) => code,

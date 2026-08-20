@@ -14,7 +14,7 @@
 //! resolve `T-hostile` — the broker never distinguishes "could not measure" from "measured hostile".
 
 use crate::linux_uapi::*;
-use crate::pin_manifest::PinManifest;
+use crate::pin_manifest::{Closure, PinManifest, PinMatch};
 use shrek_policy::{derive_band, Evidence, TrustBand};
 use std::ffi::CString;
 use std::io;
@@ -68,6 +68,12 @@ pub struct Derivation {
     /// deterministically (`pinned-exec-home-unavailable`); this fd is never executed. It exists to
     /// demonstrate the pathname-independent binding for the separately-reviewed exec-home slice.
     pub exec_fd: Option<OwnedFd>,
+    /// slice-10: `Some` when the matched entrypoint is a **sealed-dynamic closure** (a dynamically-
+    /// linked pin whose interpreter + transitive `DT_NEEDED` are all identity-pinned in the manifest).
+    /// Carries the closure spec (member paths + digests) forward so the constructor builds the N-inode
+    /// closure island; `None` for a slice-8/9 single-inode static pin. Only ever set together with
+    /// `exec_fd` (the entrypoint fd) on a `T-pinned` band.
+    pub closure: Option<Closure>,
 }
 
 fn path_cstr(p: &Path) -> io::Result<CString> {
@@ -193,27 +199,31 @@ pub fn pin_lookup_fd(fd: RawFd, manifest: &PinManifest) -> (bool, bool) {
 }
 
 /// The pin arm: for an absolute entrypoint, load the sealed manifest and, if it has pins, open+measure
-/// the entrypoint and look it up. Returns `(matched, closed_world, fd)` where `fd` is `Some` (the
-/// measured==executed fd) only on a match. No manifest / empty manifest / non-absolute path / open
-/// failure ⇒ `(false, false, None)`.
-fn pin_arm(entrypoint: &Path) -> (bool, bool, Option<OwnedFd>) {
+/// the entrypoint and look it up. Returns `(matched, closed_world, fd, closure)` where `fd` is `Some`
+/// (the measured==executed fd) only on a match, and `closure` is `Some` only when the match is a
+/// sealed-dynamic closure entry (slice-10). No manifest / empty manifest / non-absolute path / open
+/// failure / miss ⇒ `(false, false, None, None)`.
+fn pin_arm(entrypoint: &Path) -> (bool, bool, Option<OwnedFd>, Option<Closure>) {
     if !entrypoint.is_absolute() {
-        return (false, false, None);
+        return (false, false, None, None);
     }
     let Some(manifest) = load_manifest() else {
-        return (false, false, None);
+        return (false, false, None, None);
     };
     if manifest.is_empty() {
-        return (false, false, None);
+        return (false, false, None, None);
     }
     let Ok(fd) = open_entry_rdonly(entrypoint) else {
-        return (false, false, None);
+        return (false, false, None, None);
     };
-    let (matched, closed) = pin_lookup_fd(fd.as_raw_fd(), &manifest);
-    if matched {
-        (true, closed, Some(fd))
-    } else {
-        (false, false, None)
+    let (algo, digest) = match measure_verity(fd.as_raw_fd()) {
+        Ok(v) => v,
+        Err(_) => return (false, false, None, None),
+    };
+    match manifest.lookup_match(algo, &digest) {
+        Some(PinMatch::Static(class)) => (true, class.is_closed_world(), Some(fd), None),
+        Some(PinMatch::Closure(c)) => (true, c.class.is_closed_world(), Some(fd), Some(c.clone())),
+        None => (false, false, None, None),
     }
 }
 
@@ -287,24 +297,28 @@ pub fn derive(entrypoint: Option<&String>, sealed: Option<(u32, u32)>) -> Deriva
     // A sealed-root entrypoint is already `T-first` (strongest-first in `derive_band`), so the pin arm
     // only ever *adds* a weaker positive proof; it can never lower a band.
     let mut exec_fd = None;
+    let mut closure = None;
     if let Some(p) = ep.map(Path::new) {
-        let (matched, closed, fd) = pin_arm(p);
+        let (matched, closed, fd, clo) = pin_arm(p);
         if matched {
             evidence.pinned_digest_match = true;
             evidence.domain_execution_sealed = evidence.domain_execution_sealed || closed;
             exec_fd = fd;
+            closure = clo;
         }
     }
 
     let band = derive_band(&evidence);
-    // Carry the measured fd to exec ONLY for a pin-derived band (amendment A). A non-pin band drops it.
-    let exec_fd = if band == TrustBand::Pinned { exec_fd } else { None };
+    // Carry the measured fd + closure to exec ONLY for a pin-derived band (amendment A). A non-pin band
+    // drops both — a sealed-dynamic closure is only ever acted on for a `T-pinned` derivation.
+    let (exec_fd, closure) = if band == TrustBand::Pinned { (exec_fd, closure) } else { (None, None) };
     Derivation {
         band,
         evidence,
         sealed_root: sealed,
         entrypoint: entrypoint.cloned(),
         exec_fd,
+        closure,
     }
 }
 

@@ -336,4 +336,92 @@ else
   fi
 fi
 [ "$s6fail" = 0 ] && emit "PASS S7 pin-exec-plane VM gate" || emit "FAIL S7 pin-exec-plane VM gate"
+
+# ============= Phase-5 slice-10: sealed-dynamic closure island (S8) =============
+# docs/phase5-slice10-sealed-dynamic.md §9. Proves the PRODUCTION CUSTODY PATH on the sealed image: the
+# v2 closure manifest BAKED under dm-verity /usr (build-in-container.sh STAGE 2, offline fsverity digest)
+# matches the runtime kernel FS_IOC_MEASURE_VERITY, so a pinned DYNAMIC entrypoint + its pinned
+# interpreter (exact PT_INTERP) + transitive pinned libs RE-MEASURE successfully and RUN from the N-inode
+# island, while /usr and mutable grants stay MS_NOEXEC outside the closure (the mutable-grant
+# mmap(PROT_EXEC)=EPERM assertion). A TAMPERED closure member (a byte-different, unpinned interp inode)
+# re-measures wrong ⇒ construction fails closed and the pinned bytes never run. Same dedicated
+# ext4 -O verity loopback as S6/S7 (the sealed root is block-level dm-verity, RO — no per-file verity).
+# The oracle (pin-manifest-proof.sh §8/§9) proves the identical mechanism on genuine fs-verity first.
+s8fail=0
+emit "S8-BEGIN Phase-5 slice-10 sealed-dynamic closure island (T-pinned)"
+DYNSRC=/usr/libexec/shrek/dynpkg
+DYNIMG=/run/shrek-dynfs.img
+DYNMNT=/run/shrek-dynfs
+DYNLOOP=
+if [ ! -f "$DYNSRC/dyn-probe" ] || [ ! -f "$DYNSRC/closure.meta" ]; then
+  emit "FAIL S8 reason=dynpkg-missing (build-in-container S8 stage not baked)"; s8fail=1
+elif ! command -v mkfs.ext4 >/dev/null 2>&1; then
+  emit "FAIL S8 reason=mkfs.ext4-missing"; s8fail=1
+else
+  IB=$(basename "$(awk '$1=="interp"{print $2}' "$DYNSRC/closure.meta")")   # interp basename
+  dd if=/dev/zero of="$DYNIMG" bs=1M count=96 status=none 2>/dev/null
+  if mkfs.ext4 -q -b 4096 -O verity "$DYNIMG" 2>/dev/null; then
+    i=0; while [ "$i" -le 15 ]; do [ -e /dev/loop$i ] || mknod -m660 /dev/loop$i b 7 "$i"; i=$((i + 1)); done
+    mkdir -p "$DYNMNT"
+    DYNLOOP=$(losetup -f --show "$DYNIMG" 2>/dev/null)
+    if [ -n "$DYNLOOP" ] && mount "$DYNLOOP" "$DYNMNT" 2>/dev/null; then
+      # enable fs-verity on the entrypoint + every closure member of a delivered dir; echo ok|bad.
+      enable_pkg() {  # $1 = target dir already populated with the closure files
+        ok=1
+        "$GK" pin-verity enable "$1/dyn-probe" >/dev/null 2>&1 || ok=0
+        "$GK" pin-verity enable "$1/$IB" >/dev/null 2>&1 || ok=0
+        for so in $(awk '$1=="lib"{print $2}' "$DYNSRC/closure.meta"); do
+          "$GK" pin-verity enable "$1/$so" >/dev/null 2>&1 || ok=0
+        done
+        [ "$ok" = 1 ]
+      }
+      # ---- positive: the intact pinned closure RUNS ----
+      mkdir -p "$DYNMNT/dynpkg"; cp "$DYNSRC"/* "$DYNMNT/dynpkg/" 2>/dev/null
+      if enable_pkg "$DYNMNT/dynpkg"; then
+        install -m0755 "$GP" "$SRV/project/evil"   # mutable grant for the NOEXEC assertion
+        if command -v systemd-run >/dev/null 2>&1; then
+          OUT=$(systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T0 --trust T-pinned \
+                  --caps C-ro-nosec --profile C-ro-nosec --id s8 --anchor "$SRV" --grant project \
+                  -- "$DYNMNT/dynpkg/dyn-probe" island "$SRV/project/evil" 2>&1); prc=$?
+        else
+          OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+                  --id s8 --anchor "$SRV" --grant project -- "$DYNMNT/dynpkg/dyn-probe" island "$SRV/project/evil" 2>&1); prc=$?
+        fi
+        printf '%s\n' "$OUT"
+        if printf '%s\n' "$OUT" | grep -q 'derived=T-pinned' && printf '%s\n' "$OUT" | grep -q 'exec_fd_bound=true'; then
+          emit "PASS S8-classify baked v2 closure ⇒ derived=T-pinned (offline bake == kernel measure)"
+        else emit "FAIL S8-classify (baked closure digests did not derive T-pinned)"; s8fail=1; fi
+        printf '%s\n' "$OUT" | grep -q 'construct-at=T0 island=closure' \
+          && emit "PASS S8-closure-construct (N-inode closure island on the sealed kernel)" \
+          || { emit "FAIL S8-closure-construct (no island=closure, rc=$prc)"; s8fail=1; }
+        for g in island-ran island-grant-mmap-exec-eperm island-grant-execve-denied; do
+          printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" \
+            && emit "PASS S8-$g" || { emit "FAIL S8-$g"; s8fail=1; }
+        done
+        # ---- negative: a tampered (byte-different, unpinned) interp inode ⇒ fail closed ----
+        # The entrypoint digest still matches (⇒ derived=T-pinned), but relocate_member re-measures the
+        # interp against the baked digest and rejects the tampered bytes ⇒ island never completes.
+        mkdir -p "$DYNMNT/dynrogue"; cp "$DYNSRC"/* "$DYNMNT/dynrogue/" 2>/dev/null
+        printf '\000' >> "$DYNMNT/dynrogue/$IB"    # differ BEFORE enabling verity (immutable after)
+        if enable_pkg "$DYNMNT/dynrogue"; then
+          OUT=$("$GK" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+                  --id s8r --anchor "$SRV" --grant project -- "$DYNMNT/dynrogue/dyn-probe" island "$SRV/project/evil" 2>&1); rrc=$?
+          if printf '%s\n' "$OUT" | grep -q 'derived=T-pinned' \
+             && ! printf '%s\n' "$OUT" | grep -q 'gate=island-ran' && [ "$rrc" != 0 ]; then
+            emit "PASS S8-tamper tampered interp inode ⇒ construction fails closed, pinned bytes never ran (rc=$rrc)"
+          else emit "FAIL S8-tamper (tampered closure member not fail-closed, rc=$rrc)"; s8fail=1; fi
+        else emit "FAIL S8-tamper reason=enable-verity-rogue"; s8fail=1; fi
+      else
+        emit "FAIL S8 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; s8fail=1
+      fi
+      umount "$DYNMNT" 2>/dev/null
+    else
+      emit "FAIL S8 reason=losetup/mount"; s8fail=1
+    fi
+    [ -n "$DYNLOOP" ] && losetup -d "$DYNLOOP" 2>/dev/null
+  else
+    emit "FAIL S8 reason=mkfs-verity (ext4 -O verity unsupported on sealed kernel)"; s8fail=1
+  fi
+fi
+[ "$s8fail" = 0 ] && emit "PASS S8 sealed-dynamic-plane VM gate" || emit "FAIL S8 sealed-dynamic-plane VM gate"
 verdict_done=1

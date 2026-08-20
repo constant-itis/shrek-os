@@ -32,6 +32,8 @@ if [ "${IN_CONTAINER:-0}" != "1" ]; then
       && cargo build --release -p gatekeeperd \
       && cargo build --release -p shrek-gate-probe \
       && cp target/release/gate-probe target/release/gate-probe-dyn \
+      && RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/lib -C link-arg=-Wl,--disable-new-dtags' cargo build --release -p shrek-gate-probe \
+      && cp target/release/gate-probe target/release/gate-probe-dynrp \
       && RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p shrek-gate-probe ) || exit 3
   echo "=== launching privileged debian:trixie oracle ==="
   exec docker run --rm --privileged --cgroupns=private -e IN_CONTAINER=1 \
@@ -39,13 +41,14 @@ if [ "${IN_CONTAINER:-0}" != "1" ]; then
     -v "$REPO_ROOT/target/release/gatekeeperd:/gatekeeperd:ro" \
     -v "$REPO_ROOT/target/release/gate-probe:/gate-probe:ro" \
     -v "$REPO_ROOT/target/release/gate-probe-dyn:/gate-probe-dyn:ro" \
+    -v "$REPO_ROOT/target/release/gate-probe-dynrp:/gate-probe-dynrp:ro" \
     debian:trixie bash /proof.sh
 fi
 
 # ---------------- inside the container ----------------
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
-apt-get install -y --no-install-recommends e2fsprogs util-linux >/dev/null 2>&1
+apt-get install -y --no-install-recommends e2fsprogs util-linux binutils >/dev/null 2>&1
 mount --make-rshared / 2>/dev/null || true
 
 # cgroup-v2 delegation for the slice-9 exec-island CONSTRUCTION (slice-8's refusal path never built,
@@ -76,6 +79,7 @@ GK=/gatekeeperd
 GKISL=/run/gk-isl.sh
 GP=/gate-probe
 GPDYN=/gate-probe-dyn
+GPDYNRP=/gate-probe-dynrp
 fails=0
 pass() { echo "PASS [$1]"; }
 fail() { echo "FAIL [$1]"; [ -n "${2:-}" ] && sed 's/^/    /' "$2"; fails=$((fails + 1)); }
@@ -182,6 +186,52 @@ island_run "$MNT/dyn-probe"
 if grep -q 'derived=T-pinned' /tmp/out && ! grep -q 'gate=island-ran' /tmp/out && [ "$RC" != 0 ]; then
   pass "dynamic pin ⇒ island construction fails closed, pinned bytes never ran (rc=$RC)"
 else fail "dynamic pin not fail-closed" /tmp/out; fi
+
+# ============================= slice-10: sealed-dynamic closure island ===========================
+# What only a real fs-verity run can show for slice-10: a DYNAMICALLY-linked pinned entrypoint, with an
+# authenticated closure (pinned interpreter + every transitive DT_NEEDED library, each identity-pinned
+# by fs-verity digest), RUNS from an N-inode island — the loader resolves every object to a re-verified
+# pinned inode, while /usr and every mutable grant are MS_NOEXEC so no non-member byte can be mapped.
+
+# Deliver the closure flat in one dir on the verity fs. The entrypoint carries DT_RPATH $ORIGIN/lib
+# (transitive), so the pinned loader resolves every library from the island lib dir.
+DP="$MNT/dynpkg"; mkdir -p "$DP"
+cp "$GPDYNRP" "$DP/dyn-probe"
+INTERP=$(readelf -l "$DP/dyn-probe" 2>/dev/null | sed -n 's/.*program interpreter: \([^]]*\)\].*/\1/p')
+LIBS=$(ldd "$DP/dyn-probe" | awk '/=>/ && $3 ~ /^\//{print $3}')
+if [ -z "$INTERP" ] || [ -z "$LIBS" ]; then echo "FAIL dyn: could not enumerate closure (interp=$INTERP)"; exit 2; fi
+cp "$INTERP" "$DP/$(basename "$INTERP")"
+for L in $LIBS; do cp "$L" "$DP/$(basename "$L")"; done
+# enable is best-effort (idempotent: EEXIST when already verity on a re-bake); measure is the real gate.
+em() { "$GK" pin-verity enable "$1" >/dev/null 2>&1; "$GK" pin-verity measure "$1" || { echo "FAIL dyn: measure $1"; exit 2; }; }
+build_closure_manifest() {  # $1 = interp digest override (empty = real); writes the sealed v2 manifest
+  { printf 'shrek-pin-manifest v2\n'
+    printf 'entry %s closed-world\n' "$(em "$DP/dyn-probe")"
+    if [ -n "$1" ]; then printf 'interp sha256 %s %s\n' "$1" "$INTERP"; else printf 'interp %s %s\n' "$(em "$DP/$(basename "$INTERP")")" "$INTERP"; fi
+    for L in $LIBS; do SO=$(basename "$L"); printf 'lib %s %s\n' "$(em "$DP/$SO")" "$SO"; done
+  } > /usr/lib/shrek/pin-manifest
+}
+dyn_run() { OUT=$("$GKISL" sandbox --tier T0 --trust T-pinned --caps C-ro-nosec --profile C-ro-nosec \
+        --anchor "$GDIR" --grant evil -- "$DP/dyn-probe" island "$GDIR/evil" 2>&1); RC=$?; printf '%s\n' "$OUT" > /tmp/out; }
+
+echo "== (8) SEALED-DYNAMIC: closed-world pinned DYNAMIC closure ⇒ T-pinned AND RUNS from the N-inode island =="
+build_closure_manifest ""
+dyn_run
+if grep -q 'derived=T-pinned' /tmp/out && grep -q 'pinned=true' /tmp/out && grep -q 'exec_fd_bound=true' /tmp/out; then
+  pass "dynamic classification: derived=T-pinned pinned=true exec_fd_bound=true"
+else fail "dynamic classification" /tmp/out; fi
+if grep -q 'construct-at=T0 island=closure' /tmp/out; then pass "closure island route taken at T0 (N-inode)"; else fail "closure route not taken (rc=$RC)" /tmp/out; fi
+if grep -q 'SHREK_GATE: PASS gate=island-ran' /tmp/out; then pass "pinned DYNAMIC entrypoint executed — full closure (interp + libs) resolved to pinned inodes"; else fail "dynamic pin did not run" /tmp/out; fi
+if grep -q 'SHREK_GATE: PASS gate=island-grant-mmap-exec-eperm' /tmp/out; then pass "under the closure island, a mutable-grant mmap(PROT_EXEC) still ⇒ EPERM (non-member NOEXEC)"; else fail "grant mmap-exec not EPERM under closure" /tmp/out; fi
+
+echo "== (9) fail-closed: a TAMPERED closure member (wrong interp digest) ⇒ construction fails, bytes never run =="
+build_closure_manifest "0000000000000000000000000000000000000000000000000000000000000000"
+dyn_run
+# derived=T-pinned (entry digest still matches), closure route entered, but the interp re-measure !=
+# manifest digest ⇒ relocate_member fails closed ⇒ island never completes, workload never runs.
+if grep -q 'derived=T-pinned' /tmp/out && ! grep -q 'gate=island-ran' /tmp/out && [ "$RC" != 0 ]; then
+  pass "tampered closure member ⇒ island construction fails closed, pinned bytes never ran (rc=$RC)"
+else fail "tampered closure member not fail-closed" /tmp/out; fi
 
 echo
 if [ "$fails" = 0 ]; then

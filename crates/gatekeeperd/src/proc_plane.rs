@@ -38,7 +38,10 @@ use crate::linux_uapi::{
     SECCOMP_RET_KILL_PROCESS,
 };
 use crate::linux_uapi::{openat2, OpenHow, AT_FDCWD, O_CLOEXEC, O_PATH};
-use crate::mount_plane::{open_anchor, pin_beneath, relocate_exec_island, seal_noexec_in_place, Pinned};
+use crate::mount_plane::{
+    mask_with_empty, open_anchor, pin_beneath, relocate_exec_island, relocate_member,
+    seal_noexec_in_place, seal_subtree_noexec, Pinned,
+};
 use std::ffi::CString;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -202,12 +205,45 @@ pub struct T0Spec {
     /// island, not the source fd (docs/phase5-slice9-pin-exec-home.md). `None` ⇒ ordinary T0 (no exec
     /// home for third-party bytes; grants Landlock-read only).
     pub exec_island: Option<OwnedFd>,
+    /// slice-10 sealed-dynamic: `Some` ⇒ the pinned entrypoint is dynamically linked and this carries
+    /// its authenticated closure (interpreter + transitive `DT_NEEDED`, each identity-pinned). When set
+    /// (alongside `exec_island`, the entry fd), the constructor builds an **N-inode closure island** —
+    /// the entry, the interpreter at its `PT_INTERP` path, and each library under the island lib dir are
+    /// exec-capable re-verified binds, while `/usr` and every mutable grant are forced `MS_NOEXEC`.
+    /// `None` ⇒ slice-9 single-inode static-PIE island (`exec_island` set, `closure` unset).
+    pub closure: Option<ClosureSpec>,
+}
+
+/// One authenticated member of a sealed-dynamic closure, as the constructor needs it (slice-10).
+pub struct ClosureMemberSpec {
+    /// fs-verity algorithm id + digest — the identity authority, re-measured at bind time (I10).
+    pub algo_id: u16,
+    pub digest: Vec<u8>,
+    /// The interpreter's absolute `PT_INTERP` path (`is_interp`), or a library's bare SONAME.
+    pub name: String,
+    pub is_interp: bool,
+}
+
+/// The authenticated closure the constructor binds (slice-10). Interpreter is bound at its absolute
+/// `PT_INTERP` pathname (shadowing the host loader path); libraries are bound under the island lib dir
+/// (`$ORIGIN/lib`, resolved by the pinned loader's baked RUNPATH). Sources are the same-basename files
+/// in the entrypoint's own directory.
+pub struct ClosureSpec {
+    pub interp: ClosureMemberSpec,
+    pub libs: Vec<ClosureMemberSpec>,
 }
 
 /// The broker-owned exec-island path for a request: the single re-verified inode the pinned
 /// entrypoint is bound to and the ONLY non-`noexec` third-party surface in the sandbox.
 fn island_path(id: &str) -> PathBuf {
     PathBuf::from(format!("/run/shrek/{id}/exec/entry"))
+}
+
+/// The island library directory for a request — `$ORIGIN/lib` relative to the entry island
+/// (`/run/shrek/<id>/exec/entry`), where the pinned loader (baked RUNPATH `$ORIGIN/lib`) resolves each
+/// `DT_NEEDED`. Each pinned library is bound at `island_lib_path(id)/<soname>` (slice-10).
+fn island_lib_path(id: &str, soname: &str) -> PathBuf {
+    PathBuf::from(format!("/run/shrek/{id}/exec/lib/{soname}"))
 }
 
 /// Reject anything that is not a static (loader-free) ELF64 — Fork A, slice-9. A `PT_INTERP` program
@@ -249,6 +285,229 @@ fn reject_if_dynamic(path: &Path) -> io::Result<()> {
             return Err(fail("PT_INTERP present (dynamically linked)"));
         }
     }
+    Ok(())
+}
+
+/// slice-10 — read a dynamic ELF64's `PT_INTERP` string and its direct `DT_NEEDED` SONAMEs, dep-free
+/// and fail-closed. Used by [`authenticate_closure`] to prove the entrypoint's loader inputs are all
+/// pinned closure members. `interp` is `None` for a static (loader-free) binary. Bounds every field so
+/// a hostile header cannot drive an unbounded read.
+struct DynInfo {
+    interp: Option<String>,
+    needed: Vec<String>,
+}
+
+fn parse_interp_and_needed(path: &Path) -> io::Result<DynInfo> {
+    const PT_LOAD: u32 = 1;
+    const PT_DYNAMIC: u32 = 2;
+    const PT_INTERP: u32 = 3;
+    const DT_NULL: i64 = 0;
+    const DT_NEEDED: i64 = 1;
+    const DT_STRTAB: i64 = 5;
+    const DT_STRSZ: i64 = 10;
+    let fail = |m: &str| io::Error::new(io::ErrorKind::Other, format!("closure ELF parse: {m}"));
+    let u16le = |b: &[u8]| u16::from_le_bytes(b.try_into().unwrap());
+    let u32le = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
+    let u64le = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+    let i64le = |b: &[u8]| i64::from_le_bytes(b.try_into().unwrap());
+
+    let mut f = std::fs::File::open(path)?;
+    let mut eh = [0u8; 64];
+    f.read_exact(&mut eh)?;
+    if &eh[0..4] != b"\x7fELF" {
+        return Err(fail("bad magic"));
+    }
+    if eh[4] != 2 || eh[5] != 1 {
+        return Err(fail("not little-endian ELFCLASS64"));
+    }
+    let e_phoff = u64le(&eh[32..40]);
+    let e_phentsize = u16le(&eh[54..56]) as usize;
+    let e_phnum = u16le(&eh[56..58]) as usize;
+    if e_phnum == 0 || e_phentsize < 56 {
+        return Err(fail("no/short program headers"));
+    }
+    if e_phnum > 4096 {
+        return Err(fail("implausible program-header count"));
+    }
+
+    f.seek(SeekFrom::Start(e_phoff))?;
+    let mut ph = vec![0u8; e_phentsize];
+    let mut interp_seg: Option<(u64, u64)> = None; // (offset, filesz)
+    let mut dyn_seg: Option<(u64, u64)> = None;
+    let mut loads: Vec<(u64, u64, u64)> = Vec::new(); // (vaddr, filesz, offset)
+    for _ in 0..e_phnum {
+        f.read_exact(&mut ph)?;
+        let p_type = u32le(&ph[0..4]);
+        let p_offset = u64le(&ph[8..16]);
+        let p_vaddr = u64le(&ph[16..24]);
+        let p_filesz = u64le(&ph[32..40]);
+        match p_type {
+            PT_INTERP => interp_seg = Some((p_offset, p_filesz)),
+            PT_DYNAMIC => dyn_seg = Some((p_offset, p_filesz)),
+            PT_LOAD => loads.push((p_vaddr, p_filesz, p_offset)),
+            _ => {}
+        }
+    }
+
+    let interp = match interp_seg {
+        Some((off, sz)) => {
+            if sz == 0 || sz > 4096 {
+                return Err(fail("implausible PT_INTERP size"));
+            }
+            f.seek(SeekFrom::Start(off))?;
+            let mut buf = vec![0u8; sz as usize];
+            f.read_exact(&mut buf)?;
+            let s = buf.split(|&b| b == 0).next().unwrap_or(&[]);
+            Some(String::from_utf8_lossy(s).into_owned())
+        }
+        None => None,
+    };
+
+    let mut needed: Vec<String> = Vec::new();
+    if let Some((doff, dsz)) = dyn_seg {
+        if dsz > (1 << 20) {
+            return Err(fail("implausible PT_DYNAMIC size"));
+        }
+        let n = (dsz / 16) as usize;
+        f.seek(SeekFrom::Start(doff))?;
+        let mut db = vec![0u8; n * 16];
+        f.read_exact(&mut db)?;
+        let mut needed_offsets: Vec<u64> = Vec::new();
+        let mut strtab_vaddr: Option<u64> = None;
+        let mut strsz: Option<u64> = None;
+        for i in 0..n {
+            let tag = i64le(&db[i * 16..i * 16 + 8]);
+            let val = u64le(&db[i * 16 + 8..i * 16 + 16]);
+            match tag {
+                DT_NULL => break,
+                DT_NEEDED => {
+                    if needed_offsets.len() >= 4096 {
+                        return Err(fail("implausible DT_NEEDED count"));
+                    }
+                    needed_offsets.push(val);
+                }
+                DT_STRTAB => strtab_vaddr = Some(val),
+                DT_STRSZ => strsz = Some(val),
+                _ => {}
+            }
+        }
+        if !needed_offsets.is_empty() {
+            let sv = strtab_vaddr.ok_or_else(|| fail("DT_NEEDED without DT_STRTAB"))?;
+            // Map the strtab virtual address to a file offset via the PT_LOAD segment that covers it.
+            let str_off = loads
+                .iter()
+                .find_map(|&(va, fsz, off)| if sv >= va && sv < va.saturating_add(fsz) { Some(off + (sv - va)) } else { None })
+                .ok_or_else(|| fail("DT_STRTAB vaddr not in any PT_LOAD"))?;
+            let cap: u64 = strsz.filter(|&s| s > 0 && s <= (1 << 20)).unwrap_or(1 << 16);
+            f.seek(SeekFrom::Start(str_off))?;
+            let mut sbuf = vec![0u8; cap as usize];
+            // The strtab may run to EOF short of `cap`; read what is there (fail only on a hard error).
+            let mut got = 0usize;
+            loop {
+                match f.read(&mut sbuf[got..]) {
+                    Ok(0) => break,
+                    Ok(k) => {
+                        got += k;
+                        if got == sbuf.len() {
+                            break;
+                        }
+                    }
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            sbuf.truncate(got);
+            for no in needed_offsets {
+                let start = no as usize;
+                if start >= sbuf.len() {
+                    return Err(fail("DT_NEEDED offset past strtab"));
+                }
+                let s = sbuf[start..].split(|&b| b == 0).next().unwrap_or(&[]);
+                if s.is_empty() {
+                    return Err(fail("empty DT_NEEDED string"));
+                }
+                needed.push(String::from_utf8_lossy(s).into_owned());
+            }
+        }
+    }
+    Ok(DynInfo { interp, needed })
+}
+
+/// slice-10 — authenticate the sealed-dynamic closure of the re-verified island entrypoint. Replaces
+/// `reject_if_dynamic` for the dynamic route: instead of rejecting any `PT_INTERP`, require that the
+/// entrypoint's loader inputs are ALL pinned closure members —
+///   (1) it IS dynamic (has a `PT_INTERP`) — a static binary belongs on the slice-9 route;
+///   (2) its `PT_INTERP` equals the closure's pinned interpreter path (so the kernel runs the pinned
+///       `ld.so` we bound there, never another loader);
+///   (3) every direct `DT_NEEDED` SONAME is one of the pinned closure libraries.
+/// Transitive completeness is build-enumerated; the runtime security teeth are that every non-member
+/// mount is `MS_NOEXEC` (so an unlisted dep cannot be mapped as code — it simply fails to load,
+/// fail-closed). Fail-closed on any parse error or mismatch.
+fn authenticate_closure(island_entry: &Path, closure: &ClosureSpec) -> io::Result<()> {
+    let fail = |m: String| io::Error::new(io::ErrorKind::Other, m);
+    let info = parse_interp_and_needed(island_entry)?;
+    let interp = info
+        .interp
+        .ok_or_else(|| fail("closure entrypoint has no PT_INTERP (not dynamically linked)".to_string()))?;
+    if interp != closure.interp.name {
+        return Err(fail(format!("entrypoint PT_INTERP {interp:?} != pinned interpreter {:?}", closure.interp.name)));
+    }
+    for need in &info.needed {
+        if !closure.libs.iter().any(|l| &l.name == need) {
+            return Err(fail(format!("DT_NEEDED {need:?} is not a pinned closure member")));
+        }
+    }
+    Ok(())
+}
+
+/// slice-10 — construct the **N-inode closure island** for a `T-pinned` dynamically-linked entrypoint,
+/// in the per-request child's private mount ns. Fail-closed throughout. Runs in P1 after the unshare +
+/// mount-private, before the P2 fork (mounts survive the fd scrub; the inherited `exec_fd` is never
+/// handed to the workload). The exec-capable surface is exactly {entry, interpreter, each pinned lib};
+/// `/usr` and every mutable grant are forced `MS_NOEXEC` so no non-member byte can be mapped as code.
+fn build_closure_island(spec: &T0Spec, exec_fd: RawFd, closure: &ClosureSpec) -> io::Result<()> {
+    let ctx = |label: &str, r: io::Result<()>| -> io::Result<()> {
+        r.map_err(|e| io::Error::new(e.kind(), format!("{label}: {e}")))
+    };
+    // 1. Re-assert MS_NOEXEC on every mutable grant, TOCTOU-safe (same as the static island).
+    let anchor = open_anchor(&spec.anchor).map_err(|e| io::Error::new(e.kind(), format!("open-anchor: {e}")))?;
+    for name in &spec.grants {
+        let p = pin_beneath(&anchor, name).map_err(|e| io::Error::new(e.kind(), format!("pin-grant {name}: {e}")))?;
+        ctx(&format!("seal-grant {name}"), seal_noexec_in_place(&p, &spec.anchor.join(name)))?;
+    }
+    // 2. Force /usr MS_NOEXEC in this ns — the executable-mapping boundary (Landlock gates execve, not
+    //    mmap(PROT_EXEC), so a non-member /usr .so must not be loadable). The sealed image is merged-usr
+    //    (/lib,/lib64 → /usr), so /usr covers the default library search; the oracle/VM gate verify a
+    //    /usr .so cannot be dlopen/mmap-loaded. Member binds are laid on TOP of this afterwards.
+    ctx("seal-usr-noexec", seal_subtree_noexec(Path::new("/usr")))?;
+    // 2b. Mask loader config so no preload/cache input can steer resolution outside the closure (I8/I9).
+    ctx("mask-ld-preload", mask_with_empty(Path::new("/etc/ld.so.preload")))?;
+    ctx("mask-ld-cache", mask_with_empty(Path::new("/etc/ld.so.cache")))?;
+    // 3. The entrypoint exec island (reuse the slice-9 machinery unchanged) — exec-capable, re-verified
+    //    (dev,ino)+fs-verity against der.exec_fd.
+    ctx("relocate-island", relocate_exec_island(Path::new(&spec.workload[0]), exec_fd, &island_path(&spec.id)))?;
+    // 4. The pinned members. Sources are the same-basename files in the entrypoint's own directory.
+    let entry_dir = Path::new(&spec.workload[0])
+        .parent()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "entrypoint has no parent dir"))?;
+    fn base(name: &str) -> &str {
+        Path::new(name).file_name().and_then(|s| s.to_str()).unwrap_or(name)
+    }
+    // 4a. Interpreter — bound at its absolute PT_INTERP path (shadowing the host loader).
+    let interp = &closure.interp;
+    ctx(
+        "relocate-interp",
+        relocate_member(&entry_dir.join(base(&interp.name)), interp.algo_id, &interp.digest, Path::new(&interp.name)),
+    )?;
+    // 4b. Each library — bound under the island lib dir ($ORIGIN/lib), keyed by SONAME.
+    for lib in &closure.libs {
+        ctx(
+            &format!("relocate-lib {}", lib.name),
+            relocate_member(&entry_dir.join(&lib.name), lib.algo_id, &lib.digest, &island_lib_path(&spec.id, &lib.name)),
+        )?;
+    }
+    // 5. Authenticate the entrypoint's loader inputs against the pinned closure (PT_INTERP + DT_NEEDED).
+    ctx("authenticate-closure", authenticate_closure(&island_path(&spec.id), closure))?;
     Ok(())
 }
 
@@ -424,6 +683,30 @@ fn install_landlock(spec: &T0Spec) -> io::Result<()> {
         island_fd = Some(fd);
     }
 
+    // slice-10 sealed-dynamic: EXECUTE|READ_FILE for each closure member too — the pinned interpreter
+    // (at its PT_INTERP path) and every pinned library (under the island lib dir). Landlock gates WHICH
+    // files may be execve'd/opened; the mmap(PROT_EXEC) boundary is the MS_NOEXEC posture on /usr +
+    // grants (build_closure_island). Only these member inodes are both openable AND exec-capable.
+    let mut member_fds: Vec<OwnedFd> = Vec::new();
+    if let Some(closure) = spec.closure.as_ref() {
+        let mut add_member = |target: &str| -> io::Result<()> {
+            let fd = open_opath(target)?;
+            let rule = LandlockPathBeneathAttr {
+                allowed_access: (LANDLOCK_ACCESS_FS_EXECUTE | LANDLOCK_ACCESS_FS_READ_FILE) & handled,
+                parent_fd: fd.as_raw_fd(),
+            };
+            landlock_add_path_beneath(ruleset.as_raw_fd(), &rule)?;
+            member_fds.push(fd);
+            Ok(())
+        };
+        add_member(&closure.interp.name)?;
+        for lib in &closure.libs {
+            let lp = island_lib_path(&spec.id, &lib.name);
+            let lps = lp.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::Other, "island lib path not utf-8"))?;
+            add_member(lps)?;
+        }
+    }
+
     // no_new_privs is required before restrict_self without CAP_SYS_ADMIN and is a defence in depth
     // regardless; then enforce. The O_PATH fds (all O_CLOEXEC) vanish at execve.
     set_no_new_privs()?;
@@ -431,6 +714,7 @@ fn install_landlock(spec: &T0Spec) -> io::Result<()> {
     drop(pins);
     drop(dev_fds);
     drop(island_fd);
+    drop(member_fds);
     drop(anchor);
     drop(usr);
     drop(ruleset);
@@ -531,7 +815,12 @@ pub fn construct(spec: &T0Spec) -> io::Result<i32> {
             // gives the pinned inode alone a re-verified exec-capable island. Fail-closed: an error here
             // aborts P1 (exit 125) so no half-built exec home ever runs.
             if let Some(exec_fd) = spec.exec_island.as_ref() {
-                step("exec-island", build_exec_island(spec, exec_fd.as_raw_fd()))?;
+                match spec.closure.as_ref() {
+                    // slice-10: a dynamically-linked pin builds the N-inode closure island.
+                    Some(closure) => step("closure-island", build_closure_island(spec, exec_fd.as_raw_fd(), closure))?,
+                    // slice-9: a static-PIE pin builds the single-inode exec island.
+                    None => step("exec-island", build_exec_island(spec, exec_fd.as_raw_fd()))?,
+                }
             }
 
             // P2: pid 1 of the new pid ns. It installs the walls and execs (or _exits non-zero).
@@ -644,6 +933,65 @@ mod tests {
         for p in [pie, exec, dynamic, bad_magic, p32] {
             let _ = std::fs::remove_file(p);
         }
+    }
+
+    #[test]
+    fn parse_interp_and_needed_reads_a_real_dynamic_binary() {
+        // The test harness itself is a dynamically-linked ELF64 in this toolchain: it must have a
+        // PT_INTERP (an ld.so) and at least one DT_NEEDED. Exercises the real ELF/dynamic parse
+        // (PT_INTERP string + DT_STRTAB vaddr→offset mapping) without synthesizing a strtab.
+        let me = std::fs::read_link("/proc/self/exe").expect("readlink /proc/self/exe");
+        let info = parse_interp_and_needed(&me).expect("parse self");
+        let interp = info.interp.expect("a dynamic binary has PT_INTERP");
+        assert!(interp.contains("ld-"), "PT_INTERP should name an ld.so, got {interp:?}");
+        assert!(!info.needed.is_empty(), "a dynamic binary has at least one DT_NEEDED");
+    }
+
+    #[test]
+    fn authenticate_closure_matches_interp_and_needed_and_rejects_drift() {
+        // Derive the true closure of /proc/self/exe, then prove authenticate_closure accepts the exact
+        // closure and fails closed on a substituted interpreter or a missing DT_NEEDED member.
+        let me = std::fs::read_link("/proc/self/exe").unwrap();
+        let info = parse_interp_and_needed(&me).unwrap();
+        let interp_path = info.interp.clone().unwrap();
+        let mk = |name: &str, is_interp: bool| ClosureMemberSpec {
+            algo_id: 1,
+            digest: vec![0u8; 32],
+            name: name.to_string(),
+            is_interp,
+        };
+        let full = ClosureSpec {
+            interp: mk(&interp_path, true),
+            libs: info.needed.iter().map(|n| mk(n, false)).collect(),
+        };
+        assert!(authenticate_closure(&me, &full).is_ok(), "the exact closure must authenticate");
+
+        // Wrong interpreter ⇒ reject (would let the kernel run an unpinned loader).
+        let bad_interp = ClosureSpec { interp: mk("/lib/some-other-ld.so", true), libs: full.libs.iter().map(|l| mk(&l.name, false)).collect() };
+        assert!(authenticate_closure(&me, &bad_interp).is_err(), "PT_INTERP drift must fail closed");
+
+        // Drop one DT_NEEDED from the closure (only meaningful when the binary has needs) ⇒ reject.
+        if !info.needed.is_empty() {
+            let short = ClosureSpec {
+                interp: mk(&interp_path, true),
+                libs: info.needed.iter().skip(1).map(|n| mk(n, false)).collect(),
+            };
+            assert!(authenticate_closure(&me, &short).is_err(), "an unpinned DT_NEEDED must fail closed");
+        }
+    }
+
+    #[test]
+    fn authenticate_closure_rejects_a_static_entrypoint() {
+        // A loader-free ELF64 (no PT_INTERP) is not a dynamic closure — it belongs on the slice-9 route.
+        const ET_DYN: u16 = 3;
+        const PT_LOAD: u32 = 1;
+        let stat = write_tmp("static", &synth_elf64(ET_DYN, &[PT_LOAD, PT_LOAD]));
+        let spec = ClosureSpec {
+            interp: ClosureMemberSpec { algo_id: 1, digest: vec![0u8; 32], name: "/lib/ld.so".into(), is_interp: true },
+            libs: vec![],
+        };
+        assert!(authenticate_closure(&stat, &spec).is_err(), "a static ELF has no PT_INTERP ⇒ reject");
+        let _ = std::fs::remove_file(stat);
     }
 
     #[test]

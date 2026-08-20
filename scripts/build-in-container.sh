@@ -35,6 +35,30 @@ RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p shrek-gate-pr
 install -m0755 target/release/gate-probe image/overlay/usr/libexec/shrek/gate-probe
 install -m0644 docs/*.md image/overlay/usr/share/doc/shrek/
 
+# Phase-5 slice-10 (S8 sealed-dynamic closure gate, spike — strip before ship with the other gate
+# scaffolding). A DYNAMIC gate-probe carrying DT_RPATH $ORIGIN/lib, delivered with its FULL ldd closure
+# (interpreter + transitive libs) so the sealed image can prove a pinned dynamic closure RUNS from the
+# N-inode island (docs/phase5-slice10-sealed-dynamic.md §9). The closure is enumerated here on the host;
+# STAGE 2 bakes each staged file's fs-verity digest into the v2 manifest (offline digest == runtime
+# kernel measure, fs-verity being content-addressed). closure.meta carries the interp path + SONAMEs to
+# STAGE 2. The probe runs against THESE delivered libs (self-contained), so a host/image libc skew is
+# irrelevant. The static pin above still drives S6/S7 unchanged.
+DYNPKG=image/overlay/usr/libexec/shrek/dynpkg
+rm -rf "$DYNPKG"; install -d "$DYNPKG"
+RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/lib -C link-arg=-Wl,--disable-new-dtags' cargo build --release -p shrek-gate-probe
+install -m0755 target/release/gate-probe "$DYNPKG/dyn-probe"
+DYN_INTERP=$(readelf -l "$DYNPKG/dyn-probe" | sed -n 's/.*program interpreter: \([^]]*\)\].*/\1/p')
+[ -n "$DYN_INTERP" ] || { echo "S8 stage: dyn-probe has no PT_INTERP"; exit 1; }
+install -m0755 "$DYN_INTERP" "$DYNPKG/$(basename "$DYN_INTERP")"
+: > "$DYNPKG/closure.meta"
+printf 'interp %s\n' "$DYN_INTERP" >> "$DYNPKG/closure.meta"
+for L in $(ldd "$DYNPKG/dyn-probe" | awk '/=>/ && $3 ~ /^\//{print $3}'); do
+  SO=$(basename "$L"); install -m0755 "$L" "$DYNPKG/$SO"; printf 'lib %s\n' "$SO" >> "$DYNPKG/closure.meta"
+done
+echo "--- staged S8 dynamic closure: interp=$DYN_INTERP libs=$(grep -c '^lib ' "$DYNPKG/closure.meta") ---"
+# Restore target/release/gate-probe to the STATIC build (some later steps expect the sealed variant).
+RUSTFLAGS="-C target-feature=+crt-static" cargo build --release -p shrek-gate-probe >/dev/null
+
 # S8: deliberately-broken build. BREAK=1 stages a poison marker into the sealed image; the boot
 # health gate (shrek-boot-health.service → /usr/lib/shrek/boot-health-check) fails on any version
 # carrying it, forcing an automatic A/B rollback to the last-good UKI. The marker is gitignored and
@@ -110,9 +134,28 @@ docker run --rm --privileged \
     PIN_HEX=$(fsverity digest --hash-alg=sha256 --block-size=4096 "$GP_OVL" | cut -d: -f2 | cut -d" " -f1)
     [ "${#PIN_HEX}" = 64 ] || { echo "S6 bake: unexpected fsverity digest [$PIN_HEX]"; exit 1; }
     install -d /work/image/overlay/usr/lib/shrek
-    printf "shrek-pin-manifest v1\nsha256 %s closed-world\n" "$PIN_HEX" \
-      > /work/image/overlay/usr/lib/shrek/pin-manifest
-    echo "--- baked pin-manifest (S6): sha256 $PIN_HEX closed-world ---"
+    # Phase-5 slice-10 (S8): extend the bake to a v2 manifest that ALSO pins the sealed-dynamic closure —
+    # the dynamic entrypoint (`entry`), its interpreter at its exact PT_INTERP path (`interp`), and every
+    # transitive lib by SONAME (`lib`). The static pin (above) keeps S6/S7; the closure adds S8. Same
+    # content-addressed fs-verity digest ⇒ this offline bake equals the runtime kernel measure (I10:
+    # sealed manifest + runtime re-measure is authority; the host enumeration in STAGE 1 only GENERATES).
+    DYNPKG_OVL=/work/image/overlay/usr/libexec/shrek/dynpkg
+    fsv() { fsverity digest --hash-alg=sha256 --block-size=4096 "$1" | cut -d: -f2 | cut -d" " -f1; }
+    {
+      printf "shrek-pin-manifest v2\n"
+      printf "sha256 %s closed-world\n" "$PIN_HEX"
+      if [ -f "$DYNPKG_OVL/closure.meta" ]; then
+        printf "entry sha256 %s closed-world\n" "$(fsv "$DYNPKG_OVL/dyn-probe")"
+        while read -r kind arg; do
+          case "$kind" in
+            interp) printf "interp sha256 %s %s\n" "$(fsv "$DYNPKG_OVL/$(basename "$arg")")" "$arg" ;;
+            lib)    printf "lib sha256 %s %s\n" "$(fsv "$DYNPKG_OVL/$arg")" "$arg" ;;
+          esac
+        done < "$DYNPKG_OVL/closure.meta"
+      fi
+    } > /work/image/overlay/usr/lib/shrek/pin-manifest
+    echo "--- baked v2 pin-manifest (S6/S7 static pin + S8 dynamic closure) ---"
+    cat /work/image/overlay/usr/lib/shrek/pin-manifest
     # S5 key/cert paths supplied here (harness knows the /work mount); SecureBoot=yes lives in config.
     mkosi --force \
       --secure-boot-key /work/keys/secureboot.key \

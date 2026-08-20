@@ -20,7 +20,7 @@ use std::ffi::CString;
 use std::io;
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const EINVAL: i32 = 22;
 
@@ -286,6 +286,165 @@ pub fn relocate_exec_island(entry_path: &Path, oracle_fd: RawFd, target: &Path) 
         None,
     )
     .map_err(|e| lbl("remount-ro", e))
+}
+
+/// slice-10 — bind a sealed-dynamic **closure member** (the interpreter or a `DT_NEEDED` library)
+/// onto its loader-visible island `target` and harden it `RO|NOSUID|NODEV` **without `MS_NOEXEC`** — so
+/// exactly this one re-verified inode is exec/`mmap(PROT_EXEC)`-capable, every other mount stays
+/// no-exec (docs/phase5-slice10-sealed-dynamic.md §3c).
+///
+/// Unlike [`relocate_exec_island`] (whose authority is the derivation's `exec_fd`), a member's identity
+/// authority is the **sealed-manifest digest** `(expect_algo_id, expect_digest)` — re-measured here at
+/// construct time (I10: manifest + runtime re-measure, not build-time enumeration, is authority). The
+/// `source` is re-opened by path IN THIS mount ns (TOCTOU-safe, `RESOLVE_NO_SYMLINKS|NO_MAGICLINKS`)
+/// giving an ns-local `vfsmount` usable as a bind source (the same cross-ns `EINVAL` constraint as the
+/// entrypoint island — slice-9 §8); a path swap resolves to a different inode whose fs-verity digest
+/// cannot equal the manifest digest (a content-hash preimage), so binding the wrong bytes fails closed.
+/// `(dev,ino)` is re-checked across the bind purely as a TOCTOU guard; the digest is the authority.
+pub fn relocate_member(
+    source: &Path,
+    expect_algo_id: u16,
+    expect_digest: &[u8],
+    target: &Path,
+) -> io::Result<()> {
+    let lbl = |s: &str, e: io::Error| io::Error::new(e.kind(), format!("{s}: {e}"));
+    let digest_mismatch = |s: &str| io::Error::new(io::ErrorKind::Other, format!("{s}: fs-verity digest != sealed-manifest digest"));
+
+    // Re-open the member O_RDONLY in THIS ns (ns-local bind source + re-measurable), TOCTOU-safe.
+    let how = OpenHow {
+        flags: O_RDONLY | O_CLOEXEC,
+        resolve: RESOLVE_NO_SYMLINKS | RESOLVE_NO_MAGICLINKS,
+        ..Default::default()
+    };
+    let local = openat2(AT_FDCWD as RawFd, &path_cstr(source)?, &how).map_err(|e| lbl("reopen-member", e))?;
+
+    // Authenticate content BEFORE binding: the source must already carry the manifest digest.
+    let src_ident = ident_of(&statx_fd(local.as_raw_fd())?)?;
+    let (a, d) = measure_verity(local.as_raw_fd()).map_err(|e| lbl("measure-member", e))?;
+    if a != expect_algo_id || d.as_slice() != expect_digest {
+        return Err(digest_mismatch("member source"));
+    }
+
+    // Ensure a mountpoint exists to bind over. The interpreter shadows an EXISTING host path on the
+    // now-`MS_NOEXEC` `/usr` (read-only) — we must NOT open it for write (EROFS); only create a target
+    // that is genuinely missing (the writable `/run` island lib dir). create_new + AlreadyExists-ok is
+    // race-safe and never writes to a read-only mount.
+    if let Some(parent) = target.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Resolve the target to a symlink-free real path so a benign system symlink (e.g. the interpreter's
+    // PT_INTERP path `/lib64/ld-linux-x86-64.so.2` — where BOTH `/lib64` and the file itself are
+    // merged-usr symlinks) does not later trip `RESOLVE_NO_SYMLINKS` at re-measure. An EXISTING target
+    // (the interpreter) canonicalizes fully; a not-yet-created one (a library under the writable `/run`
+    // island lib dir) canonicalizes its parent and rejoins the filename. This only moves where the bind
+    // physically lands (the same inode either way); the kernel/loader resolve the logical name the same
+    // way and reach our bind. Content authority stays the pre-bind source digest check above.
+    let real_target: PathBuf = if let Ok(c) = std::fs::canonicalize(target) {
+        c
+    } else if let (Some(parent), Some(fname)) = (target.parent(), target.file_name()) {
+        match std::fs::canonicalize(parent) {
+            Ok(rp) => rp.join(fname),
+            Err(_) => target.to_path_buf(),
+        }
+    } else {
+        target.to_path_buf()
+    };
+    match std::fs::OpenOptions::new().create_new(true).write(true).open(&real_target) {
+        Ok(_) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(lbl("touch-member", e)),
+    }
+    let src = CString::new(format!("/proc/self/fd/{}", local.as_raw_fd()))
+        .map_err(|_| io::Error::from_raw_os_error(EINVAL))?;
+    let tgt = path_cstr(&real_target)?;
+    mount(&src, &tgt, None, MS_BIND, None).map_err(|e| lbl("bind-member", e))?;
+
+    // Re-verify at the target: same inode (TOCTOU) AND same digest (authority) after the bind.
+    match ident_at_path(&real_target) {
+        Ok(id) if id == src_ident => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "identity drift after member bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(e);
+        }
+    }
+    match measure_at_path(&real_target) {
+        Ok((a2, d2)) if a2 == expect_algo_id && d2.as_slice() == expect_digest => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(digest_mismatch("member island"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(lbl("measure-member-island", e));
+        }
+    }
+
+    // Read-only hardening WITHOUT MS_NOEXEC — this one re-verified member inode is exec/mmap-capable.
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV,
+        None,
+    )
+    .map_err(|e| lbl("remount-member-ro", e))
+}
+
+/// slice-10 — force an existing mount subtree `MS_NOEXEC` (plus `RO|NOSUID|NODEV`) in the caller's
+/// private mount ns, so no byte under it can be `execve`'d OR `mmap(PROT_EXEC)`-loaded as a library
+/// (mmap(2) `EPERM`). This is the executable-mapping boundary for a sealed-dynamic workload — Landlock
+/// gates `execve` but NOT `mmap(PROT_EXEC)`, so `/usr` (and any other file-bearing default library
+/// mount) must be no-exec at the VFS level; only the re-verified closure-member binds laid on top of it
+/// afterwards are exec-capable (docs/phase5-slice10-sealed-dynamic.md §3c step 3, amendment). A
+/// self-bind is used so the flags apply to `path` itself even when it is not already its own mount.
+pub fn seal_subtree_noexec(path: &Path) -> io::Result<()> {
+    let lbl = |s: &str, e: io::Error| io::Error::new(e.kind(), format!("{s}: {e}"));
+    let p = path_cstr(path)?;
+    // Recursive self-bind so submounts are captured, then a recursive remount to add the flags.
+    mount(&p, &p, None, MS_BIND | MS_REC, None).map_err(|e| lbl("bind-subtree", e))?;
+    mount(
+        &p,
+        &p,
+        None,
+        MS_BIND | MS_REC | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        None,
+    )
+    .map_err(|e| lbl("remount-noexec", e))
+}
+
+/// slice-10 — mask a loader-config file (`/etc/ld.so.preload`, `/etc/ld.so.cache`) by binding an empty
+/// read-only file over it in the caller's private mount ns, so the dynamic loader gets NO preload or
+/// cache input that could steer resolution outside the sealed closure (I8/I9, v1). A path already
+/// absent in this ns needs no masking (nothing to hide). Fail-closed if a present target cannot be
+/// masked.
+pub fn mask_with_empty(target: &Path) -> io::Result<()> {
+    let lbl = |s: &str, e: io::Error| io::Error::new(e.kind(), format!("{s}: {e}"));
+    // Absent ⇒ nothing to mask (the loader simply finds no file).
+    let how = OpenHow { flags: O_PATH | O_CLOEXEC, resolve: 0, ..Default::default() };
+    if openat2(AT_FDCWD as RawFd, &path_cstr(target)?, &how).is_err() {
+        return Ok(());
+    }
+    let name = target.file_name().and_then(|s| s.to_str()).unwrap_or("mask");
+    let srcp = PathBuf::from(format!("/run/shrek/_mask/{name}"));
+    if let Some(parent) = srcp.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| lbl("mkdir-mask", e))?;
+    }
+    std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&srcp).map_err(|e| lbl("touch-mask", e))?;
+    let src = path_cstr(&srcp)?;
+    let tgt = path_cstr(target)?;
+    mount(&src, &tgt, None, MS_BIND, None).map_err(|e| lbl("bind-mask", e))?;
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_RDONLY | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        None,
+    )
+    .map_err(|e| lbl("remount-mask", e))
 }
 
 #[cfg(test)]
