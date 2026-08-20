@@ -205,14 +205,18 @@ impl CgroupLeaf {
         // Vacate `base`: move self to base/_daemon so base can delegate controllers to its children.
         let daemon = base.join("_daemon");
         let _ = std::fs::create_dir(&daemon);
-        cg_write(&daemon.join("cgroup.procs"), &format!("{}\n", std::process::id()))?;
+        cg_write(&daemon.join("cgroup.procs"), &format!("{}\n", std::process::id()))
+            .map_err(|e| io::Error::new(e.kind(), format!("vacate→_daemon ({}): {e}", daemon.display())))?;
         let _ = cg_write(&base.join("cgroup.subtree_control"), "+memory +pids");
 
         let leaf = base.join(format!("shrek-t2-{id}"));
         let _ = std::fs::remove_dir(&leaf);
-        std::fs::create_dir(&leaf)?;
-        cg_write(&leaf.join("memory.max"), &format!("{mem_max}\n"))?;
-        cg_write(&leaf.join("pids.max"), &format!("{pids_max}\n"))?;
+        std::fs::create_dir(&leaf)
+            .map_err(|e| io::Error::new(e.kind(), format!("mkdir leaf ({}): {e}", leaf.display())))?;
+        cg_write(&leaf.join("memory.max"), &format!("{mem_max}\n"))
+            .map_err(|e| io::Error::new(e.kind(), format!("write memory.max ({}): {e}", leaf.display())))?;
+        cg_write(&leaf.join("pids.max"), &format!("{pids_max}\n"))
+            .map_err(|e| io::Error::new(e.kind(), format!("write pids.max ({}): {e}", leaf.display())))?;
         Ok(CgroupLeaf { leaf })
     }
 
@@ -477,21 +481,30 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // spawn, so almost no fallible work follows it (tight fail-closed teardown).
     let net = spec.egress.map(|_| net_plane::SandboxNet::for_id(&spec.id));
     let resolved = match spec.egress {
-        Some(profile) => Some(net_plane::resolve_profile_v4(profile)?),
+        Some(profile) => Some(
+            net_plane::resolve_profile_v4(profile)
+                .map_err(|e| io::Error::new(e.kind(), format!("egress profile resolve: {e}")))?,
+        ),
         None => None,
     };
     if let Some(r) = &resolved {
-        std::fs::create_dir_all(run_rootfs.join("etc"))?;
-        std::fs::write(run_rootfs.join("etc/hosts"), net_plane::etc_hosts(&r.hosts))?;
+        let etc = run_rootfs.join("etc");
+        std::fs::create_dir_all(&etc)
+            .map_err(|e| io::Error::new(e.kind(), format!("egress /etc create ({}): {e}", etc.display())))?;
+        let hosts = etc.join("hosts");
+        std::fs::write(&hosts, net_plane::etc_hosts(&r.hosts))
+            .map_err(|e| io::Error::new(e.kind(), format!("egress /etc/hosts write ({}): {e}", hosts.display())))?;
     }
     let netns_path = net.as_ref().map(|n| n.ns_path());
 
     std::fs::write(
         bundle.join("config.json"),
         build_config_json(spec, &grants, &run_rootfs, netns_path.as_deref()),
-    )?;
+    )
+    .map_err(|e| io::Error::new(e.kind(), format!("config.json write ({}): {e}", bundle.join("config.json").display())))?;
 
-    let cg = CgroupLeaf::create(&spec.id, spec.mem_max, spec.pids_max)?;
+    let cg = CgroupLeaf::create(&spec.id, spec.mem_max, spec.pids_max)
+        .map_err(|e| io::Error::new(e.kind(), format!("cgroup leaf create (id={}): {e}", spec.id)))?;
 
     // Spike-only diagnostic (SHREK_T2_DEBUG=1): make runsc write its Sentry/boot debug log to a
     // PERSISTENT dir OUTSIDE `work` (teardown removes `work`, so the log would vanish with it) so a
