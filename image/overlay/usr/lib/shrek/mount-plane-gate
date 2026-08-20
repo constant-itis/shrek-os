@@ -606,6 +606,48 @@ else
         rif=$(ip -o link show 2>/dev/null | grep -oE 'skh[0-9a-f]{4}' | tr '\n' ,)
         rtb=$(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*' | tr '\n' ,)
         { [ -z "$rns" ] && [ -z "$rif" ] && [ -z "$rtb" ]; } && emit "PASS P6B-teardown no residual egress plumbing" || { emit "FAIL P6B-teardown ns=[$rns] if=[$rif] tb=[$rtb]"; p6fail=1; }
+
+        # ---- Phase-6 slice-2: the SEALED CODER AGENT as the T2 workload (docs/phase6-slice2-coder-agent.md) ----
+        # The oracle (scripts/p6-coder-agent-proof.sh) proves the POSITIVE end-to-end on the IDENTICAL
+        # binary: the model-driven coder drives read->write->build/run->done through the shipped `shrek run`
+        # front door over the sealed `model-local` egress (21/21 canned gate + LIVE 35B). The endpoint-free
+        # VM cannot REACH a model dst (no NIC, RO /etc ⇒ no resolver, no python3 responder) — the SAME split
+        # as S3/P6B — so reach stays the oracle and the VM proves what ONLY the sealed image can: (1) the
+        # coder binary is SEALED under dm-verity /usr (seal-t2-artifacts.sh baked it), and (2) the SAME
+        # model-driven coder session WIRES the sealed `model-local` egress into the genuine-T2 constructor on
+        # the sealed kernel, then FAILS CLOSED (no resolver) so the coder never dials and never runs — no
+        # silent open network. This is exactly the gatekeeperd argv `shrek run --egress model-local --
+        # /usr/bin/coder …` composes (crates/shrek: a named egress ⇒ caps=C-net ⊇ C-proj-rw, --profile
+        # mirrors, --ingest-harness on, --rw-grant/--build-grant carried through).
+        emit "P62-BEGIN Phase-6 slice-2 sealed coder agent as the T2 workload (seal + wiring + fail-closed)"
+        # (1) the seal baked the coder into the sealed T2 rootfs (its integrity is dm-verity /usr, NOT the
+        #     ingest admit-list — that measures the runsc HARNESS, so runsc stays the admitted harness).
+        if [ -x /usr/lib/shrek/t2-rootfs/usr/bin/coder ]; then
+          emit "PASS P62-sealed coder baked under dm-verity /usr (t2-rootfs/usr/bin/coder)"
+        else
+          emit "FAIL P62-sealed coder missing from sealed t2-rootfs (seal-t2-artifacts did not bake it)"; p6fail=1
+        fi
+        P62TASK="Make the program print REAL-COMPILE-RUN-OK and exit 42."
+        OUT62=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
+                  --caps C-net --profile C-net --ingest-harness --id p62 --anchor "$P6SRV" \
+                  --rw-grant project --build-grant build --egress-profile model-local \
+                  -- /usr/bin/coder --task "$P62TASK" --max-steps 4 2>&1); rc62=$?
+        printf '%s\n' "$OUT62"
+        # (2a) integrity: the baked admit-list authenticated the runsc harness for this coder session.
+        printf '%s\n' "$OUT62" | grep -q 'mode=ingest-harness derived=T-untrust' \
+          && emit "PASS P62-integrity coder session ⇒ derived=T-untrust (baked admit-list authenticated runsc)" || { emit "FAIL P62-integrity (coder session not derived=T-untrust)"; p6fail=1; }
+        # (2b) wired: the sealed model-local egress reached the genuine-T2 constructor for the coder workload
+        #      (proves the sealed policy carries `model-local` — an unknown profile would rc=13 with no line).
+        printf '%s\n' "$OUT62" | grep -q 'construct-at=T2 effective=T2 .*egress=model-local' \
+          && emit "PASS P62-wired sealed model-local egress wired into the T2 coder constructor (sealed kernel)" || { emit "FAIL P62-wired (model-local not wired into the T2 coder constructor)"; p6fail=1; }
+        # (2c) fail-closed: no NIC ⇒ resolve finds no A-record ⇒ construction fails closed, coder never runs.
+        { [ "$rc62" != 0 ] && ! printf '%s\n' "$OUT62" | grep -q 'CODER-START'; } \
+          && emit "PASS P62-failclosed C-net coder session did not egress w/o resolver (rc=$rc62, coder never started)" || { emit "FAIL P62-failclosed (rc=$rc62 or coder ran)"; p6fail=1; }
+        # (2d) no residual egress plumbing after the fail-closed coder session.
+        r2ns=$(ip netns list 2>/dev/null | grep -oE 'shrek-p62[a-z0-9]*' | tr '\n' ,)
+        r2if=$(ip -o link show 2>/dev/null | grep -oE 'skh[0-9a-f]{4}' | tr '\n' ,)
+        r2tb=$(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*' | tr '\n' ,)
+        { [ -z "$r2ns" ] && [ -z "$r2if" ] && [ -z "$r2tb" ]; } && emit "PASS P62-teardown no residual egress plumbing" || { emit "FAIL P62-teardown ns=[$r2ns] if=[$r2if] tb=[$r2tb]"; p6fail=1; }
       else
         emit "FAIL P6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; p6fail=1
       fi
