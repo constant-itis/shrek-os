@@ -105,6 +105,19 @@ pub fn enter_private_mount_ns() -> io::Result<()> {
     mount(c"none", c"/", None, MS_REC | MS_PRIVATE, None)
 }
 
+/// Mount a fresh, broker-owned `tmpfs` at `target` to stage a per-sandbox work area whose exec
+/// posture does NOT inherit the host's `/run` mount policy. A CIS/Pop!_OS-hardened host mounts
+/// `/run` `noexec`; staging the T2 rootfs there makes gVisor's setup-root remount-ro fail `EPERM`
+/// and the guest binary's `PROT_EXEC` file-backed map `SIGSEGV`. A default `tmpfs` is exec, so the
+/// staged rootfs runs regardless of `/run`. `nosuid,nodev` are preserved (the rootfs never needs
+/// setuid bits or device nodes). Call inside the per-request private mount namespace so the mount is
+/// contained, is inherited by the runsc child, and never propagates to the host mount table.
+pub fn stage_tmpfs(target: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    let t = path_cstr(target)?;
+    mount(c"tmpfs", &t, Some(c"tmpfs"), MS_NOSUID | MS_NODEV, None)
+}
+
 /// Read-only bind of a plain source directory onto a target (used to stage the sandbox's base OS
 /// runtime, e.g. `/usr`, into the synthetic root). Unlike a grant this is not attacker-influenced,
 /// so it needs no fd-pin — but it is still hardened to ro/nosuid/nodev.

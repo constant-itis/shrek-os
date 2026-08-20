@@ -25,7 +25,9 @@
 use crate::linux_uapi::{
     ioctl, open_rdwr, umount2, KVM_API_VERSION, KVM_CREATE_VM, KVM_GET_API_VERSION,
 };
-use crate::mount_plane::{enter_private_mount_ns, open_anchor, pin_beneath, relocate_rw, relocate_rw_exec};
+use crate::mount_plane::{
+    enter_private_mount_ns, open_anchor, pin_beneath, relocate_rw, relocate_rw_exec, stage_tmpfs,
+};
 use crate::net_plane;
 use shrek_policy::egress::EgressProfile;
 use std::io::{self, Write};
@@ -408,9 +410,16 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     //     OUTPUT here (CARGO_TARGET_DIR / a compiled binary) and RUNS it. The exec surface is confined to
     //     this one grant; `nosuid,nodev` preserved on both.
     // Any failure fails the whole construction closed — never a silent read-only or unpinned substitute.
-    // enter_private_mount_ns once, then pin+relocate each present grant within it.
+    //
+    // Enter ONE private mount namespace for the WHOLE construction (unconditionally — was grant-only):
+    // both the rootfs-staging tmpfs (below) and any writable-grant relocations live in it, contained +
+    // non-propagating, and the runsc child inherits them. The staging tmpfs is needed on EVERY T2
+    // construct — including the grant-less egress/no-net path — so the private ns can no longer be
+    // gated on grants.
+    enter_private_mount_ns()?;
+
+    // pin+relocate each present grant within that ns.
     if spec.rw_grant.is_some() || spec.build_grant.is_some() {
-        enter_private_mount_ns()?;
         let anchor_fd = open_anchor(&spec.anchor)?;
         if let Some(rw) = &spec.rw_grant {
             let pinned = pin_beneath(&anchor_fd, rw)?;
@@ -444,8 +453,16 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // construction (integrity preserved) and discarded on teardown; the guest still sees it read-only
     // (config readonly:true). A verity-lower/tmpfs-upper overlay + warm pool is the deferred scaling
     // optimization (docs §Deferred) — a per-construct copy is right for the minimal T2 floor.
+    //
+    // slice-6 (P6-1c) — stage the rootfs on a FRESH, gatekeeper-owned EXEC tmpfs rather than letting it
+    // inherit `/run`'s mount policy. On a hardened host (Pop!_OS/CIS default) `/run` is `noexec`, which
+    // makes gVisor's setup-root remount-ro fail `EPERM` and the guest binary's `PROT_EXEC` map SIGSEGV
+    // (rc139) — platform-independent, not a kvm/egress defect. A default `tmpfs` is exec (nosuid,nodev
+    // preserved), so staging here decouples the guest's exec path from `/run`'s flags. Mounted in the
+    // private mount ns entered above, so the runsc child inherits it and it never touches the host mount
+    // table; torn down (MNT_DETACH) in the exit path before the work tree is removed.
     let run_rootfs = work.join("rootfs");
-    std::fs::create_dir_all(&run_rootfs)?;
+    stage_tmpfs(&run_rootfs)?;
     match Command::new("cp").arg("-a").arg(format!("{}/.", spec.rootfs.display())).arg(&run_rootfs).status() {
         Ok(s) if s.success() => {}
         Ok(s) => return Err(io::Error::new(io::ErrorKind::Other, format!("rootfs copy failed rc={:?}", s.code()))),
@@ -537,8 +554,8 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     }
 
     let status = cmd.status();
-    // Fail-closed teardown regardless of outcome: force-delete any lingering container, remove the
-    // work tree, drop the cgroup leaf. (`umount2` guards against a rootfs bind if one is ever added.)
+    // Fail-closed teardown regardless of outcome: force-delete any lingering container, detach the
+    // writable binds + the staging tmpfs, remove the work tree, drop the cgroup leaf.
     let _ = Command::new(&spec.runsc).arg("--root").arg(&state).arg("delete").arg("--force").arg(&spec.id).status();
     // CRITICAL: detach EVERY writable bind (project + build) BEFORE removing the work tree.
     // `remove_dir_all` would otherwise recurse THROUGH a bind and unlink the workload's just-written
@@ -548,7 +565,10 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
         let target = work.join("rwgrants").join(wg);
         let _ = umount2(&std::ffi::CString::new(target.to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
     }
-    let _ = umount2(&std::ffi::CString::new(bundle.join("rootfs").to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
+    // Detach the per-sandbox staging tmpfs (mounted at work/rootfs) BEFORE the work-tree removal —
+    // otherwise remove_dir_all trips on the still-mounted directory. Lazy-detach (MNT_DETACH) mirrors
+    // the writable-grant binds above; the removal then clears only the now-empty broker mountpoint.
+    let _ = umount2(&std::ffi::CString::new(run_rootfs.to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
     let _ = std::fs::remove_dir_all(&work);
     cg.destroy();
     // Slice-1b: tear the egress netns down (deletes the nft table + veth + netns). Leaves NO residual
