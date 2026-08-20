@@ -648,6 +648,33 @@ else
         r2if=$(ip -o link show 2>/dev/null | grep -oE 'skh[0-9a-f]{4}' | tr '\n' ,)
         r2tb=$(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*' | tr '\n' ,)
         { [ -z "$r2ns" ] && [ -z "$r2if" ] && [ -z "$r2tb" ]; } && emit "PASS P62-teardown no residual egress plumbing" || { emit "FAIL P62-teardown ns=[$r2ns] if=[$r2if] tb=[$r2tb]"; p6fail=1; }
+
+        # ---- Phase-6 slice-3: the HOSTED-MODEL (Anthropic) provider path (docs/phase6-slice3-provider-abstraction.md) ----
+        # The oracle (scripts/p6-anthropic-proxy-proof.sh) proves the POSITIVE end-to-end on the IDENTICAL
+        # binary: the coder speaks the messages API in PLAINTEXT to the broker proxy over `model-anthropic`,
+        # the proxy injects the key + does TLS to Anthropic, the box holds no secret and reaches only the
+        # proxy (23/23). The endpoint-free VM cannot reach the broker proxy (no NIC/resolver, and the proxy
+        # is BROKER-SIDE — never sealed into the image), so — the SAME S3/P6B/P6-2 split — the VM proves what
+        # only the sealed image can: the SAME sealed coder with `--provider anthropic` WIRES the sealed
+        # `model-anthropic` egress into the genuine-T2 constructor on the sealed kernel, then FAILS CLOSED so
+        # the coder never dials and never runs. No secret and no TLS ever enter the box (both live in the
+        # broker proxy, out of the image's scope entirely).
+        emit "P63-BEGIN Phase-6 slice-3 hosted-model (anthropic) provider (wiring + fail-closed)"
+        OUT63=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
+                  --caps C-net --profile C-net --ingest-harness --id p63 --anchor "$P6SRV" \
+                  --rw-grant project --build-grant build --egress-profile model-anthropic \
+                  -- /usr/bin/coder --provider anthropic --task "$P62TASK" --max-steps 4 2>&1); rc63=$?
+        printf '%s\n' "$OUT63"
+        printf '%s\n' "$OUT63" | grep -q 'mode=ingest-harness derived=T-untrust' \
+          && emit "PASS P63-integrity anthropic coder session ⇒ derived=T-untrust" || { emit "FAIL P63-integrity"; p6fail=1; }
+        # The sealed policy carries `model-anthropic` (an unknown profile would rc=13 with no decision line).
+        printf '%s\n' "$OUT63" | grep -q 'construct-at=T2 effective=T2 .*egress=model-anthropic' \
+          && emit "PASS P63-wired sealed model-anthropic egress wired into the T2 coder constructor (sealed kernel)" || { emit "FAIL P63-wired (model-anthropic not wired into the T2 constructor)"; p6fail=1; }
+        { [ "$rc63" != 0 ] && ! printf '%s\n' "$OUT63" | grep -q 'CODER-START'; } \
+          && emit "PASS P63-failclosed anthropic session did not egress w/o resolver (rc=$rc63, coder never started; no secret/TLS in box)" || { emit "FAIL P63-failclosed (rc=$rc63 or coder ran)"; p6fail=1; }
+        r3ns=$(ip netns list 2>/dev/null | grep -oE 'shrek-p63[a-z0-9]*' | tr '\n' ,)
+        r3tb=$(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*' | tr '\n' ,)
+        { [ -z "$r3ns" ] && [ -z "$r3tb" ]; } && emit "PASS P63-teardown no residual egress plumbing" || { emit "FAIL P63-teardown ns=[$r3ns] tb=[$r3tb]"; p6fail=1; }
       else
         emit "FAIL P6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; p6fail=1
       fi
