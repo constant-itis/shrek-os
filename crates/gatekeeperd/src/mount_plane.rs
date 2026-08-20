@@ -151,6 +151,90 @@ pub fn relocate_ro(p: &Pinned, target: &Path) -> io::Result<()> {
     )
 }
 
+/// Phase-6 slice-1a — the WRITABLE sibling of [`relocate_ro`]: bind the pinned fd onto a plain,
+/// broker-owned `target`, re-verify identity, then remount `rw` but STILL `nosuid,nodev,`**`noexec`**.
+/// This realizes a project-scoped `C-proj-rw` grant (PN1 write-back for a real build/test/edit loop):
+/// writes flow through the bind to the pinned inode, so a coding workload's mutations land on the real
+/// project directory (direct write-through — no deferred reconcile). The `MS_NOEXEC` is DELIBERATELY
+/// preserved and, per the Phase-6 real-ELF result, is GENUINELY LOAD-BEARING for the project grant:
+/// gVisor must `mmap(PROT_EXEC)` a gofer-backed host file to load a binary, and a `MS_NOEXEC` host mount
+/// denies that — so a real executable written into the project CANNOT run in-sandbox. (This supersedes
+/// the earlier shell-script G3 conclusion: a `#!/bin/sh` stand-in never needed `PROT_EXEC`, so it never
+/// tested this.) A coding session runs its build OUTPUT from the separate exec-capable build grant
+/// ([`relocate_rw_exec`]); the project stays a no-exec source tree. `NOSUID|NODEV` also preserved.
+pub fn relocate_rw(p: &Pinned, target: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    let src = CString::new(format!("/proc/self/fd/{}", p.fd.as_raw_fd()))
+        .map_err(|_| io::Error::from_raw_os_error(EINVAL))?;
+    let tgt = path_cstr(target)?;
+
+    // Bind FROM the pinned fd — the source inode is fixed, immune to a path swap.
+    mount(&src, &tgt, None, MS_BIND, None)?;
+
+    // Re-verify: whatever is now at target must be the inode we pinned.
+    match ident_at_path(target) {
+        Ok(id) if id == p.ident => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "identity drift after relocate-rw bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(e);
+        }
+    }
+
+    // Writable, but keep nosuid/nodev/noexec — no MS_RDONLY. The bind-remount attaches the flags to the
+    // relocated mount without reopening the source read-only, so writes still reach the pinned inode.
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        None,
+    )
+}
+
+/// Phase-6 slice-1a (build grant) — the exec-capable sibling of [`relocate_rw`]. Identical TOCTOU-safe
+/// pin → bind-from-fd → re-verify → remount-rw, but the final remount is `NOSUID|NODEV` **WITHOUT**
+/// `MS_NOEXEC`. This realizes the SEPARATE, narrowly-scoped T2 build area: a coding workload directs its
+/// compiler/test OUTPUT here (a Rust session points `CARGO_TARGET_DIR` at it; a freshly-compiled ELF is
+/// written + run here) and it EXECUTES, because gVisor loads a binary by `mmap(PROT_EXEC)`-ing the
+/// gofer-backed host file and only a non-`noexec` host mount permits that. The exec surface is confined
+/// to this one grant; the project grant ([`relocate_rw`]) stays host-`noexec`, so source bytes written
+/// there are never runnable in-sandbox. Write-through + `NOSUID|NODEV` are identical to `relocate_rw`.
+pub fn relocate_rw_exec(p: &Pinned, target: &Path) -> io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    let src = CString::new(format!("/proc/self/fd/{}", p.fd.as_raw_fd()))
+        .map_err(|_| io::Error::from_raw_os_error(EINVAL))?;
+    let tgt = path_cstr(target)?;
+
+    // Bind FROM the pinned fd — the source inode is fixed, immune to a path swap.
+    mount(&src, &tgt, None, MS_BIND, None)?;
+
+    // Re-verify: whatever is now at target must be the inode we pinned.
+    match ident_at_path(target) {
+        Ok(id) if id == p.ident => {}
+        Ok(_) => {
+            let _ = umount2(&tgt, 0);
+            return Err(io::Error::new(io::ErrorKind::Other, "identity drift after relocate-rw-exec bind"));
+        }
+        Err(e) => {
+            let _ = umount2(&tgt, 0);
+            return Err(e);
+        }
+    }
+
+    // Writable + exec: keep nosuid/nodev but DROP MS_NOEXEC so gVisor can PROT_EXEC-map build output.
+    mount(
+        &src,
+        &tgt,
+        None,
+        MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV,
+        None,
+    )
+}
+
 /// slice-9 — bind a pinned inode over its OWN existing anchor path and harden it
 /// `RO|NOSUID|NODEV|NOEXEC`, contained to the caller's private mount ns. Unlike `relocate_ro` this
 /// does NOT create the target (the grant already exists at its anchor) and does not relocate it — it

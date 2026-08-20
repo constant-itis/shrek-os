@@ -21,6 +21,7 @@
 //!      --private-network gives every sandbox its own loopback-only netns (egress is injected, never
 //!      shared from the host).
 
+use crate::ingest_admit;
 use crate::mount_plane::{bind_ro, enter_private_mount_ns, open_anchor, pin_beneath, relocate_ro};
 use crate::net_plane;
 use crate::pin_manifest::Closure;
@@ -327,6 +328,9 @@ pub fn cli(args: &[String]) -> i32 {
     let mut caps_s: Option<String> = None;
     let mut profile_s: Option<String> = None;
     let mut egress_s: Option<String> = None;
+    let mut rw_grant: Option<String> = None;
+    let mut build_grant: Option<String> = None;
+    let mut ingest_harness = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -334,6 +338,14 @@ pub fn cli(args: &[String]) -> i32 {
             "--anchor" => { i += 1; if let Some(v) = args.get(i) { anchor = PathBuf::from(v); } }
             "--guest-prefix" => { i += 1; if let Some(v) = args.get(i) { guest_prefix = PathBuf::from(v); } }
             "--grant" => { i += 1; if let Some(v) = args.get(i) { grants.push(v.clone()); } }
+            // Phase-6 slice-1a: the single WRITABLE project grant (realized rw+host-noexec at T2 only).
+            "--rw-grant" => { i += 1; rw_grant = args.get(i).cloned(); }
+            // Phase-6 slice-1a: the separate WRITABLE+EXEC build grant (rw, no host-noexec) — the T2
+            // coding session runs its compiler/test OUTPUT here; the project rw-grant stays no-exec.
+            "--build-grant" => { i += 1; build_grant = args.get(i).cloned(); }
+            // Phase-6 slice-1a: derive the band via the integrity-bound untrusted-ingest admission
+            // (T-untrust iff the sealed T2 harness is fs-verity authentic) instead of the entrypoint arm.
+            "--ingest-harness" => { ingest_harness = true; }
             "--tier" => { i += 1; tier_s = args.get(i).cloned(); }
             "--trust" => { i += 1; trust_s = args.get(i).cloned(); }
             "--caps" => { i += 1; caps_s = args.get(i).cloned(); }
@@ -344,8 +356,8 @@ pub fn cli(args: &[String]) -> i32 {
         }
         i += 1;
     }
-    if grants.is_empty() || workload.is_empty() {
-        eprintln!("usage: gatekeeperd sandbox [--tier Tn --trust T --caps C [--profile C] [--egress-profile NAME]] --anchor DIR --grant NAME [...] -- WORKLOAD...");
+    if (grants.is_empty() && rw_grant.is_none() && build_grant.is_none()) || workload.is_empty() {
+        eprintln!("usage: gatekeeperd sandbox [--tier Tn --trust T --caps C [--profile C] [--egress-profile NAME]] [--ingest-harness] --anchor DIR (--grant NAME | --rw-grant NAME | --build-grant NAME) [...] -- WORKLOAD...");
         return 2;
     }
 
@@ -368,20 +380,39 @@ pub fn cli(args: &[String]) -> i32 {
         // caller-asserted input (ADV-8; docs §6). No override: an unsealed/foreign entrypoint that
         // proposes `T-first` is corrected down to `T-hostile` here, before the tier arithmetic.
         let proposed = TrustBand::parse(trust_s.as_deref().unwrap_or(""));
-        let mut der = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
-        let trust = der.band;
-        eprintln!(
-            "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} pinned={} exec_fd_bound={} sealed_root={:?}",
-            trust.label(),
-            proposed.label(),
-            trust == proposed,
-            der.entrypoint,
-            der.evidence.entrypoint_sealed,
-            der.evidence.domain_execution_sealed,
-            der.evidence.pinned_digest_match,
-            der.exec_fd.is_some(), // the measured fd is bound to a T-pinned derivation (slice-8)
-            der.sealed_root
-        );
+        // Two derivation sources, both integrity-bound and never caller-asserted:
+        //   * DEFAULT (slice-7 B1): measure the workload ENTRYPOINT — earns T-first/T-pinned or fails high.
+        //   * --ingest-harness (Phase-6 slice-1a): the entrypoint is a guest-rootfs path (not host-
+        //     measurable), so the entrypoint arm can only fail high. Instead, admit the session as
+        //     `UntrustedIngest` — earning T-untrust — IFF the sealed T2 containment harness is fs-verity
+        //     authentic (`ingest_admit`). A bad/missing harness stays Origin::None ⇒ T-hostile. Either
+        //     way `--trust` is only a non-authoritative proposal.
+        let (trust, mut der) = if ingest_harness {
+            let ia = ingest_admit::derive_session(&t2_plane::sealed_runsc_path());
+            eprintln!(
+                "SANDBOX-PROVENANCE mode=ingest-harness derived={} proposed={} harness_authentic={} harness_digest={}",
+                ia.band.label(),
+                proposed.label(),
+                ia.harness_authentic,
+                ia.measured_hex.as_deref().unwrap_or("none")
+            );
+            (ia.band, None)
+        } else {
+            let d = provenance_plane::derive(workload.first(), provenance_plane::sealed_root_dev());
+            eprintln!(
+                "SANDBOX-PROVENANCE derived={} proposed={} match={} entrypoint={:?} entrypoint_sealed={} domain_execution_sealed={} pinned={} exec_fd_bound={} sealed_root={:?}",
+                d.band.label(),
+                proposed.label(),
+                d.band == proposed,
+                d.entrypoint,
+                d.evidence.entrypoint_sealed,
+                d.evidence.domain_execution_sealed,
+                d.evidence.pinned_digest_match,
+                d.exec_fd.is_some(), // the measured fd is bound to a T-pinned derivation (slice-8)
+                d.sealed_root
+            );
+            (d.band, Some(d))
+        };
         match recheck(requested, trust, caps, profile, egress_name) {
             Decision::Refuse { code, reason } => {
                 eprintln!(
@@ -400,6 +431,8 @@ pub fn cli(args: &[String]) -> i32 {
                 // as slice-8 did (`pinned-exec-home-unavailable`). The island reopens NOTHING for grants
                 // or /usr: mutable grants stay `MS_NOEXEC`, only the re-verified pinned inode gains exec.
                 if trust == TrustBand::Pinned {
+                    // A `T-pinned` band comes ONLY from the measured entrypoint path, so `der` is Some here.
+                    let der = der.as_mut().expect("T-pinned band is produced only by the measured derivation");
                     let exec_fd_bound = der.exec_fd.is_some();
                     // slice-10: a dynamically-linked pin carries an authenticated closure; map it into
                     // the constructor's spec. `None` ⇒ slice-9 static-PIE single-inode island.
@@ -453,6 +486,8 @@ pub fn cli(args: &[String]) -> i32 {
                         id: id.clone(),
                         anchor: anchor.clone(),
                         grants: grants.clone(),
+                        rw_grant: rw_grant.clone(),
+                        build_grant: build_grant.clone(),
                         workload: workload.clone(),
                         rootfs: t2_plane::sealed_rootfs_path(),
                         runsc: t2_plane::sealed_runsc_path(),

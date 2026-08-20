@@ -4,6 +4,7 @@
 //! internals live here so unit tests, the mount-plane TOCTOU proof (`examples/`), and the binary all
 //! share one implementation. Nothing here pulls an external dependency — see `linux_uapi`.
 
+pub mod ingest_admit;
 pub mod linux_uapi;
 pub mod mount_plane;
 pub mod net_plane;

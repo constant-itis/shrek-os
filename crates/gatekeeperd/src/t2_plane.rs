@@ -25,6 +25,7 @@
 use crate::linux_uapi::{
     ioctl, open_rdwr, umount2, KVM_API_VERSION, KVM_CREATE_VM, KVM_GET_API_VERSION,
 };
+use crate::mount_plane::{enter_private_mount_ns, open_anchor, pin_beneath, relocate_rw, relocate_rw_exec};
 use std::io::{self, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -224,12 +225,16 @@ impl CgroupLeaf {
 // OCI bundle
 // -------------------------------------------------------------------------------------------------
 
-/// A single granted subtree, mounted read-only into the sandbox. `name` is the leaf beneath the
-/// anchor; it appears inside the sandbox at `/srv/<name>` (mirroring the T1 guest_prefix). Ungranted
-/// siblings and the vault are simply NOT listed → absent (ENOENT), the T1/T2 absence model.
+/// A single granted subtree mounted into the sandbox. `name` is the leaf beneath the anchor; it appears
+/// inside the sandbox at `/srv/<name>` (mirroring the T1 guest_prefix). Ungranted siblings and the
+/// vault are simply NOT listed → absent (ENOENT), the T1/T2 absence model. `rw` selects the OCI mount
+/// mode: read-only grants (`rbind,ro`) vs the single writable project grant (`rbind,rw`, Phase-6
+/// slice-1a) whose `source` is a broker-relocated, host-`noexec` bind so the workload's writes
+/// write-through to the real project inode.
 struct GrantMount {
     name: String,
     source: PathBuf,
+    rw: bool,
 }
 
 pub struct T2Spec {
@@ -237,6 +242,18 @@ pub struct T2Spec {
     /// Trusted anchor directory under which grants live (e.g. `/srv`).
     pub anchor: PathBuf,
     pub grants: Vec<String>,
+    /// Phase-6 slice-1a: the single project grant realized WRITABLE (`C-proj-rw`). Pinned beneath the
+    /// anchor, relocated with `relocate_rw` (rw + host-`noexec`), and bound `rbind,rw` so a coding
+    /// workload builds/tests/edits with write-through. `None` = every grant read-only (the slice-6
+    /// posture). Must NOT also appear in `grants`.
+    pub rw_grant: Option<String>,
+    /// Phase-6 slice-1a: the SEPARATE, narrowly-scoped build grant realized WRITABLE **and EXEC-capable**
+    /// (`relocate_rw_exec`: rw + `nosuid,nodev`, NO host-`noexec`). A coding workload directs its
+    /// compiler/test OUTPUT here (`CARGO_TARGET_DIR`, freshly-compiled binaries) and RUNS it — gVisor
+    /// needs a non-`noexec` host mount to `mmap(PROT_EXEC)` the gofer file. The project (`rw_grant`) stays
+    /// host-`noexec`, so its source bytes are never runnable in-sandbox; the exec surface is confined to
+    /// this one grant. `None` = no build area. Must NOT also appear in `grants` or equal `rw_grant`.
+    pub build_grant: Option<String>,
     pub workload: Vec<String>,
     /// Absolute path to the pinned, verity-sealed minimal rootfs (root.path, read-only).
     pub rootfs: PathBuf,
@@ -279,8 +296,9 @@ fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path) -> Str
     let mounts = grants
         .iter()
         .map(|g| {
+            let mode = if g.rw { "rw" } else { "ro" };
             format!(
-                "{{\"destination\":\"/srv/{}\",\"type\":\"bind\",\"source\":\"{}\",\"options\":[\"rbind\",\"ro\"]}}",
+                "{{\"destination\":\"/srv/{}\",\"type\":\"bind\",\"source\":\"{}\",\"options\":[\"rbind\",\"{mode}\"]}}",
                 json_escape(&g.name),
                 json_escape(&g.source.to_string_lossy())
             )
@@ -322,13 +340,34 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
         return Err(io::Error::new(io::ErrorKind::NotFound, format!("rootfs not found: {}", spec.rootfs.display())));
     }
 
-    // Resolve grant sources beneath the anchor (name-only leaves; reject traversal defensively).
+    let bad_name = |name: &str| name.is_empty() || name.contains('/') || name == "..";
+
+    // Resolve read-only grant sources beneath the anchor (name-only leaves; reject traversal).
     let mut grants = Vec::new();
     for name in &spec.grants {
-        if name.is_empty() || name.contains('/') || name == ".." {
+        if bad_name(name) {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad grant name: {name}")));
         }
-        grants.push(GrantMount { name: name.clone(), source: spec.anchor.join(name) });
+        grants.push(GrantMount { name: name.clone(), source: spec.anchor.join(name), rw: false });
+    }
+    if let Some(rw) = &spec.rw_grant {
+        if bad_name(rw) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad rw-grant name: {rw}")));
+        }
+        if spec.grants.iter().any(|g| g == rw) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("rw-grant {rw} also listed read-only")));
+        }
+    }
+    if let Some(bg) = &spec.build_grant {
+        if bad_name(bg) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("bad build-grant name: {bg}")));
+        }
+        if spec.grants.iter().any(|g| g == bg) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("build-grant {bg} also listed read-only")));
+        }
+        if spec.rw_grant.as_deref() == Some(bg.as_str()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("build-grant {bg} also the rw project grant")));
+        }
     }
 
     // Working dirs: state (runsc --root) + bundle (config.json). Both under /run, cleaned on exit.
@@ -338,6 +377,43 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&bundle)?;
     std::fs::create_dir_all(&state)?;
+
+    // Phase-6 slice-1a — the writable grants. In a PRIVATE mount namespace (so the binds are contained +
+    // non-propagating, and the runsc child inherits them), pin each grant beneath the anchor TOCTOU-safely
+    // and relocate it onto a broker-owned path. The gofer serves the source rw, so the workload's writes
+    // reach the real inode (write-through). Two DIFFERENT exec postures:
+    //   * project (`rw_grant`)   → `relocate_rw`      : rw + host-`noexec`. The real-ELF result is that a
+    //     binary written here CANNOT run in-sandbox (gVisor needs PROT_EXEC of the gofer file, denied by
+    //     the noexec host mount) — so the project stays a no-exec source tree.
+    //   * build   (`build_grant`)→ `relocate_rw_exec` : rw + exec. The workload directs compiler/test
+    //     OUTPUT here (CARGO_TARGET_DIR / a compiled binary) and RUNS it. The exec surface is confined to
+    //     this one grant; `nosuid,nodev` preserved on both.
+    // Any failure fails the whole construction closed — never a silent read-only or unpinned substitute.
+    // enter_private_mount_ns once, then pin+relocate each present grant within it.
+    if spec.rw_grant.is_some() || spec.build_grant.is_some() {
+        enter_private_mount_ns()?;
+        let anchor_fd = open_anchor(&spec.anchor)?;
+        if let Some(rw) = &spec.rw_grant {
+            let pinned = pin_beneath(&anchor_fd, rw)?;
+            let target = work.join("rwgrants").join(rw);
+            relocate_rw(&pinned, &target)?;
+            eprintln!(
+                "gatekeeperd/t2_plane: pinned+relocated-rw grant {rw} (dev={}:{} ino={}) -> {} (rw,noexec write-through)",
+                pinned.ident.dev_major, pinned.ident.dev_minor, pinned.ident.ino, target.display()
+            );
+            grants.push(GrantMount { name: rw.clone(), source: target, rw: true });
+        }
+        if let Some(bg) = &spec.build_grant {
+            let pinned = pin_beneath(&anchor_fd, bg)?;
+            let target = work.join("rwgrants").join(bg);
+            relocate_rw_exec(&pinned, &target)?;
+            eprintln!(
+                "gatekeeperd/t2_plane: pinned+relocated-rw-exec build grant {bg} (dev={}:{} ino={}) -> {} (rw,exec write-through)",
+                pinned.ident.dev_major, pinned.ident.dev_minor, pinned.ident.ino, target.display()
+            );
+            grants.push(GrantMount { name: bg.clone(), source: target, rw: true });
+        }
+    }
 
     // gVisor's gofer creates each bind-mount DESTINATION dir inside the rootfs tree on the host
     // (mkdir <root.path>/srv/<name>) as part of `setupRootFS`, BEFORE any guest-visible overlay — so
@@ -401,6 +477,14 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // Fail-closed teardown regardless of outcome: force-delete any lingering container, remove the
     // work tree, drop the cgroup leaf. (`umount2` guards against a rootfs bind if one is ever added.)
     let _ = Command::new(&spec.runsc).arg("--root").arg(&state).arg("delete").arg("--force").arg(&spec.id).status();
+    // CRITICAL: detach EVERY writable bind (project + build) BEFORE removing the work tree.
+    // `remove_dir_all` would otherwise recurse THROUGH a bind and unlink the workload's just-written
+    // files — and any pre-existing content — from the real inode. Lazy-detach, then the removal only
+    // clears the now-empty broker mountpoints, never the granted directories.
+    for wg in spec.rw_grant.iter().chain(spec.build_grant.iter()) {
+        let target = work.join("rwgrants").join(wg);
+        let _ = umount2(&std::ffi::CString::new(target.to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
+    }
     let _ = umount2(&std::ffi::CString::new(bundle.join("rootfs").to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
     let _ = std::fs::remove_dir_all(&work);
     cg.destroy();
@@ -455,6 +539,8 @@ mod tests {
             id: "t".into(),
             anchor: PathBuf::from("/srv"),
             grants: vec!["project".into()],
+            rw_grant: None,
+            build_grant: None,
             workload: vec!["/bin/echo".into(), "hi".into()],
             rootfs: PathBuf::from("/usr/lib/shrek/t2-rootfs"),
             runsc: PathBuf::from("/usr/lib/shrek/runsc"),
@@ -462,7 +548,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
         };
-        let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project") }];
+        let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
         let j = build_config_json(&spec, &grants, &spec.rootfs);
         assert!(j.contains("\"readonly\":true"));
         assert!(j.contains("\"destination\":\"/srv/project\""));
@@ -471,5 +557,64 @@ mod tests {
         assert!(j.contains("\"/bin/echo\",\"hi\""));
         // The vault is never named in a grant, so it can never appear as a mount source.
         assert!(!j.contains("vault"));
+    }
+
+    #[test]
+    fn config_json_rw_grant_is_rbind_rw_from_broker_source() {
+        // The writable project grant is mounted rbind,rw from its broker-relocated source; read-only
+        // grants keep rbind,ro. Guards the OCI mode selection that realizes PN1 write-through.
+        let spec = T2Spec {
+            id: "t".into(),
+            anchor: PathBuf::from("/srv"),
+            grants: vec!["deps".into()],
+            rw_grant: Some("project".into()),
+            build_grant: None,
+            workload: vec!["/bin/sh".into()],
+            rootfs: PathBuf::from("/usr/lib/shrek/t2-rootfs"),
+            runsc: PathBuf::from("/usr/lib/shrek/runsc"),
+            platform: Platform::Systrap,
+            mem_max: DEFAULT_MEM_MAX,
+            pids_max: DEFAULT_PIDS_MAX,
+        };
+        let grants = vec![
+            GrantMount { name: "deps".into(), source: PathBuf::from("/srv/deps"), rw: false },
+            GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
+        ];
+        let j = build_config_json(&spec, &grants, &spec.rootfs);
+        assert!(j.contains("\"destination\":\"/srv/project\""));
+        assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/project\""));
+        assert!(j.contains("\"rbind\",\"rw\""), "project grant must be rbind,rw: {j}");
+        // The read-only companion grant is unaffected.
+        assert!(j.contains("\"rbind\",\"ro\""), "deps grant must stay rbind,ro: {j}");
+    }
+
+    #[test]
+    fn config_json_project_and_build_grants_both_rbind_rw() {
+        // The project (noexec, via relocate_rw) and the build area (exec, via relocate_rw_exec) both mount
+        // rbind,rw in the OCI config — the exec DIFFERENCE lives in the host bind flags, not config.json.
+        // Guards that a build grant is emitted as a writable mount from its own broker-relocated source.
+        let spec = T2Spec {
+            id: "t".into(),
+            anchor: PathBuf::from("/srv"),
+            grants: vec![],
+            rw_grant: Some("project".into()),
+            build_grant: Some("build".into()),
+            workload: vec!["/bin/sh".into()],
+            rootfs: PathBuf::from("/usr/lib/shrek/t2-rootfs"),
+            runsc: PathBuf::from("/usr/lib/shrek/runsc"),
+            platform: Platform::Systrap,
+            mem_max: DEFAULT_MEM_MAX,
+            pids_max: DEFAULT_PIDS_MAX,
+        };
+        let grants = vec![
+            GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
+            GrantMount { name: "build".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/build"), rw: true },
+        ];
+        let j = build_config_json(&spec, &grants, &spec.rootfs);
+        assert!(j.contains("\"destination\":\"/srv/build\""));
+        assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/build\""));
+        // Both writable grants are rbind,rw; neither the project nor build source is read-only.
+        assert_eq!(j.matches("\"rbind\",\"rw\"").count(), 2, "both grants must be rbind,rw: {j}");
+        assert!(!j.contains("\"rbind\",\"ro\""));
     }
 }
