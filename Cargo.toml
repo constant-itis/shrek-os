@@ -13,6 +13,7 @@ members = [
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
     "crates/shrekctl",    # operator CLI
     "crates/shrek",       # user-facing CLI: `shrek run` front door       (Phase 6)
+    "crates/coder",       # coding-agent WORKLOAD for `shrek run` (model-driven) (Phase 6 slice-2)
     "crates/shrek-gate-probe", # spike-only sealed closed-world in-sandbox acceptance probe (P5/B1)
 ]
 

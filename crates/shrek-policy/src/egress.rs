@@ -77,7 +77,10 @@ impl EgressProfile {
 // ---- the sealed profiles ------------------------------------------------------------------------
 // Authored here as typed literals (not parsed from strings) so the policy is sealed by compilation.
 // Extend the catalog HERE; sealing the *source* of this list (vs the compiled table) is a later
-// slice (#2563). All destinations are https/tcp:443 — IPv4-only, no DNS egress.
+// slice (#2563). IPv4-only, tcp-only, no DNS egress. Most destinations are https/tcp:443; the
+// coding-agent model endpoint (`model-local`) is the one plaintext tcp:8100 (a single LAN model
+// service, docs/phase6-slice2-coder-agent.md §3) — the enforcement path is proto+dport, so the port
+// is immaterial to it.
 
 const GITHUB_HTTPS: &[EgressRule] = &[
     EgressRule { host: "github.com", proto: Proto::Tcp, port: 443 },
@@ -91,6 +94,15 @@ const RUST_CRATES: &[EgressRule] = &[
     EgressRule { host: "index.crates.io", proto: Proto::Tcp, port: 443 },
 ];
 
+// The coding-agent's model endpoint: exactly ONE destination. `shrek-model` is the sealed, stable
+// NAME gatekeeperd pre-resolves to a pinned A-record at construction — the acceptance gate points it
+// at a canned responder, the `--live` smoke at the real LAN model. Same seal, only the resolution
+// differs. One destination keeps the lethal-trifecta surface (agents.md §8) as small as an egressing
+// coding session can be.
+const MODEL_LOCAL: &[EgressRule] = &[
+    EgressRule { host: "shrek-model", proto: Proto::Tcp, port: 8100 },
+];
+
 /// THE sealed egress table — the single, compiled-in source of egress policy. gatekeeperd resolves
 /// names against this; there is no runtime or writable source. Deny-by-default: a name absent here
 /// resolves to `None` and gatekeeperd fails the C-net construct closed.
@@ -99,6 +111,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "none", rules: &[] },
     EgressProfile { name: "github-https", rules: GITHUB_HTTPS },
     EgressProfile { name: "rust-crates", rules: RUST_CRATES },
+    EgressProfile { name: "model-local", rules: MODEL_LOCAL },
 ];
 
 /// Resolve a profile NAME to its sealed destination set. STRICT + FAIL-CLOSED, mirroring
@@ -120,6 +133,17 @@ mod tests {
         assert_eq!(resolve("github-https").unwrap().rules.len(), 3);
         assert_eq!(resolve("rust-crates").unwrap().rules.len(), 3);
         assert!(resolve("none").unwrap().is_empty());
+    }
+
+    #[test]
+    fn model_local_is_one_plaintext_destination() {
+        let m = resolve("model-local").unwrap();
+        assert_eq!(m.rules.len(), 1, "model-local must reach exactly one destination");
+        assert!(m.allows("shrek-model", Proto::Tcp, 8100));
+        // Deny-by-default around it: not a wildcard host, not another port, not the https default.
+        assert!(!m.allows("shrek-model", Proto::Tcp, 443));
+        assert!(!m.allows("shrek-model", Proto::Tcp, 80));
+        assert!(!m.allows("evil.example", Proto::Tcp, 8100));
     }
 
     #[test]

@@ -1,0 +1,14 @@
+[package]
+name = "coder"
+version.workspace = true
+edition.workspace = true
+
+# The coder agent is the WORKLOAD of a `shrek run` T2 session (docs/phase6-slice2-coder-agent.md), not
+# a sealed control-plane binary. Unlike the planes (gatekeeperd/oniond/shrek-policy — dep-free by
+# design), it is permitted ONE build-time dependency for JSON: `tinyjson`, a pure-Rust, ZERO-transitive
+# -dependency parser/encoder. We use a real parser for the model's arbitrary JSON rather than
+# hand-rolling one; we keep the supply chain to a single, trivially-vendorable crate (no serde
+# proc-macro chain) so the sealed-image build stays auditable. HTTP is a plain POST over std TcpStream
+# (the v1 endpoint is plain HTTP — no TLS crate), so JSON is the only dependency.
+[dependencies]
+tinyjson = "2"
