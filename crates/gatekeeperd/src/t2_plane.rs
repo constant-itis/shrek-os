@@ -26,6 +26,8 @@ use crate::linux_uapi::{
     ioctl, open_rdwr, umount2, KVM_API_VERSION, KVM_CREATE_VM, KVM_GET_API_VERSION,
 };
 use crate::mount_plane::{enter_private_mount_ns, open_anchor, pin_beneath, relocate_rw, relocate_rw_exec};
+use crate::net_plane;
+use shrek_policy::egress::EgressProfile;
 use std::io::{self, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
@@ -262,6 +264,13 @@ pub struct T2Spec {
     pub platform: Platform,
     pub mem_max: u64,
     pub pids_max: u64,
+    /// Phase-6 slice-1b: the sealed egress profile for a `(T-untrust, C-net)` coding session, or
+    /// `None` for loopback-only (`--network=none`, the slice-1a/slice-6 posture). `Some(profile)` ⇒
+    /// gatekeeperd PRE-CREATES a per-sandbox netns (veth + addressing + the profile's nft allow-list),
+    /// hands runsc that netns via the OCI `network` namespace, and runs `--network=sandbox` so gVisor's
+    /// netstack egresses ONLY to the resolved endpoints. The name is sealed policy; destinations are
+    /// resolved to pinned IPv4 here and written into the sandbox `/etc/hosts` (no DNS egress).
+    pub egress: Option<&'static EgressProfile>,
 }
 
 /// Proper JSON string escaping: backslash, double-quote, and control characters (a raw newline/tab in
@@ -284,9 +293,11 @@ fn json_escape(s: &str) -> String {
 }
 
 /// Build the OCI `config.json` for a minimal T2 sandbox: read-only rootfs, the workload argv, the
-/// grant bind-mounts (rbind,ro), and an empty-but-for-grants mount namespace. Network is set by the
-/// runsc `--network=none` flag, not here. Pure over the spec — unit-tested for shape.
-fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path) -> String {
+/// grant bind-mounts (rbind,ro), and an empty-but-for-grants mount namespace. `netns_path` (slice-1b)
+/// adds a `network` namespace pointing at the gatekeeper-provisioned netns so runsc joins it and
+/// `--network=sandbox` programs netstack from its veth; `None` lists no network namespace (the
+/// `--network=none` loopback-only posture). Pure over the spec — unit-tested for shape.
+fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path, netns_path: Option<&str>) -> String {
     let args = spec
         .workload
         .iter()
@@ -305,17 +316,25 @@ fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path) -> Str
         })
         .collect::<Vec<_>>()
         .join(",");
+    // pid/mount/ipc/uts always; slice-1b appends a network namespace (joined to the provisioned
+    // netns) ONLY when egress is granted — a no-egress session lists none and runs --network=none.
+    let mut namespaces =
+        String::from("{\"type\":\"pid\"},{\"type\":\"mount\"},{\"type\":\"ipc\"},{\"type\":\"uts\"}");
+    if let Some(p) = netns_path {
+        namespaces.push_str(&format!(",{{\"type\":\"network\",\"path\":\"{}\"}}", json_escape(p)));
+    }
     format!(
         concat!(
             "{{\"ociVersion\":\"1.0.2\",",
             "\"process\":{{\"args\":[{args}],\"cwd\":\"/\",\"user\":{{\"uid\":0,\"gid\":0}},\"capabilities\":{{}}}},",
             "\"root\":{{\"path\":\"{rootfs}\",\"readonly\":true}},",
             "\"mounts\":[{mounts}],",
-            "\"linux\":{{\"namespaces\":[{{\"type\":\"pid\"}},{{\"type\":\"mount\"}},{{\"type\":\"ipc\"}},{{\"type\":\"uts\"}}]}}}}"
+            "\"linux\":{{\"namespaces\":[{namespaces}]}}}}"
         ),
         args = args,
         rootfs = json_escape(&rootfs.to_string_lossy()),
-        mounts = mounts
+        mounts = mounts,
+        namespaces = namespaces,
     )
 }
 
@@ -433,7 +452,27 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
         Err(e) => return Err(io::Error::new(e.kind(), format!("rootfs copy exec failed: {e}"))),
     }
 
-    std::fs::write(bundle.join("config.json"), build_config_json(spec, &grants, &run_rootfs))?;
+    // Phase-6 slice-1b — egress identity + resolution. Pure/fail-closed and BEFORE any netns is
+    // created: a `(T-untrust, C-net)` session's sealed profile is resolved to pinned IPv4 here (any
+    // AAAA-only/unresolvable host aborts the construct, IPv4-only), and the pinned host→IP map is
+    // written into the writable rootfs `/etc/hosts` so the workload resolves through it — NO DNS
+    // egress. `None` ⇒ loopback-only. The netns itself is brought UP later, as the last step before
+    // spawn, so almost no fallible work follows it (tight fail-closed teardown).
+    let net = spec.egress.map(|_| net_plane::SandboxNet::for_id(&spec.id));
+    let resolved = match spec.egress {
+        Some(profile) => Some(net_plane::resolve_profile_v4(profile)?),
+        None => None,
+    };
+    if let Some(r) = &resolved {
+        std::fs::create_dir_all(run_rootfs.join("etc"))?;
+        std::fs::write(run_rootfs.join("etc/hosts"), net_plane::etc_hosts(&r.hosts))?;
+    }
+    let netns_path = net.as_ref().map(|n| n.ns_path());
+
+    std::fs::write(
+        bundle.join("config.json"),
+        build_config_json(spec, &grants, &run_rootfs, netns_path.as_deref()),
+    )?;
 
     let cg = CgroupLeaf::create(&spec.id, spec.mem_max, spec.pids_max)?;
 
@@ -452,11 +491,35 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // joins the bounded cgroup leaf in pre_exec (its runsc-forked sandbox+gofer inherit it;
     // --ignore-cgroups keeps runsc from moving them). `run` = create+start+wait+delete in one; we still
     // tear down state/bundle/cgroup.
+    // Slice-1b — bring the egress netns UP as the LAST step before spawn (minimal fallible work
+    // follows, so teardown stays tight): create the netns + veth + addressing + the profile's sealed
+    // nft allow-list. runsc joins it (config.json network namespace) and netstack programs from the
+    // veth. Fail-closed: any error tears the netns down, drops the cgroup + work tree, and aborts —
+    // NEVER a fall-open network. An idempotent stale-clear precedes it (residue from a crashed run).
+    if let (Some(n), Some(r)) = (net.as_ref(), resolved.as_ref()) {
+        n.teardown();
+        if let Err(e) = n.create_and_inject(&r.endpoints) {
+            n.teardown();
+            cg.destroy();
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(io::Error::new(e.kind(), format!("egress plane setup failed (fail-closed, no network): {e}")));
+        }
+        eprintln!(
+            "gatekeeperd/t2_plane: egress plane up profile={} ns={} cip={} dsts={} (netstack --network=sandbox)",
+            spec.egress.map(|p| p.name).unwrap_or("none"), n.ns, n.cont_ip, r.endpoints.len()
+        );
+    }
+
+    // Drive runsc directly (no shim, no containerd). Network: a granted egress session joins the
+    // provisioned netns and runs `--network=sandbox` (gVisor netstack over our veth); every other
+    // session is `--network=none` (loopback-only). Both are genuine T2 — the egress boundary is the
+    // host-side veth + nft, independent of the platform (systrap/kvm) chosen at preflight.
+    let network_flag = if net.is_some() { "--network=sandbox" } else { "--network=none" };
     let procs = cg.procs_path();
     let mut cmd = Command::new(&spec.runsc);
     cmd.arg("--root").arg(&state)
         .arg("--ignore-cgroups")
-        .arg("--network=none")
+        .arg(network_flag)
         .arg(format!("--platform={}", spec.platform.flag()));
     if let Some(d) = &debug_dir {
         // Trailing slash ⇒ runsc treats it as a directory and writes per-subcommand files
@@ -488,6 +551,11 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     let _ = umount2(&std::ffi::CString::new(bundle.join("rootfs").to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
     let _ = std::fs::remove_dir_all(&work);
     cg.destroy();
+    // Slice-1b: tear the egress netns down (deletes the nft table + veth + netns). Leaves NO residual
+    // plumbing — the fail-closed default is "no network".
+    if let Some(n) = &net {
+        n.teardown();
+    }
 
     match status {
         Ok(s) => Ok(s.code().unwrap_or(128 + s.signal_or_zero())),
@@ -547,9 +615,10 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
+            egress: None,
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
-        let j = build_config_json(&spec, &grants, &spec.rootfs);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
         assert!(j.contains("\"readonly\":true"));
         assert!(j.contains("\"destination\":\"/srv/project\""));
         assert!(j.contains("\"source\":\"/srv/project\""));
@@ -557,6 +626,39 @@ mod tests {
         assert!(j.contains("\"/bin/echo\",\"hi\""));
         // The vault is never named in a grant, so it can never appear as a mount source.
         assert!(!j.contains("vault"));
+        // Slice-1b: a no-egress (netns_path=None) session lists NO network namespace — it runs
+        // --network=none (loopback-only). pid/mount/ipc/uts are always present.
+        assert!(!j.contains("\"type\":\"network\""), "no-egress config must omit the network ns: {j}");
+        assert!(j.contains("\"type\":\"pid\"") && j.contains("\"type\":\"uts\""));
+    }
+
+    #[test]
+    fn config_json_egress_adds_joined_network_namespace() {
+        // Slice-1b: a granted-egress session carries a `network` namespace pointing at the
+        // gatekeeper-provisioned netns, so runsc joins it and `--network=sandbox` programs netstack
+        // from the veth. The path is exactly SandboxNet::ns_path for this id.
+        let spec = T2Spec {
+            id: "coder".into(),
+            anchor: PathBuf::from("/srv"),
+            grants: vec!["project".into()],
+            rw_grant: None,
+            build_grant: None,
+            workload: vec!["/bin/true".into()],
+            rootfs: PathBuf::from("/usr/lib/shrek/t2-rootfs"),
+            runsc: PathBuf::from("/usr/lib/shrek/runsc"),
+            platform: Platform::Systrap,
+            mem_max: DEFAULT_MEM_MAX,
+            pids_max: DEFAULT_PIDS_MAX,
+            egress: None, // config shape is driven by netns_path, not this field
+        };
+        let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
+        let ns_path = net_plane::SandboxNet::for_id("coder").ns_path();
+        let j = build_config_json(&spec, &grants, &spec.rootfs, Some(&ns_path));
+        assert!(
+            j.contains(&format!("{{\"type\":\"network\",\"path\":\"{ns_path}\"}}")),
+            "egress config must join the provisioned netns: {j}"
+        );
+        assert!(j.contains("/run/netns/shrek-coder"), "ns path must be the pure per-id netns: {j}");
     }
 
     #[test]
@@ -575,12 +677,13 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
+            egress: None,
         };
         let grants = vec![
             GrantMount { name: "deps".into(), source: PathBuf::from("/srv/deps"), rw: false },
             GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
         ];
-        let j = build_config_json(&spec, &grants, &spec.rootfs);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
         assert!(j.contains("\"destination\":\"/srv/project\""));
         assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/project\""));
         assert!(j.contains("\"rbind\",\"rw\""), "project grant must be rbind,rw: {j}");
@@ -605,12 +708,13 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
+            egress: None,
         };
         let grants = vec![
             GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
             GrantMount { name: "build".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/build"), rw: true },
         ];
-        let j = build_config_json(&spec, &grants, &spec.rootfs);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
         assert!(j.contains("\"destination\":\"/srv/build\""));
         assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/build\""));
         // Both writable grants are rbind,rw; neither the project nor build source is read-only.

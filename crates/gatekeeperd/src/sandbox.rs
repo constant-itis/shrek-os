@@ -279,15 +279,11 @@ fn recheck(
             reason: format!("no-constructor-{} (slice-6: T3 pending)", effective.label()),
         };
     }
-    // T2 serves the no-egress caps only. A C-net cell at T2 needs the gVisor egress plane (deferred),
-    // so it fails closed here — NOT constructed via the T1 egress plane below (wrong wall).
-    if effective == Tier::T2 && matches!(caps, CapsProfile::Net) {
-        return Decision::Refuse {
-            code: 12,
-            reason: "no-gvisor-egress-plane-for-C-net-at-T2 (slice-6)".into(),
-        };
-    }
-    // (d) Egress realization (slice-3). A ≤T1 C-net cell is now constructible IFF it names a SEALED
+    // Phase-6 slice-1b: a C-net cell at T2 is now constructible — the gVisor egress plane (t2_plane
+    // pre-creates a netns + veth + the sealed nft allow-list and runs `--network=sandbox`) lands the
+    // SAME sealed-profile egress realization the T1 path uses, at the correct (T2) wall. So C-net
+    // flows through (d) below for BOTH T1 and T2; only C-broad and the T3 no-constructor gate refuse.
+    // (d) Egress realization (slice-3, extended to T2 by slice-1b). A ≤T1 C-net cell is now constructible IFF it names a SEALED
     // egress profile that resolves — gatekeeperd resolves the destinations from compiled-in policy
     // itself, NEVER trusting an agentd-supplied host. C-broad (unrestricted egress / secret domains)
     // has no plane and still fails closed. Non-egress caps ignore any profile name → loopback-only.
@@ -478,8 +474,12 @@ pub fn cli(args: &[String]) -> i32 {
                 // never degrades to T1. Platform (systrap/kvm) is chosen once here (both genuine T2).
                 if effective == Tier::T2 {
                     let choice = t2_plane::select_platform();
+                    // Slice-1b: thread the resolved sealed egress profile (if any) into the T2 spec —
+                    // a C-net cell now carries `Some(profile)` (netstack egress), every other cell
+                    // `None` (loopback-only). The egress name is audited in the decision line.
+                    let t2_egress = match e { Egress::Profile(p) => Some(p), Egress::None => None };
                     eprintln!(
-                        "SANDBOX-DECISION cleared construct-at=T2 effective=T2 platform={} why=\"{}\" requested={} trust={} caps={} profile={} egress=none",
+                        "SANDBOX-DECISION cleared construct-at=T2 effective=T2 platform={} why=\"{}\" requested={} trust={} caps={} profile={} egress={egr}",
                         choice.platform.flag(), choice.why, requested.label(), trust.label(), caps.label(), profile.label()
                     );
                     let t2 = T2Spec {
@@ -494,6 +494,7 @@ pub fn cli(args: &[String]) -> i32 {
                         platform: choice.platform,
                         mem_max: DEFAULT_MEM_MAX,
                         pids_max: DEFAULT_PIDS_MAX,
+                        egress: t2_egress,
                     };
                     return match t2_plane::construct(&t2) {
                         Ok(code) => code,
@@ -596,12 +597,30 @@ mod tests {
     }
 
     #[test]
-    fn t2_c_net_has_no_gvisor_egress_plane() {
-        // T-untrust/C-net resolves to T2, which has no gVisor egress plane yet ⇒ fail closed (code 12),
-        // never built at the T1 egress plane (wrong wall).
-        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, None));
-        assert_eq!(code, 12);
-        assert!(reason.contains("gvisor-egress"));
+    fn t2_c_net_constructs_with_sealed_egress_profile() {
+        // Slice-1b: T-untrust/C-net resolves to T2 and now CONSTRUCTS with the gVisor egress plane,
+        // given a sealed profile that resolves — the effective wall is T2 and the resolved profile is
+        // threaded through (netstack egress), not the T1 plane.
+        match recheck(Tier::T2, Untrust, Net, Net, Some("rust-crates")) {
+            Decision::Construct { effective, egress: Egress::Profile(p) } => {
+                assert_eq!(effective, Tier::T2);
+                assert_eq!(p.name, "rust-crates");
+            }
+            Decision::Construct { egress: Egress::None, .. } => panic!("T2 C-net must carry the resolved profile, got loopback-only"),
+            Decision::Refuse { code, reason } => panic!("expected T2 construct, got refuse {code}: {reason}"),
+        }
+    }
+
+    #[test]
+    fn t2_c_net_without_profile_still_fails_closed() {
+        // A named egress is mandatory: T-untrust/C-net at T2 with no profile fails closed (code 13),
+        // exactly as the T1 C-net path does. C-broad and an unknown profile likewise refuse.
+        assert_eq!(refusal(recheck(Tier::T2, Untrust, Net, Net, None)).0, 13);
+        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, Some("nope")));
+        assert_eq!(code, 13);
+        assert!(reason.contains("unknown-egress-profile"));
+        // C-broad at T-untrust floors to T3 (no constructor) — refused regardless of any profile name.
+        assert_eq!(refusal(recheck(Tier::T3, Untrust, Broad, Broad, Some("rust-crates"))).0, 12);
     }
 
     #[test]

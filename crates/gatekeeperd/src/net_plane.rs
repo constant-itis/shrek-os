@@ -135,6 +135,39 @@ impl SandboxNet {
         nft_apply(&self.ruleset(endpoints))
     }
 
+    /// The filesystem path `ip netns add` binds this netns at — the value a T2/runsc OCI `network`
+    /// namespace `path` must point to so the gVisor sentry joins THIS netns and programs netstack
+    /// from the veth we provisioned in it. (`ip netns` mounts under `/var/run/netns`, which is
+    /// `/run/netns` on a merged-/run distro; runsc opens the path verbatim.)
+    pub fn ns_path(&self) -> String {
+        format!("/run/netns/{}", self.ns)
+    }
+
+    /// PRE-SPAWN egress plumbing for a constructor that OWNS the netns lifecycle. Phase-6 slice-1b:
+    /// unlike nspawn (T1) — where `--private-users` cannot join a host-owned netns (EPERM, #2563/C2),
+    /// forcing the [`inject`](Self::inject) late-attach — `runsc` (T2) joins a host-created netns via
+    /// the OCI `network` namespace path, so there is NO leader to discover and NO post-start barrier
+    /// race. Create the netns, wire veth + addressing + route, and install the sealed nft allow-list
+    /// ALL BEFORE the sandbox boots, so gVisor's netstack initializes from a fully-provisioned
+    /// interface. Fail-closed: any step errors and the caller tears the whole thing down. Every step
+    /// after `netns add` mirrors [`inject`](Self::inject) exactly — same veth, same addressing, same
+    /// `ruleset` — so the egress BOUNDARY (host-side veth peer + per-sandbox nft) is identical to T1
+    /// and independent of the guest's internal stack (netstack vs a kernel stack).
+    pub fn create_and_inject(&self, endpoints: &[Endpoint]) -> io::Result<()> {
+        ip(&["netns", "add", &self.ns])?;
+        ip(&["link", "add", &self.host_if, "type", "veth", "peer", "name", &self.cont_if])?;
+        ip(&["link", "set", &self.cont_if, "netns", &self.ns])?;
+        ip(&["addr", "add", &format!("{}/30", self.host_ip), "dev", &self.host_if])?;
+        ip(&["link", "set", &self.host_if, "up"])?;
+        ip(&["-n", &self.ns, "addr", "add", &format!("{}/30", self.cont_ip), "dev", &self.cont_if])?;
+        ip(&["-n", &self.ns, "link", "set", &self.cont_if, "up"])?;
+        ip(&["-n", &self.ns, "link", "set", "lo", "up"])?;
+        ip(&["-n", &self.ns, "route", "add", "default", "via", &self.host_ip.to_string()])?;
+        // Host must forward for masquerade to work. Best-effort write (already-1 on most hosts).
+        let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1");
+        nft_apply(&self.ruleset(endpoints))
+    }
+
     /// Best-effort, idempotent teardown — remove the nft table, the veth pair (deleting the host end
     /// removes both), and our netns bind-name. Safe to call after a partial inject or a clean run.
     /// Leaves NO residual egress plumbing (fail-closed default is "no network").
