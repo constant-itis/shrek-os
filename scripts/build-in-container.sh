@@ -22,6 +22,11 @@ RAW="out/shrek_${VERSION}_x86-64.raw"
 echo "=== building Shrek OS version ${VERSION} → ${RAW} ==="
 
 echo "=== STAGE 1 (host): build binaries + stage the image overlay ==="
+# Phase-6 slice-2: HERMETIC build. The coder's one dep (tinyjson) is vendored in-tree (vendor/ +
+# .cargo/config.toml redirects crates-io to it); the sealed planes are dep-free. Force cargo OFFLINE for
+# the whole stage so the sealed image can never silently pull an unaudited crate from the network — a
+# build that would need crates.io fails loudly instead. (Removes the last non-hermetic seam in the seal.)
+export CARGO_NET_OFFLINE=true
 cargo build --release
 # The sealed-VM gate (S6/S8) drives `gatekeeperd pin-verity` at runtime to provision fs-verity
 # fixtures, so the IMAGE gatekeeperd is the spike build (finding F1: pin-verity is default-OFF). The

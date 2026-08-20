@@ -1,0 +1,10 @@
+# Phase-6 slice-2 hardening: vendor the coder's single build dependency (tinyjson) in-tree so the
+# sealed image build is HERMETIC (offline, no crates.io fetch) and the whole supply chain is auditable
+# from the repo. tinyjson is zero-transitive, so `vendor/` holds exactly one crate. The sealed planes
+# (gatekeeperd/oniond/shrek-policy) remain dep-free by design; this only covers the coder WORKLOAD's
+# JSON parser (docs/phase6-slice2-coder-agent.md). Build offline with `cargo build --offline`.
+[source.crates-io]
+replace-with = "vendored-sources"
+
+[source.vendored-sources]
+directory = "vendor"

@@ -64,6 +64,21 @@ for so in $(ldd "$TCC" | grep -oE '/[^ ]+\.so[^ ]*'); do
   install -D -m0755 "$so" "$ROOTFS$so"
 done
 
+# --- Phase-6 slice-2: seal the CODER AGENT binary (the model-driven WORKLOAD of a `shrek run` T2
+#     session, docs/phase6-slice2-coder-agent.md) + its dynamic closure into the rootfs, exactly like
+#     tcc above. The coder is FIRST-PARTY code whose integrity comes from this seal (dm-verity /usr),
+#     NOT from the ingest admit-list (that measures the runsc HARNESS, not the workload) — so runsc
+#     stays the admitted harness and the coder rides in as a sealed rootfs tool. It is built HERMETICALLY
+#     on the host (STAGE 1 `cargo build --release --offline`, tinyjson vendored in-tree) and lands at
+#     target/release/coder. glibc-dynamic (musl-static one-inode is the documented next step): its ldd
+#     closure adds libgcc_s.so.1 beyond tcc's libc/ld-linux — install each at its resolved real path. ---
+CODER="$REPO_ROOT/target/release/coder"
+[ -x "$CODER" ] || { echo "SEAL ABORT: coder release binary missing at $CODER (run cargo build --release --offline first)"; exit 1; }
+install -D -m0755 "$CODER" "$ROOTFS/usr/bin/coder"
+for so in $(ldd "$CODER" | grep -oE '/[^ ]+\.so[^ ]*'); do
+  install -D -m0755 "$so" "$ROOTFS$so"
+done
+
 # The freestanding source template the workload copies into the writable project, then compiles. Kept in
 # the rootfs (read-only /usr at runtime) so the workload authors a REAL .c into the mutable grant.
 install -d "$ROOTFS/coder-src"
@@ -97,4 +112,4 @@ ADMIT_HEX="$(fsverity digest --hash-alg=sha256 --block-size=4096 "$RUNSC_SRC" | 
   printf 'sha256 %s\n' "$ADMIT_HEX"
 } > "$DEST/t2-ingest-admit"
 
-echo "seal-t2-artifacts: runsc $(stat -c%s "$DEST/runsc") bytes (sha256 verified) + t2-rootfs ($(ls "$ROOTFS/bin" | wc -l) applets + tcc) + t2-ingest-admit (runsc fs-verity sha256 $ADMIT_HEX) -> $DEST"
+echo "seal-t2-artifacts: runsc $(stat -c%s "$DEST/runsc") bytes (sha256 verified) + t2-rootfs ($(ls "$ROOTFS/bin" | wc -l) applets + tcc + coder $(stat -c%s "$ROOTFS/usr/bin/coder") bytes) + t2-ingest-admit (runsc fs-verity sha256 $ADMIT_HEX) -> $DEST"
