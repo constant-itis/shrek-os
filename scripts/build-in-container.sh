@@ -123,9 +123,10 @@ docker run --rm --privileged \
     # Package names verified on trixie at the S2 build: ukify=systemd-ukify, the EFI stub=systemd-boot-efi
     # (image pkg, see mkosi.conf); systemd-repart IS a separate package here (pulled as an mkosi dep).
     # sbsigntool provides sbsign for the S5 UKI signing (SecureBootSignTool=sbsign). busybox-static =
-    # the T2 sandbox rootfs userland (Phase-5 slice-6 seal), static so it needs no in-rootfs libs.
+    # the T2 sandbox rootfs userland (Phase-5 slice-6 seal), static so it needs no in-rootfs libs. tcc =
+    # the Phase-6 slice-1a freestanding C compiler sealed into the T2 rootfs (real edit/build/execute).
     apt-get install -y --no-install-recommends \
-      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor busybox-static fsverity
+      mkosi systemd-ukify sbsigntool erofs-utils dosfstools mtools apparmor busybox-static fsverity tcc
     # Phase-5 slice-6: assemble the T2 gVisor artifacts into the mkosi.extra.t2 ExtraTree BEFORE mkosi
     # runs (30-t2-gvisor.conf seals it into /usr). Re-verifies the pinned runsc + builds the rootfs.
     bash /work/scripts/seal-t2-artifacts.sh /work/image/mkosi.extra.t2 /t2-runsc-verified

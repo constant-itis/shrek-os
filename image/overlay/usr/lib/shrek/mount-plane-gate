@@ -1,8 +1,9 @@
 #!/bin/sh
-# Phase-5 VM GATE: slice-1 M4 mount plane + slice-2 decision plane + slice-3 egress plane + slice-4 T0 +
-# slice-6 T2 (S5 block) + slice-8 positive pin (S6) + slice-9 exec island (S7). SPIKE ONLY: remove this file,
-# shrek-mount-gate.service, and the multi-user.target.wants symlink before any real/shipped image
-# (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md, docs/phase5-slice8-pin-manifest.md §8).
+# Phase-5/6 VM GATE: slice-1 M4 mount plane + slice-2 decision plane + slice-3 egress plane + slice-4 T0 +
+# slice-6 T2 (S5 block) + slice-8 positive pin (S6) + slice-9 exec island (S7) + slice-10 closure (S8) +
+# Phase-6 slice-1a untrusted-ingest coding session (P6). SPIKE ONLY: remove this file, shrek-mount-gate.service,
+# and the multi-user.target.wants symlink before any real/shipped image
+# (docs/phase5-slice1-mount.md, docs/phase5-slice2-tier.md, docs/phase5-slice8-pin-manifest.md §8, docs/phase6-slice1a-*.md).
 #
 # Runs on the sealed, enforcing-Secure-Boot image. Drives `gatekeeperd sandbox` to construct a
 # capability-enforced T1 sandbox from a grant, and asserts the four mount-plane properties from
@@ -441,4 +442,146 @@ else
   fi
 fi
 [ "$s8fail" = 0 ] && emit "PASS S8 sealed-dynamic-plane VM gate" || emit "FAIL S8 sealed-dynamic-plane VM gate"
+
+# ============= Phase-6 slice-1a: integrity-bound untrusted-ingest coding session (P6) =============
+# docs/phase6-slice1a-*.md. The end-to-end coding-agent slice on the sealed kernel: an --ingest-harness
+# session earns Origin::UntrustedIngest (T-untrust, not the T-hostile floor) ONLY because the T2 runsc
+# harness fs-verity-measures into the sealed admit-list, constructs at GENUINE T2 (gVisor), and runs a
+# REAL edit → compile → execute loop with project-scoped write-through, while home/Vault + network stay
+# unavailable. The real compiler (tcc, sealed into the T2 rootfs) is what makes this a true test: a real
+# ELF compiled from project source EXECUTES from the exec-capable build grant, while the SAME ELF copied
+# into the noexec project grant CANNOT run (the owner build-grant design — gVisor needs mmap(PROT_EXEC) of
+# a gofer file, denied by a MS_NOEXEC host mount; this supersedes the earlier shell-script G3 stand-in).
+#
+# The sealed /usr runsc is block-level dm-verity, NOT per-file fs-verity, so it has no fs-verity digest to
+# admit. As S6/S8 do for the pin-manifest, provision a DEDICATED ext4 -O verity loopback, copy the SEALED
+# runsc onto it, enable fs-verity, and point the T2 substrate at it via SHREK_T2_RUNSC (spike-only). Its
+# kernel-measured digest EQUALS the OFFLINE `fsverity digest` baked into /usr/lib/shrek/t2-ingest-admit at
+# seal time (content-addressed), so the BAKED admit-list authenticates it — offline bake == kernel measure,
+# the same property S6 proves. The rootfs (busybox + tcc + freestanding template) is the SEALED
+# /usr/lib/shrek/t2-rootfs (NO SHREK_T2_ROOTFS override). FAIL, never skip, if fs-verity is unavailable.
+p6fail=0
+emit "P6-BEGIN Phase-6 slice-1a untrusted-ingest T2 coding session (real compile+execute)"
+P6IMG=/run/shrek-ingestfs.img
+P6MNT=/run/shrek-ingestfs
+P6LOOP=
+if [ ! -x /usr/lib/shrek/runsc ]; then
+  emit "FAIL P6 reason=sealed-runsc-missing (seal-t2-artifacts not baked)"; p6fail=1
+elif [ ! -f /usr/lib/shrek/t2-ingest-admit ]; then
+  emit "FAIL P6 reason=admit-list-missing (seal-t2-artifacts did not bake it)"; p6fail=1
+elif [ ! -x /usr/lib/shrek/t2-rootfs/usr/bin/tcc ]; then
+  emit "FAIL P6 reason=tcc-missing (seal-t2-artifacts did not bake the compiler)"; p6fail=1
+elif ! command -v mkfs.ext4 >/dev/null 2>&1; then
+  emit "FAIL P6 reason=mkfs.ext4-missing"; p6fail=1
+else
+  # 256 MB: the runsc harness is ~100 MB, so the loopback fs must hold it + its fs-verity Merkle tree
+  # (a 96 MB image can't even fit the copy — the S6/S8 probes are small, this one is not).
+  dd if=/dev/zero of="$P6IMG" bs=1M count=256 status=none 2>/dev/null
+  if mkfs.ext4 -q -b 4096 -O verity "$P6IMG" 2>/dev/null; then
+    i=0; while [ "$i" -le 15 ]; do [ -e /dev/loop$i ] || mknod -m660 /dev/loop$i b 7 "$i"; i=$((i + 1)); done
+    mkdir -p "$P6MNT"
+    P6LOOP=$(losetup -f --show "$P6IMG" 2>/dev/null)
+    if [ -n "$P6LOOP" ] && mount -o exec "$P6LOOP" "$P6MNT" 2>/dev/null; then
+      # Copy the SEALED runsc onto the verity fs (must fit — the image is sized for it). Verify the copy
+      # is complete before enabling verity, so a size/space problem reports as itself, not enable-verity.
+      SZSRC=$(stat -c%s /usr/lib/shrek/runsc 2>/dev/null)
+      cp /usr/lib/shrek/runsc "$P6MNT/runsc" 2>/dev/null; cprc=$?; chmod +x "$P6MNT/runsc" 2>/dev/null
+      SZDST=$(stat -c%s "$P6MNT/runsc" 2>/dev/null)
+      if [ "$cprc" != 0 ] || [ "$SZSRC" != "$SZDST" ]; then
+        emit "FAIL P6 reason=runsc-copy (cprc=$cprc src=$SZSRC dst=$SZDST — verity fs too small?)"; p6fail=1
+      elif "$GK" pin-verity enable "$P6MNT/runsc" >/dev/null 2>&1; then
+        DL=$("$GK" pin-verity measure "$P6MNT/runsc" 2>/dev/null)
+        emit "P6-provisioned fs-verity runsc=[$DL] (vs baked /usr/lib/shrek/t2-ingest-admit)"
+        # Anchor on writable tmpfs: project (source, noexec) + build (exec) + ungranted vault. README is
+        # pre-existing (teardown must not destroy it); vault sentinel proves the wall.
+        P6SRV=/run/shrek-p6/srv
+        rm -rf "$P6SRV"; mkdir -p "$P6SRV/project" "$P6SRV/build" "$P6SRV/vault"
+        echo "pre-existing-project-file" > "$P6SRV/project/README"
+        echo "TOP-SECRET" > "$P6SRV/vault/secret"
+        # The coding loop: edit a real .c into the project grant (write-through) → tcc-compile OUTPUT into
+        # the exec build grant → EXECUTE it there → prove the same ELF copied into the project CANNOT run.
+        # project-exec is judged on the run MARKER (not the exit code — the ELF's own success exit is 42,
+        # itself nonzero), so a leak cannot hide. No single quotes inside (LOOP is single-quoted here).
+        LOOP='echo PROBE-START; PATH=/usr/bin:/bin:/sbin; export PATH; cd /srv/project || { echo NO-PROJECT; exit 40; }; cp /coder-src/hello.c ./hello.c && echo "/* edit-9f3a */" >> ./hello.c && echo EDIT-WROTE-OK; if /usr/bin/tcc -nostdlib -static -o /srv/build/hello ./hello.c 2>/srv/build/tcc.err; then echo TCC-COMPILE-OK; BO=$(/srv/build/hello); echo "BUILD-RAN out=[$BO] exit=$?"; else echo TCC-COMPILE-FAIL; cat /srv/build/tcc.err; fi; cp /srv/build/hello ./proj-copy 2>/dev/null; PJ=$(./proj-copy 2>&1); case "$PJ" in *REAL-COMPILE-RUN-OK*) echo PROJECT-EXEC-LEAK-BAD;; *) echo PROJECT-NOEXEC-ENFORCED-OK;; esac; if [ -e /srv/vault ]; then echo VAULT-VISIBLE-BAD; else echo VAULT-ABSENT-OK; fi; if [ -e /usr/libexec/shrek ]; then echo HOST-FS-LEAK-BAD; else echo HOST-FS-ISOLATED-OK; fi; if timeout 5 nc -w 2 1.1.1.1 53 </dev/null >/dev/null 2>&1; then echo EGRESS-REACHED-BAD; else echo NO-EGRESS-OK; fi; echo PROBE-END'
+        # G1 uses the BAKED admit-list (no SHREK_INGEST_ADMIT) — proving offline bake == kernel measure.
+        # SHREK_T2_RUNSC points at the loopback per-file-verity runsc; systemd-run --scope inherits the env.
+        if command -v systemd-run >/dev/null 2>&1; then
+          # --setenv makes the SHREK_T2_RUNSC relocation explicit to the scoped child (belt-and-suspenders
+          # over --scope env inheritance); the prefix covers the non-systemd-run fallback below.
+          OUT=$(SHREK_T2_RUNSC="$P6MNT/runsc" systemd-run --scope --quiet -p Delegate=yes \
+                  --setenv=SHREK_T2_RUNSC="$P6MNT/runsc" -- "$GK" sandbox \
+                  --tier T2 --trust T-hostile --caps C-proj-rw --profile C-proj-rw --ingest-harness --id p6 \
+                  --anchor "$P6SRV" --rw-grant project --build-grant build -- /bin/sh -c "$LOOP" 2>&1)
+        else
+          OUT=$(SHREK_T2_RUNSC="$P6MNT/runsc" "$GK" sandbox --tier T2 --trust T-hostile --caps C-proj-rw \
+                  --profile C-proj-rw --ingest-harness --id p6 --anchor "$P6SRV" --rw-grant project \
+                  --build-grant build -- /bin/sh -c "$LOOP" 2>&1)
+        fi
+        printf '%s\n' "$OUT"
+        # G1: integrity-bound admission ⇒ T-untrust ⇒ genuine T2 (baked admit-list authenticated runsc).
+        printf '%s\n' "$OUT" | grep -q 'mode=ingest-harness derived=T-untrust' \
+          && emit "PASS P6-G1 admission⇒derived=T-untrust (baked admit-list authenticated runsc)" || { emit "FAIL P6-G1 derived=T-untrust"; p6fail=1; }
+        printf '%s\n' "$OUT" | grep -q 'harness_authentic=true' \
+          && emit "PASS P6-G1 harness_authentic=true (offline bake == kernel measure)" || { emit "FAIL P6-G1 harness_authentic"; p6fail=1; }
+        printf '%s\n' "$OUT" | grep -q 'construct-at=T2 effective=T2' \
+          && emit "PASS P6-G1 construct-at=T2 (genuine gVisor on sealed kernel)" || { emit "FAIL P6-G1 construct-at=T2"; p6fail=1; }
+        # REAL-COMPILE-OK: a real freestanding compiler produced an ELF that ran from the exec build grant.
+        printf '%s\n' "$OUT" | grep -q 'TCC-COMPILE-OK' \
+          && emit "PASS P6-REAL-COMPILE tcc produced an ELF from freshly-written project source" || { emit "FAIL P6-REAL-COMPILE (tcc did not compile)"; p6fail=1; }
+        printf '%s\n' "$OUT" | grep -q 'BUILD-RAN out=\[REAL-COMPILE-RUN-OK\] exit=42' \
+          && emit "PASS P6-G3 REAL-COMPILE-OK compiled ELF ran from exec build grant + controlled exit (=42)" || { emit "FAIL P6-G3 build-exec (compiled ELF did not run from build grant)"; p6fail=1; }
+        # G3 wall: the SAME ELF copied into the noexec project grant CANNOT execute.
+        printf '%s\n' "$OUT" | grep -q 'PROJECT-NOEXEC-ENFORCED-OK' \
+          && emit "PASS P6-G3 project noexec ENFORCED (same ELF cannot execute from project grant)" || { emit "FAIL P6-G3 project-noexec (execution from project grant not blocked)"; p6fail=1; }
+        printf '%s\n' "$OUT" | grep -q 'PROJECT-EXEC-LEAK-BAD' \
+          && { emit "FAIL P6-G3 PROJECT-EXEC-LEAK (ran from noexec project)"; p6fail=1; } || emit "PASS P6-G3 no project-exec leak"
+        # G2 write-through across both grants (probed content on the host inodes — the M4 lesson, not a
+        # console string): edited source on the project inode, a real ELF on the build inode; README survives.
+        printf '%s\n' "$OUT" | grep -q 'EDIT-WROTE-OK' \
+          && emit "PASS P6-G2 workload wrote source into project grant" || { emit "FAIL P6-G2 workload-wrote"; p6fail=1; }
+        grep -q 'edit-9f3a' "$P6SRV/project/hello.c" 2>/dev/null \
+          && emit "PASS P6-G2 write-through: edited hello.c on project (host)" || { emit "FAIL P6-G2 write-through-source"; p6fail=1; }
+        if [ -f "$P6SRV/build/hello" ] && head -c4 "$P6SRV/build/hello" 2>/dev/null | grep -qa ELF; then
+          emit "PASS P6-G2 write-through: compiled ELF on build grant (host, ELF magic)"
+        else emit "FAIL P6-G2 write-through-ELF-on-host"; p6fail=1; fi
+        grep -q 'pre-existing-project-file' "$P6SRV/project/README" 2>/dev/null \
+          && emit "PASS P6-G2 teardown non-destructive: pre-existing README intact" || { emit "FAIL P6-G2 teardown DESTROYED project content"; p6fail=1; }
+        # G4 the wall.
+        for probe in VAULT-ABSENT-OK HOST-FS-ISOLATED-OK NO-EGRESS-OK; do
+          printf '%s\n' "$OUT" | grep -q "$probe" && emit "PASS P6-G4 $probe" || { emit "FAIL P6-G4 $probe"; p6fail=1; }
+        done
+        printf '%s\n' "$OUT" | grep -qE 'VAULT-VISIBLE-BAD|HOST-FS-LEAK-BAD|EGRESS-REACHED-BAD' \
+          && { emit "FAIL P6-G4 LEAK DETECTED"; p6fail=1; } || emit "PASS P6-G4 no-leak-markers"
+
+        # G5: SAME request, admit-list that admits NOTHING (SHREK_INGEST_ADMIT override, spike-only) ⇒
+        # T-hostile ⇒ (T-hostile,C-proj-rw)=T3 ⇒ refused below floor, nothing constructed/ran/wrote. Only
+        # the admit-list differs — the SAME cell flips construct→refuse purely on harness integrity.
+        BADADMIT=/run/shrek-p6/admit.bad
+        printf 'shrek-t2-ingest-admit v1\n' > "$BADADMIT"
+        rm -f "$P6SRV/project/leak.txt"
+        OUT5=$(SHREK_T2_RUNSC="$P6MNT/runsc" SHREK_INGEST_ADMIT="$BADADMIT" "$GK" sandbox --tier T2 \
+                 --trust T-hostile --caps C-proj-rw --profile C-proj-rw --ingest-harness --id p6b \
+                 --anchor "$P6SRV" --rw-grant project --build-grant build \
+                 -- /bin/sh -c 'echo LEAKED > /srv/project/leak.txt; echo LEAKED' 2>&1); rc5=$?
+        printf '%s\n' "$OUT5"
+        printf '%s\n' "$OUT5" | grep -q 'mode=ingest-harness derived=T-hostile' \
+          && emit "PASS P6-G5 no-admit⇒derived=T-hostile" || { emit "FAIL P6-G5 no-admit⇒T-hostile"; p6fail=1; }
+        { { [ "$rc5" = 10 ] || [ "$rc5" = 12 ]; } && printf '%s\n' "$OUT5" | grep -q 'SANDBOX-DECISION refused'; } \
+          && emit "PASS P6-G5 failed-closed rc=$rc5 (refused)" || { emit "FAIL P6-G5 failed-closed rc=$rc5"; p6fail=1; }
+        printf '%s\n' "$OUT5" | grep -q 'construct-at=' && { emit "FAIL P6-G5 constructed (should refuse)"; p6fail=1; } || emit "PASS P6-G5 never-constructed"
+        printf '%s\n' "$OUT5" | grep -q 'LEAKED' && { emit "FAIL P6-G5 workload-ran (LEAK)"; p6fail=1; } || emit "PASS P6-G5 workload-never-ran"
+        [ -e "$P6SRV/project/leak.txt" ] && { emit "FAIL P6-G5 workload wrote to host (LEAK)"; p6fail=1; } || emit "PASS P6-G5 no-host-write"
+      else
+        emit "FAIL P6 reason=enable-verity (sealed kernel/fs lacks fs-verity)"; p6fail=1
+      fi
+      umount "$P6MNT" 2>/dev/null
+    else
+      emit "FAIL P6 reason=losetup/mount"; p6fail=1
+    fi
+    [ -n "$P6LOOP" ] && losetup -d "$P6LOOP" 2>/dev/null
+  else
+    emit "FAIL P6 reason=mkfs-verity (ext4 -O verity unsupported on sealed kernel)"; p6fail=1
+  fi
+fi
+[ "$p6fail" = 0 ] && emit "PASS P6 untrusted-ingest coding-session VM gate" || emit "FAIL P6 untrusted-ingest coding-session VM gate"
 verdict_done=1

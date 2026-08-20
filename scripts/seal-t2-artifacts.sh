@@ -43,6 +43,58 @@ ROOTFS="$DEST/t2-rootfs"
 rm -rf "$ROOTFS"
 install -d "$ROOTFS/bin"
 install -m0755 "$BB" "$ROOTFS/bin/busybox"
-for a in sh cat ls nc timeout echo test; do ln -sf busybox "$ROOTFS/bin/$a"; done
+# cp + chmod added for Phase-6 slice-1a: the coding workload copies the source template into the writable
+# grant and marks its build artifact (tcc leaves it +x already; chmod kept for an explicit edit step).
+for a in sh cat ls nc timeout echo test cp chmod; do ln -sf busybox "$ROOTFS/bin/$a"; done
 
-echo "seal-t2-artifacts: runsc $(stat -c%s "$DEST/runsc") bytes (sha256 verified) + t2-rootfs ($(ls "$ROOTFS/bin" | wc -l) entries) -> $DEST"
+# --- Phase-6 slice-1a: seal a MINIMAL REAL C compiler (tcc) + its dynamic closure into the rootfs so a
+#     T2 untrusted-ingest coding session can do a real edit → compile → execute loop. -nostdlib -static
+#     needs NEITHER libtcc1.a NOR the tcc include dir (a freestanding raw-syscall _start program uses no
+#     libc), so the footprint is just tcc + its own ELF interpreter + libc/libm (~3.4 MB). tcc has its own
+#     internal linker — no external `ld` in the rootfs. NOT `tcc -run` (that is JIT/anon-exec = PN5). ---
+TCC="$(command -v tcc)" || { echo "SEAL ABORT: tcc not installed in build container"; exit 1; }
+install -D -m0755 "$TCC" "$ROOTFS/usr/bin/tcc"
+# The PT_INTERP the tcc ELF names must exist at that exact path inside the rootfs; on x86_64 glibc it is
+# /lib64/ld-linux-x86-64.so.2 (also emitted by ldd below, so this is belt-and-suspenders).
+INTERP=/lib64/ld-linux-x86-64.so.2
+[ -e "$INTERP" ] && install -D -m0755 "$INTERP" "$ROOTFS$INTERP"
+# Every DT_NEEDED shared lib (+ the interpreter line) at its resolved real path. install dereferences, so
+# a SONAME symlink lands as a regular file the loader finds by name in its default (no-cache) search path.
+for so in $(ldd "$TCC" | grep -oE '/[^ ]+\.so[^ ]*'); do
+  install -D -m0755 "$so" "$ROOTFS$so"
+done
+
+# The freestanding source template the workload copies into the writable project, then compiles. Kept in
+# the rootfs (read-only /usr at runtime) so the workload authors a REAL .c into the mutable grant.
+install -d "$ROOTFS/coder-src"
+cat > "$ROOTFS/coder-src/hello.c" <<'CEOF'
+/* Freestanding: no libc, raw x86-64 syscalls, own _start. Built with `tcc -nostdlib -static`.
+   Proves a real compiler turned freshly-written, mutable project bytes into an executable ELF that
+   the sandbox then runs — no libc needed in the guest rootfs. */
+static long s(long n, long a, long b, long c) {
+    long r;
+    __asm__ volatile("syscall" : "=a"(r) : "a"(n), "D"(a), "S"(b), "d"(c) : "rcx", "r11", "memory");
+    return r;
+}
+void _start(void) {
+    const char m[] = "REAL-COMPILE-RUN-OK";
+    s(1, 1, (long)m, sizeof(m) - 1); /* write(1, m, len) */
+    s(60, 42, 0, 0);                 /* exit(42) — a distinctive code only a real compiled ELF produces */
+}
+CEOF
+
+# --- Phase-6 slice-1a: bake the ingest admit-list = the fs-verity identity of THIS runsc. fs-verity
+#     digest is content-addressed (sha256 over 4096-byte Merkle blocks), so this OFFLINE digest EQUALS the
+#     runtime kernel FS_IOC_MEASURE_VERITY the P6 VM gate provisions on a loopback (offline bake == kernel
+#     measure — the same property the pin-manifest bake relies on). A sealed image thus authenticates its
+#     own harness with no writable authority source; gatekeeperd reads this compiled-in dm-verity path. ---
+command -v fsverity >/dev/null 2>&1 || { echo "SEAL ABORT: fsverity (fsverity-utils) not in build container"; exit 1; }
+ADMIT_HEX="$(fsverity digest --hash-alg=sha256 --block-size=4096 "$RUNSC_SRC" | cut -d: -f2 | cut -d' ' -f1)"
+[ "${#ADMIT_HEX}" = 64 ] || { echo "SEAL ABORT: unexpected runsc fsverity digest [$ADMIT_HEX]"; exit 1; }
+{
+  printf 'shrek-t2-ingest-admit v1\n'
+  printf '# authorised T2 untrusted-ingest harness: runsc %s (fs-verity sha256, offline bake == kernel measure)\n' "$PIN_SHA256"
+  printf 'sha256 %s\n' "$ADMIT_HEX"
+} > "$DEST/t2-ingest-admit"
+
+echo "seal-t2-artifacts: runsc $(stat -c%s "$DEST/runsc") bytes (sha256 verified) + t2-rootfs ($(ls "$ROOTFS/bin" | wc -l) applets + tcc) + t2-ingest-admit (runsc fs-verity sha256 $ADMIT_HEX) -> $DEST"
