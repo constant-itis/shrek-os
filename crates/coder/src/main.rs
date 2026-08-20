@@ -19,12 +19,70 @@ use std::net::TcpStream;
 use std::time::Duration;
 use tinyjson::JsonValue;
 
-const DEFAULT_MODEL_URL: &str = "http://shrek-model:8100/v1/chat/completions";
-const DEFAULT_MODEL: &str = "local";
 const DEFAULT_MAX_STEPS: u32 = 8;
 /// Cap on any single tool-result fed back into the transcript — keeps a runaway `run` from ballooning
 /// the context (and the request body) without bound.
 const RESULT_CAP: usize = 4000;
+/// `max_tokens` for the Anthropic messages API (a required field there; the chat/completions path
+/// leaves generation length to the server). Generous enough for a full rewritten file in one reply.
+const ANTHROPIC_MAX_TOKENS: f64 = 8192.0;
+
+/// The model PROVIDER — the ONLY thing that varies between a local Qwen and a hosted Claude session:
+/// which sealed egress dst the box was constructed with, and which wire the adapter speaks. It adds
+/// NO authority (the sealed egress-profile ∩ grants + the T2 wall are unchanged) and holds NO secret
+/// (a hosted key lives ONLY in the broker-side proxy — crates/model-proxy — never in this box). See
+/// docs/phase6-slice3-provider-abstraction.md. Deliberately just two concrete variants, not a plugin
+/// framework: the seam is exactly what these two working implementations force.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Provider {
+    /// Local LAN model, plaintext `chat/completions` direct to `shrek-model` (`model-local` egress).
+    Local,
+    /// Hosted Anthropic model, `messages` API. The box speaks PLAINTEXT to the broker proxy
+    /// (`shrek-model-proxy`, `model-anthropic` egress); the proxy injects the key + does TLS to
+    /// Anthropic. No key and no TLS ever enter this box.
+    Anthropic,
+}
+
+impl Provider {
+    fn parse(s: &str) -> Option<Provider> {
+        match s {
+            "local" => Some(Provider::Local),
+            "anthropic" => Some(Provider::Anthropic),
+            _ => None,
+        }
+    }
+    fn label(self) -> &'static str {
+        match self {
+            Provider::Local => "local",
+            Provider::Anthropic => "anthropic",
+        }
+    }
+    /// The default endpoint the box dials — ALWAYS plaintext http:// (no in-box TLS). For Anthropic
+    /// that is the broker proxy, NOT api.anthropic.com; the proxy is the sole TLS speaker.
+    fn default_model_url(self) -> &'static str {
+        match self {
+            Provider::Local => "http://shrek-model:8100/v1/chat/completions",
+            Provider::Anthropic => "http://shrek-model-proxy:8200/v1/messages",
+        }
+    }
+    /// The default model-name field. Overridable with `--model` / `SHREK_MODEL` (the LIVE smoke picks
+    /// the exact id). The canned oracle ignores it.
+    fn default_model(self) -> &'static str {
+        match self {
+            Provider::Local => "local",
+            Provider::Anthropic => "claude-sonnet-5",
+        }
+    }
+    /// The sealed egress profile a `shrek run` session for this provider must be constructed with — the
+    /// box↔endpoint pairing the wall enforces. Informational here (gatekeeperd owns egress); surfaced so
+    /// the CODER-START line records the box's contract.
+    fn egress_profile(self) -> &'static str {
+        match self {
+            Provider::Local => "model-local",
+            Provider::Anthropic => "model-anthropic",
+        }
+    }
+}
 
 fn main() {
     std::process::exit(real_main());
@@ -32,8 +90,12 @@ fn main() {
 
 fn real_main() -> i32 {
     let mut task: Option<String> = None;
-    let mut model_url = std::env::var("SHREK_MODEL_URL").unwrap_or_else(|_| DEFAULT_MODEL_URL.into());
-    let mut model = std::env::var("SHREK_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
+    // Provider first (env is the baseline; --provider overrides). Explicit --model-url/--model
+    // overrides win over the provider defaults, so collect them as options and resolve AFTER the loop
+    // (argv order-independent: --provider may follow --model-url).
+    let mut provider_arg = std::env::var("SHREK_PROVIDER").ok();
+    let mut model_url_override = std::env::var("SHREK_MODEL_URL").ok();
+    let mut model_override = std::env::var("SHREK_MODEL").ok();
     let mut max_steps = DEFAULT_MAX_STEPS;
     let mut live = false;
 
@@ -42,8 +104,9 @@ fn real_main() -> i32 {
     while i < argv.len() {
         match argv[i].as_str() {
             "--task" => { i += 1; task = argv.get(i).cloned(); }
-            "--model-url" => { i += 1; if let Some(v) = argv.get(i) { model_url = v.clone(); } }
-            "--model" => { i += 1; if let Some(v) = argv.get(i) { model = v.clone(); } }
+            "--provider" => { i += 1; provider_arg = argv.get(i).cloned(); }
+            "--model-url" => { i += 1; model_url_override = argv.get(i).cloned(); }
+            "--model" => { i += 1; model_override = argv.get(i).cloned(); }
             "--max-steps" => {
                 i += 1;
                 match argv.get(i).and_then(|s| s.parse::<u32>().ok()) {
@@ -58,6 +121,19 @@ fn real_main() -> i32 {
         i += 1;
     }
 
+    // Resolve the provider FAIL-CLOSED: an unknown provider name is a hard error, never a silent
+    // fallback to a different backend (which could mismatch the sealed egress the session was built
+    // with). Default is `local` — the frozen slice-2 behavior is unchanged when nothing is specified.
+    let provider = match provider_arg.as_deref() {
+        None | Some("") => Provider::Local,
+        Some(s) => match Provider::parse(s) {
+            Some(p) => p,
+            None => { eprintln!("coder: unknown --provider {s:?}; valid: local, anthropic"); return 2; }
+        },
+    };
+    let model_url = model_url_override.unwrap_or_else(|| provider.default_model_url().into());
+    let model = model_override.unwrap_or_else(|| provider.default_model().into());
+
     let Some(task) = task else {
         eprintln!("coder: --task \"<one-line task>\" is required");
         usage();
@@ -68,20 +144,23 @@ fn real_main() -> i32 {
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".into());
     println!(
-        "CODER-START task={:?} model_url={} model={} max_steps={} live={} cwd={}",
-        task, model_url, model, max_steps, live, cwd
+        "CODER-START provider={} egress={} task={:?} model_url={} model={} max_steps={} live={} cwd={}",
+        provider.label(), provider.egress_profile(), task, model_url, model, max_steps, live, cwd
     );
 
-    run_loop(&task, &model_url, &model, max_steps)
+    run_loop(provider, &task, &model_url, &model, max_steps)
 }
 
 fn usage() {
     eprintln!("coder — the coding-agent workload for `shrek run` (Phase-6 slice-2)");
     eprintln!();
     eprintln!("  coder --task \"<one-line task>\" [opts]");
-    eprintln!("    --model-url URL   chat/completions endpoint");
-    eprintln!("                      (default {DEFAULT_MODEL_URL}; env SHREK_MODEL_URL)");
-    eprintln!("    --model NAME      model name field (default {DEFAULT_MODEL}; env SHREK_MODEL)");
+    eprintln!("    --provider NAME   local | anthropic (default local; env SHREK_PROVIDER).");
+    eprintln!("                      local = plaintext chat/completions to shrek-model (model-local egress).");
+    eprintln!("                      anthropic = messages API, plaintext to the broker proxy shrek-model-proxy");
+    eprintln!("                      (model-anthropic egress); the proxy holds the key + does TLS. No secret in-box.");
+    eprintln!("    --model-url URL   override the endpoint the box dials (plaintext http:// only; env SHREK_MODEL_URL)");
+    eprintln!("    --model NAME      model name field (env SHREK_MODEL; default per provider)");
     eprintln!("    --max-steps N     hard cap on loop iterations (default {DEFAULT_MAX_STEPS}); tripping it fails closed");
     eprintln!("    --live            informational marker for a real-model smoke (no behavior change)");
     eprintln!();
@@ -91,7 +170,7 @@ fn usage() {
 
 /// The agent loop. Returns the process exit code: 0 = done ok, 1 = done not-ok, 3 = step cap
 /// (fail-closed), 4 = model/transport/parse failure (fail-closed).
-fn run_loop(task: &str, model_url: &str, model: &str, max_steps: u32) -> i32 {
+fn run_loop(provider: Provider, task: &str, model_url: &str, model: &str, max_steps: u32) -> i32 {
     let mut messages: Vec<(String, String)> = vec![
         ("system".into(), system_prompt()),
         ("user".into(), initial_user_message(task)),
@@ -100,12 +179,12 @@ fn run_loop(task: &str, model_url: &str, model: &str, max_steps: u32) -> i32 {
     for step in 1..=max_steps {
         println!("CODER-STEP {step}");
 
-        let request = build_request(model, &messages);
+        let request = build_request(provider, model, &messages);
         let reply_body = match http_post_json(model_url, &request) {
             Ok(b) => b,
             Err(e) => { eprintln!("CODER-ERROR transport: {e}"); return 4; }
         };
-        let content = match extract_assistant_content(&reply_body) {
+        let content = match extract_assistant_content(provider, &reply_body) {
             Some(c) => c,
             None => { eprintln!("CODER-ERROR model reply had no assistant content"); return 4; }
         };
@@ -258,9 +337,18 @@ fn run_shell(cmd: &str) -> String {
 
 // ---- JSON request/response (tinyjson) ----------------------------------------------------------
 
-/// Build the `chat/completions` request body from the transcript. Constructed as a
-/// `JsonValue` and stringified so message content is JSON-escaped correctly (never hand-formatted).
-fn build_request(model: &str, messages: &[(String, String)]) -> String {
+/// Build the request body for the selected provider. This + [`extract_assistant_content`] are the
+/// ENTIRE provider seam: the transcript, the tool loop, and the grants are provider-agnostic. Both
+/// are constructed as a `JsonValue` and stringified so content is JSON-escaped correctly.
+fn build_request(provider: Provider, model: &str, messages: &[(String, String)]) -> String {
+    match provider {
+        Provider::Local => build_request_chat(model, messages),
+        Provider::Anthropic => build_request_anthropic(model, messages),
+    }
+}
+
+/// The `chat/completions` wire: a flat `messages` array (system role included inline).
+fn build_request_chat(model: &str, messages: &[(String, String)]) -> String {
     use std::collections::HashMap;
     let msgs: Vec<JsonValue> = messages
         .iter()
@@ -281,8 +369,51 @@ fn build_request(model: &str, messages: &[(String, String)]) -> String {
         .expect("request JSON always serializes")
 }
 
+/// Anthropic `messages` API: `system` is a TOP-LEVEL field (not a message role), the `messages` array
+/// carries only user/assistant turns, and `max_tokens` is REQUIRED. Our transcript is
+/// `[system, user, (assistant, user)*]`, so lifting the system turn out leaves a valid user-first
+/// alternating array. The Authorization/`x-api-key` header is NOT set here — the broker proxy injects
+/// it; this body is plaintext and secret-free.
+fn build_request_anthropic(model: &str, messages: &[(String, String)]) -> String {
+    use std::collections::HashMap;
+    let mut system = String::new();
+    let mut msgs: Vec<JsonValue> = Vec::new();
+    for (role, content) in messages {
+        if role == "system" {
+            if !system.is_empty() {
+                system.push_str("\n\n");
+            }
+            system.push_str(content);
+        } else {
+            let mut m = HashMap::new();
+            m.insert("role".to_string(), JsonValue::String(role.clone()));
+            m.insert("content".to_string(), JsonValue::String(content.clone()));
+            msgs.push(JsonValue::Object(m));
+        }
+    }
+    let mut root = HashMap::new();
+    root.insert("model".to_string(), JsonValue::String(model.to_string()));
+    root.insert("max_tokens".to_string(), JsonValue::Number(ANTHROPIC_MAX_TOKENS));
+    if !system.is_empty() {
+        root.insert("system".to_string(), JsonValue::String(system));
+    }
+    root.insert("messages".to_string(), JsonValue::Array(msgs));
+    root.insert("temperature".to_string(), JsonValue::Number(0.0));
+    JsonValue::Object(root)
+        .stringify()
+        .expect("request JSON always serializes")
+}
+
+/// Extract the assistant's reply text (the tool-call JSON string) for the selected provider.
+fn extract_assistant_content(provider: Provider, body: &str) -> Option<String> {
+    match provider {
+        Provider::Local => extract_chat_content(body),
+        Provider::Anthropic => extract_anthropic_content(body),
+    }
+}
+
 /// Pull `choices[0].message.content` out of a chat/completions reply. `None` on any shape mismatch.
-fn extract_assistant_content(body: &str) -> Option<String> {
+fn extract_chat_content(body: &str) -> Option<String> {
     let v: JsonValue = body.parse().ok()?;
     let obj = v.get::<std::collections::HashMap<String, JsonValue>>()?;
     let choices = obj.get("choices")?.get::<Vec<JsonValue>>()?;
@@ -290,6 +421,34 @@ fn extract_assistant_content(body: &str) -> Option<String> {
     let msg = first.get::<std::collections::HashMap<String, JsonValue>>()?.get("message")?;
     let content = msg.get::<std::collections::HashMap<String, JsonValue>>()?.get("content")?;
     content.get::<String>().cloned()
+}
+
+/// Concatenate the `text` blocks of an Anthropic `messages` reply (`content: [{type:text,text:…}]`).
+/// The tool-call JSON lives in that text, exactly as the chat path's `message.content` does. `None`
+/// on any shape mismatch (fails closed to the loop's "no assistant content" path).
+fn extract_anthropic_content(body: &str) -> Option<String> {
+    use std::collections::HashMap;
+    let v: JsonValue = body.parse().ok()?;
+    let obj = v.get::<HashMap<String, JsonValue>>()?;
+    let blocks = obj.get("content")?.get::<Vec<JsonValue>>()?;
+    let mut out = String::new();
+    for block in blocks {
+        let b = match block.get::<HashMap<String, JsonValue>>() {
+            Some(b) => b,
+            None => continue,
+        };
+        let is_text = b
+            .get("type")
+            .and_then(|t| t.get::<String>())
+            .map(|s| s == "text")
+            .unwrap_or(false);
+        if is_text {
+            if let Some(t) = b.get("text").and_then(|t| t.get::<String>()) {
+                out.push_str(t);
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 /// A parsed tool-call.
@@ -464,7 +623,7 @@ mod tests {
             ("system".to_string(), "be good".to_string()),
             ("user".to_string(), "quote \" and newline \n here".to_string()),
         ];
-        let body = build_request("local", &msgs);
+        let body = build_request(Provider::Local, "local", &msgs);
         // Round-trips: the tricky content survives escaping and re-parses.
         let v: JsonValue = body.parse().expect("request must be valid JSON");
         let obj = v.get::<std::collections::HashMap<String, JsonValue>>().unwrap();
@@ -478,9 +637,64 @@ mod tests {
     #[test]
     fn extract_content_pulls_choices0_message_content() {
         let body = r#"{"choices":[{"message":{"role":"assistant","content":"hello"}}]}"#;
-        assert_eq!(extract_assistant_content(body).as_deref(), Some("hello"));
-        assert!(extract_assistant_content(r#"{"choices":[]}"#).is_none());
-        assert!(extract_assistant_content("not json").is_none());
+        assert_eq!(extract_assistant_content(Provider::Local, body).as_deref(), Some("hello"));
+        assert!(extract_assistant_content(Provider::Local, r#"{"choices":[]}"#).is_none());
+        assert!(extract_assistant_content(Provider::Local, "not json").is_none());
+    }
+
+    #[test]
+    fn provider_parse_is_strict() {
+        assert_eq!(Provider::parse("local"), Some(Provider::Local));
+        assert_eq!(Provider::parse("anthropic"), Some(Provider::Anthropic));
+        // Unknown ⇒ None (real_main turns this into a hard error, never a silent backend swap).
+        assert_eq!(Provider::parse("bogus"), None);
+        assert_eq!(Provider::parse(""), None);
+        assert_eq!(Provider::parse("Anthropic"), None); // case-sensitive
+        // Each provider names its own sealed egress profile + plaintext (never https://) endpoint.
+        assert_eq!(Provider::Anthropic.egress_profile(), "model-anthropic");
+        assert!(Provider::Anthropic.default_model_url().starts_with("http://"));
+        assert!(Provider::Anthropic.default_model_url().contains("shrek-model-proxy"));
+    }
+
+    #[test]
+    fn build_request_anthropic_lifts_system_and_requires_max_tokens() {
+        let msgs = vec![
+            ("system".to_string(), "sys A".to_string()),
+            ("user".to_string(), "u1".to_string()),
+            ("assistant".to_string(), "a1".to_string()),
+            ("user".to_string(), "u2 with \" quote".to_string()),
+        ];
+        let body = build_request_anthropic("claude-sonnet-5", &msgs);
+        let v: JsonValue = body.parse().expect("anthropic request must be valid JSON");
+        let obj = v.get::<std::collections::HashMap<String, JsonValue>>().unwrap();
+        // system lifted to a TOP-LEVEL field, not a message role.
+        assert_eq!(obj.get("system").unwrap().get::<String>().unwrap(), "sys A");
+        assert!(obj.contains_key("max_tokens"), "messages API requires max_tokens");
+        let arr = obj.get("messages").unwrap().get::<Vec<JsonValue>>().unwrap();
+        // Only the non-system turns remain, user-first + alternating.
+        assert_eq!(arr.len(), 3);
+        let first = arr[0].get::<std::collections::HashMap<String, JsonValue>>().unwrap();
+        assert_eq!(first.get("role").unwrap().get::<String>().unwrap(), "user");
+        let last = arr[2].get::<std::collections::HashMap<String, JsonValue>>().unwrap();
+        assert_eq!(last.get("content").unwrap().get::<String>().unwrap(), "u2 with \" quote");
+    }
+
+    #[test]
+    fn extract_anthropic_content_concatenates_text_blocks() {
+        let body = r#"{"id":"msg_1","type":"message","role":"assistant",
+            "content":[{"type":"text","text":"{\"tool\":\"done\",\"args\":{\"ok\":true}}"}],
+            "stop_reason":"end_turn"}"#;
+        assert_eq!(
+            extract_anthropic_content(body).as_deref(),
+            Some(r#"{"tool":"done","args":{"ok":true}}"#)
+        );
+        // Two text blocks concatenate; non-text blocks are ignored.
+        let two = r#"{"content":[{"type":"text","text":"ab"},{"type":"text","text":"cd"}]}"#;
+        assert_eq!(extract_anthropic_content(two).as_deref(), Some("abcd"));
+        // Shape mismatches ⇒ None (fail closed).
+        assert!(extract_anthropic_content(r#"{"content":[]}"#).is_none());
+        assert!(extract_anthropic_content(r#"{"choices":[]}"#).is_none()); // chat shape ≠ messages shape
+        assert!(extract_anthropic_content("not json").is_none());
     }
 
     #[test]

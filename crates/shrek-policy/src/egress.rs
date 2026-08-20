@@ -103,6 +103,17 @@ const MODEL_LOCAL: &[EgressRule] = &[
     EgressRule { host: "shrek-model", proto: Proto::Tcp, port: 8100 },
 ];
 
+// The coding-agent's HOSTED-model endpoint (Anthropic), Phase-6 slice-3. The box reaches EXACTLY ONE
+// destination: `shrek-model-proxy` — the broker-side authenticated egress proxy (crates/model-proxy,
+// security-model §7), NOT api.anthropic.com. The proxy holds the API key + injects auth + terminates
+// TLS to Anthropic; the sandbox speaks PLAINTEXT to the proxy and never holds the secret or reaches
+// Anthropic directly (breaks the lethal trifecta: the box has untrusted-read + egress but NO secret).
+// So the sealed dst here is the LOCAL proxy on plaintext tcp:8200 — the key + TLS live outside this
+// policy, in the proxy. `--provider anthropic` (crates/coder) speaks the messages API to this dst.
+const MODEL_ANTHROPIC: &[EgressRule] = &[
+    EgressRule { host: "shrek-model-proxy", proto: Proto::Tcp, port: 8200 },
+];
+
 /// THE sealed egress table — the single, compiled-in source of egress policy. gatekeeperd resolves
 /// names against this; there is no runtime or writable source. Deny-by-default: a name absent here
 /// resolves to `None` and gatekeeperd fails the C-net construct closed.
@@ -112,6 +123,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "github-https", rules: GITHUB_HTTPS },
     EgressProfile { name: "rust-crates", rules: RUST_CRATES },
     EgressProfile { name: "model-local", rules: MODEL_LOCAL },
+    EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
 ];
 
 /// Resolve a profile NAME to its sealed destination set. STRICT + FAIL-CLOSED, mirroring
@@ -144,6 +156,19 @@ mod tests {
         assert!(!m.allows("shrek-model", Proto::Tcp, 443));
         assert!(!m.allows("shrek-model", Proto::Tcp, 80));
         assert!(!m.allows("evil.example", Proto::Tcp, 8100));
+    }
+
+    #[test]
+    fn model_anthropic_reaches_only_the_broker_proxy() {
+        // The hosted-model profile reaches exactly ONE dst — the broker proxy — NEVER Anthropic
+        // directly and NEVER any other port/host. The key + TLS live in the proxy, outside this policy.
+        let m = resolve("model-anthropic").unwrap();
+        assert_eq!(m.rules.len(), 1, "model-anthropic must reach exactly one destination (the proxy)");
+        assert!(m.allows("shrek-model-proxy", Proto::Tcp, 8200));
+        // The box must NOT be able to reach Anthropic (or anything) directly.
+        assert!(!m.allows("api.anthropic.com", Proto::Tcp, 443));
+        assert!(!m.allows("shrek-model-proxy", Proto::Tcp, 443));
+        assert!(!m.allows("shrek-model", Proto::Tcp, 8100)); // not the local-model dst either
     }
 
     #[test]
