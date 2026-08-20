@@ -2,3 +2,13 @@
 name = "swampd"
 version.workspace = true
 edition.workspace = true
+
+# Phase-6 Swamp slice-1: swampd carries the ONE index dependency — rusqlite with BUNDLED SQLite
+# (metadata tables + FTS5), vendored in-tree for a hermetic, auditable offline build. This is the
+# deliberate scoped exception (like tinyjson for the coder, rustls for model-proxy): the sealed
+# planes (gatekeeperd/oniond/shrek-policy) stay dep-free; swampd is the availability-plane daemon
+# (fail-open, swamp.md §10) that owns the search index, so the dep lives EXCLUSIVELY here. `bundled`
+# compiles the SQLite amalgamation (FTS5 enabled) — no host libsqlite3, no runtime version skew.
+[dependencies]
+shrek-policy = { path = "../shrek-policy" }
+rusqlite = { version = "0.31", features = ["bundled"] }
