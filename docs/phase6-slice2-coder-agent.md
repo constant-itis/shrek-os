@@ -153,14 +153,49 @@ toolchain in the rootfs, so the cargo-rootfs track stays parked.
   differently" is not a gate failure.
 - **Unit tests (`crates/coder`):** the JSON request builder, the tool-call parser (incl. malformed ⇒
   fail-closed), and the pass-criterion checker — the pure pieces, no network.
+- **Sealed-VM gate — `image/overlay/usr/lib/shrek/mount-plane-gate` (P6-2 section):** the hermetic image
+  seals the coder + its ldd closure into the dm-verity T2 rootfs (`scripts/seal-t2-artifacts.sh`; the
+  build is offline with `tinyjson` vendored in-tree, `.cargo/config.toml` + `CARGO_NET_OFFLINE`). On the
+  Secure-Boot + dm-verity + lockdown VM, the SAME gatekeeperd argv that `shrek run --egress model-local
+  -- coder` composes asserts, deterministically: the coder is **baked under dm-verity /usr**; a
+  model-driven coder session derives `T-untrust` (baked admit-list authenticated the runsc harness);
+  `model-local` egress **wires into the genuine-T2 constructor**; and — the endpoint-free VM having no
+  resolver — the session **fails closed** so the coder never dials and never runs (no silent open
+  network), leaving no residual egress plumbing. This follows the S3/P6B split: the VM proves
+  *seal + wiring + fail-closed* on the sealed kernel; positive end-to-end reach (the model actually
+  driving the loop) stays the oracle. Result: **94 PASS / 0 FAIL** across the full gate.
 
 ## 7. Deferred / residuals (tracked, not built)
 
 - §8 taint / confused-deputy enforcement — the next security slice for the agent plane.
-- Sealed-VM gate for this slice needs the coder's build deps vendored for the hermetic image build
-  (`cargo vendor`); the acceptance gate (oracle) builds the coder on the host and mounts it in, so it
-  does not. VM confirmation is a hardening follow, not v1 acceptance.
-- Frontier/TLS model endpoints (needs in-sandbox TLS + secret handling) — out of scope; v1 is plain
-  HTTP to a LAN model.
+- ~~Sealed-VM gate needs the coder's build deps vendored~~ — **SHIPPED.** `tinyjson` is vendored in-tree
+  (`vendor/` + `.cargo/config.toml`), STAGE 1 builds offline (`CARGO_NET_OFFLINE`), `seal-t2-artifacts.sh`
+  bakes the coder + closure into the dm-verity T2 rootfs, and the P6-2 VM gate proves seal + wiring +
+  fail-closed on the sealed kernel (94/94). glibc-dynamic + sealed ldd-closure (like tcc); a musl-static
+  one-inode coder remains the documented next step (no rustup/musl toolchain on the build host today).
+- Frontier/TLS model endpoints (needs in-sandbox TLS + secret handling) — the **model-provider
+  abstraction** (Part 2) addresses this; v1 is plain HTTP to a LAN model. The authority-preserving
+  enabler is a broker-side authenticated egress proxy (security-model §7): the key lives in the proxy,
+  the sandbox's sealed egress dst IS the proxy, so no secret and no TLS stack ever enter the T2 box.
 - Rust/cargo toolchain in the rootfs — the coder is a static ELF; multi-language build tasks await the
   separate rootfs-scaling track.
+
+## 8. Frozen v1 workload contract
+
+As of this commit, **`crates/coder` is the FROZEN v1 coding-agent workload contract.** The model-provider
+abstraction (next slice) builds *on top of* it and MUST NOT change any of the following:
+
+- **The authority model is the workload's environment, not the workload's concern.** Authority =
+  `sealed egress-profile ∩ grants`, bounded by the T2 (gVisor) wall, over **NAME-only** egress
+  (`--egress-profile model-local`; the `host:proto:port` set is authored only in the sealed policy). The
+  coder never sees, names, or can widen a destination. A "provider" is nothing more than
+  `(sealed egress-profile NAME, wire-adapter[, broker-side auth-injection point])` — it MUST NOT add any
+  path that widens authority.
+- **The bounded loop + tool surface:** `inspect → model → edit → build/test → return`, exactly four tools
+  (`read_file`, `write_file`, `run`, `done`), a hard `--max-steps` cap that trips fail-closed.
+- **Integrity from the seal, not the input:** the coder is first-party, sealed in the dm-verity rootfs;
+  the ingest admit-list measures the *runsc harness*, so runsc stays the admitted harness and the coder
+  rides in under dm-verity. The coder acts on untrusted input (model tool-calls + project bytes) — the
+  §8 confused-deputy residual is documented-not-built and bounded by the T2 wall + project grant.
+- **Supply chain:** exactly one vendored, zero-transitive dependency (`tinyjson`) scoped to this crate;
+  the sealed planes stay dep-free. Any provider adapter keeps that discipline.
