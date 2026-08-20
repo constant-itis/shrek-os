@@ -10,6 +10,14 @@
 #
 # Usage (from the repo root, after `cargo build --release -p gatekeeperd --features spike`):
 #   sudo bash scripts/p6-egress-baremetal.sh
+#
+# HOST-HARDENING CAVEAT (found on beepboop 2026-08-20): if /run is mounted `noexec` (a Pop!_OS/CIS
+# default), gatekeeperd's rootfs stage (/run/shrek-t2) is non-exec, so gVisor's setup-root remount
+# fails EPERM and the guest binary's PROT_EXEC mmap SIGSEGVs (rc139) — platform-INDEPENDENT, unrelated
+# to kvm or egress; the sealed image's /run is a plain exec tmpfs so production is unaffected. The
+# rootfs stage is shadowed with a fresh exec tmpfs below, which clears setup-root; the guest-binary
+# exec under noexec /run remains a host artifact. BM0 isolates the real question (is the kvm ENGINE
+# usable here) on an exec /tmp bundle, so it passes regardless of /run hardening.
 set -uo pipefail
 
 [ "$(id -u)" = 0 ] || { echo "must run as root:  sudo bash scripts/p6-egress-baremetal.sh"; exit 2; }
@@ -29,9 +37,17 @@ fails=0; pass(){ echo "  PASS $*"; }; fail(){ echo "  FAIL $*"; fails=$((fails+1
 
 WORK=$(mktemp -d /tmp/p6-bm.XXXXXX)
 MNT="$WORK/harness"; IMG="$WORK/harness.img"; ROOTFS="$WORK/rootfs"; ANCHOR="$WORK/anchor"
-LOOP=""; SRV_PID=""; HOSTS_TOUCHED=0
+LOOP=""; SRV_PID=""; HOSTS_TOUCHED=0; T2MNT=0
+# gatekeeperd stages the per-sandbox rootfs under /run/shrek-t2; on a HARDENED host /run is mounted
+# `noexec` (Pop!_OS default), and gVisor's setup-root cannot establish an exec-capable root there
+# (EPERM — platform-independent, unrelated to kvm/egress; the sealed image's /run is exec so production
+# is unaffected). Shadow just Shrek's dir with a fresh exec tmpfs so the smoke exercises the real path.
+if findmnt -no OPTIONS /run 2>/dev/null | grep -q noexec; then
+  mkdir -p /run/shrek-t2 && mount -t tmpfs tmpfs /run/shrek-t2 && T2MNT=1 && echo "note: /run is noexec — shadowed /run/shrek-t2 with a fresh exec tmpfs for the rootfs stage"
+fi
 cleanup(){
   [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null
+  [ "$T2MNT" = 1 ] && { umount /run/shrek-t2 2>/dev/null && rmdir /run/shrek-t2 2>/dev/null; }
   # Belt-and-suspenders: gatekeeperd tears its own egress plumbing down, but sweep any residue by id/name.
   for tb in $(nft list tables 2>/dev/null | grep -o 'shrek_egress_[a-z0-9_]*'); do nft delete table ip "$tb" 2>/dev/null; done
   for ns in $(ip netns list 2>/dev/null | grep -oE 'shrek-bm[0-9]+'); do ip netns del "$ns" 2>/dev/null; done
@@ -39,7 +55,7 @@ cleanup(){
   ip netns del srv 2>/dev/null; ip link del up-egr 2>/dev/null
   umount "$MNT" 2>/dev/null; [ -n "$LOOP" ] && losetup -d "$LOOP" 2>/dev/null
   [ "$HOSTS_TOUCHED" = 1 ] && cp "$WORK/hosts.bak" /etc/hosts   # restore the real /etc/hosts exactly
-  rm -rf "$WORK"
+  rm -rf "$WORK" /run/shrek-t2-debug/bm1 /run/shrek-t2-debug/bm2 2>/dev/null
 }
 trap cleanup EXIT
 
@@ -90,8 +106,30 @@ sleep 0.4
 run(){ # each run under its own delegated scope so the cgroup dance is clean per construction
   systemd-run --scope --quiet -p Delegate=yes \
     --setenv=SHREK_T2_RUNSC="$RUNSC" --setenv=SHREK_T2_ROOTFS="$ROOTFS" --setenv=SHREK_INGEST_ADMIT="$ADMIT" \
+    --setenv=SHREK_T2_DEBUG=1 \
     "$GK" sandbox "$@" 2>&1
 }
+# On a boot failure, dump WHY the runsc sandbox died (SHREK_T2_DEBUG makes runsc write per-subcommand
+# logs to /run/shrek-t2-debug/<id>/; the boot log carries the platform/KVM failure reason).
+dump_runsc_debug(){ local id="$1"; local d="/run/shrek-t2-debug/$id"
+  echo "  ---- runsc debug ($d) ----"
+  if [ -d "$d" ]; then
+    grep -rhiE 'kvm|platform|panic|fatal|error|fail|unsupported|not permitted|denied|eperm|enosys|mmap|ioctl|vcpu|bluepill|sentry' "$d" 2>/dev/null | tail -30 | sed 's/^/    /'
+    echo "  ---- (tail of newest log) ----"; tail -20 "$(ls -t "$d"/* 2>/dev/null | head -1)" 2>/dev/null | sed 's/^/    /'
+  else echo "    (no debug dir — sandbox failed before runsc wrote logs)"; fi
+}
+
+echo
+echo "=== BM0: gVisor --platform=kvm boots + runs a minimal sandbox (is kvm USABLE on this bare-metal host?) ==="
+# Direct runsc on a /tmp (exec) bundle — isolates the platform question from gatekeeperd's /run staging,
+# so a host with a hardened noexec /run still gives a clean yes/no on the kvm engine itself.
+BM0="$WORK/bm0"; mkdir -p "$BM0/rootfs/bin"; cp /usr/bin/busybox "$BM0/rootfs/bin/"; ln -sf busybox "$BM0/rootfs/bin/echo"
+cat > "$BM0/config.json" <<EOF
+{"ociVersion":"1.0.2","process":{"args":["/bin/echo","KVM-BOOT-OK"],"cwd":"/","user":{"uid":0,"gid":0},"capabilities":{}},"root":{"path":"$BM0/rootfs","readonly":true},"mounts":[],"linux":{"namespaces":[{"type":"pid"},{"type":"mount"},{"type":"ipc"},{"type":"uts"}]}}
+EOF
+b0=$("$RUNSC" --root "$BM0/st" --ignore-cgroups --network=none --platform=kvm run --bundle "$BM0" bm0 2>&1)
+"$RUNSC" --root "$BM0/st" delete --force bm0 2>/dev/null
+echo "$b0" | grep -q KVM-BOOT-OK && pass "BM0 ★ gVisor --platform=kvm boots + runs on bare metal → kvm is USABLE here" || fail "BM0 kvm did not boot: $(echo "$b0" | tail -1)"
 
 echo
 echo "=== BM1: authentic harness + C-net + github-https ⇒ REAL --platform=kvm, workload REACHES pinned dst ==="
@@ -103,7 +141,8 @@ echo "$OUT" | grep -q "mode=ingest-harness derived=T-untrust" && pass "BM1 deriv
 echo "$OUT" | grep -q "construct-at=T2 effective=T2" && pass "BM1 construct-at=T2" || fail "BM1 construct-at=T2"
 if echo "$OUT" | grep -q "platform=kvm"; then pass "BM1 ★ select_platform chose REAL kvm (bare metal)"; else fail "BM1 platform!=kvm ($(echo "$OUT" | grep -oE 'platform=[a-z]+' | head -1)) — not exercising kvm"; fi
 echo "$OUT" | grep -q "netstack --network=sandbox" && pass "BM1 netstack egress path" || fail "BM1 netstack path"
-echo "$OUT" | grep -q "SHREK_EGRESS_OK" && pass "BM1 ★ workload REACHED pinned dst from inside gVisor(kvm)" || fail "BM1 no reach marker"
+if echo "$OUT" | grep -q "SHREK_EGRESS_OK"; then pass "BM1 ★ workload REACHED pinned dst from inside gVisor(kvm)"
+else fail "BM1 no reach marker"; echo "$OUT" | grep -iE 'sandbox|kvm|platform|error|EOF' | sed 's/^/    runsc: /'; dump_runsc_debug bm1; fi
 
 echo
 echo "=== BM2: same session, NON-allowed dst ⇒ DROPPED (default-deny under kvm) ==="
