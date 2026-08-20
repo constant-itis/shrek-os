@@ -25,6 +25,7 @@ fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     match argv.first().map(String::as_str) {
         Some("run") => std::process::exit(run(&argv[1..])),
+        Some("find") => std::process::exit(find(&argv[1..])),
         Some("-h") | Some("--help") | None => {
             usage();
             std::process::exit(0);
@@ -58,7 +59,18 @@ fn usage() {
     eprintln!("    --guest-prefix DIR   in-guest mount prefix for grants (default: /srv)");
     eprintln!("    --dry-run            print the composed `gatekeeperd sandbox` argv and exit");
     eprintln!();
-    eprintln!("  (planned) shrek find | history | related | status; shrek audit --agent");
+    eprintln!("  shrek find --session ID [opts] TERMS...");
+    eprintln!("      Query the Swamp for objects in the SESSION's authority only. The session handle");
+    eprintln!("      names a grant record swampd resolves independently; results never include an");
+    eprintln!("      object outside that session's granted filesystem authority.");
+    eprintln!("  Options:");
+    eprintln!("    --session ID         session authority handle (default: $SHREK_SESSION)");
+    eprintln!("    --intent search|discover   full-text (default) or path/name match");
+    eprintln!("    --scope PATH         narrow within the session grants (never widens)");
+    eprintln!("    --limit N            max hits (default 50)");
+    eprintln!("    --socket PATH        swampd query socket (default: $SWAMP_QUERY_SOCK or /run/swamp/query.sock)");
+    eprintln!();
+    eprintln!("  (planned) shrek history | related | status; shrek audit --agent");
 }
 
 /// Parsed `shrek run` request, resolved to what the engine needs.
@@ -295,4 +307,122 @@ fn shquote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+// -------------------------------------------------------------------------------------------------
+// `shrek find` — the Swamp query front door (Phase-6 Swamp slice-1). Sibling of `shrek run`. Owns no
+// authority: it carries a session HANDLE + query to swampd's socket and prints the caller's
+// projection. swampd resolves the session's grants independently and returns ONLY in-authority hits
+// (swamp.md §9). std-only, like the rest of this CLI.
+// -------------------------------------------------------------------------------------------------
+
+fn find(args: &[String]) -> i32 {
+    let mut session = std::env::var("SHREK_SESSION").unwrap_or_default();
+    let mut intent = "search".to_string();
+    let mut scope = String::new();
+    let mut limit = 50usize;
+    let mut socket = std::env::var("SWAMP_QUERY_SOCK").unwrap_or_else(|_| "/run/swamp/query.sock".into());
+    let mut terms: Vec<String> = Vec::new();
+
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--session" => session = it.next().cloned().unwrap_or_default(),
+            "--intent" => intent = it.next().cloned().unwrap_or_default(),
+            "--scope" => scope = it.next().cloned().unwrap_or_default(),
+            "--limit" => {
+                limit = it.next().and_then(|s| s.parse().ok()).unwrap_or(50);
+            }
+            "--socket" => socket = it.next().cloned().unwrap_or_default(),
+            "-h" | "--help" => {
+                usage();
+                return 0;
+            }
+            other if other.starts_with("--") => {
+                eprintln!("shrek find: unknown option {other}");
+                return 2;
+            }
+            other => terms.push(other.to_string()),
+        }
+    }
+
+    if session.is_empty() {
+        eprintln!("shrek find: --session ID required (or set $SHREK_SESSION)");
+        return 2;
+    }
+    if intent != "search" && intent != "discover" {
+        eprintln!("shrek find: --intent must be search|discover");
+        return 2;
+    }
+    if terms.is_empty() {
+        eprintln!("shrek find: no query terms");
+        return 2;
+    }
+
+    use std::io::{BufRead, BufReader, Write};
+    let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+            // Availability plane (swamp.md §10): a down swampd means search is unavailable, which is
+            // the safe direction — never a failure that grants authority. Report and exit non-zero.
+            eprintln!("shrek find: swampd query socket unavailable ({socket}): {e}");
+            return 1;
+        }
+    };
+
+    let scope_field = if scope.is_empty() { "-".to_string() } else { scope };
+    let req = format!(
+        "QUERY 1\nsession {session}\nintent {intent}\nscope {scope_field}\nlimit {limit}\nq {}\nEND\n",
+        terms.join(" ")
+    );
+    if let Err(e) = stream.write_all(req.as_bytes()) {
+        eprintln!("shrek find: write failed: {e}");
+        return 1;
+    }
+    let _ = stream.flush();
+
+    let reader = BufReader::new(&stream);
+    let mut count: Option<usize> = None;
+    let mut printed = 0usize;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("shrek find: read failed: {e}");
+                return 1;
+            }
+        };
+        if let Some(rest) = line.strip_prefix("ERROR ") {
+            eprintln!("shrek find: swampd refused: {rest}");
+            return 1;
+        }
+        if let Some(rest) = line.strip_prefix("RESULT ") {
+            count = rest.trim().parse().ok();
+            continue;
+        }
+        if line == "END" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("hit ") {
+            let (path, snippet) = rest.split_once('\t').unwrap_or((rest, ""));
+            if snippet.is_empty() {
+                println!("{path}");
+            } else {
+                println!("{path}\t{snippet}");
+            }
+            printed += 1;
+        }
+    }
+
+    match count {
+        Some(n) => {
+            eprintln!("shrek find: {n} hit(s) in session {session}'s authority");
+            let _ = printed;
+            0
+        }
+        None => {
+            eprintln!("shrek find: no well-formed response from swampd");
+            1
+        }
+    }
 }

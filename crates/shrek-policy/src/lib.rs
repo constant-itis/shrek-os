@@ -19,6 +19,10 @@
 //!   * [`provenance`] — `Evidence → TrustBand` (B1, slice-7): the band is DERIVED from an
 //!                  integrity-checked measurement of the code object, not asserted by the caller. The
 //!                  pure lattice lives here; gatekeeperd does the measuring.
+//!   * [`swamp`]   — the sealed indexable-domain allow-set + human-only exclusion (Phase-6 Swamp
+//!                  slice-1): the default-DENY read-scope `swampd` Landlocks itself to, and the
+//!                  per-domain ceiling the query gate intersects. Pure policy DATA, resolved
+//!                  independently by `swampd` (swamp.md §5/§9, security-model.md §5).
 //!
 //! What is NOT here (later slices, by design): the deferred B1 evidence STORES (the sealed pin-
 //! manifest for T-pinned, the §4 provenance log for T-untrust — the MVP proves only T-first via the
@@ -31,6 +35,7 @@
 
 pub mod egress;
 pub mod provenance;
+pub mod swamp;
 pub mod tier;
 
 // The tier vocabulary is the crate's original public surface — re-export it flat so existing
