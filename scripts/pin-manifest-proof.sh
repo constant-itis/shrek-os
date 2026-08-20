@@ -137,6 +137,11 @@ if grep -q 'derived=T-pinned' /tmp/out && grep -q 'pinned=true' /tmp/out && grep
 else fail "classification T-pinned" /tmp/out; fi
 if grep -q 'construct-at=T0 island=exec' /tmp/out; then pass "island constructor ran at T0 (exec surface opened for exactly one inode)"; else fail "island route not taken (rc=$RC)" /tmp/out; fi
 if grep -q 'SHREK_GATE: PASS gate=island-ran' /tmp/out; then pass "pinned static-PIE executed from the re-verified exec island"; else fail "pinned bytes did not run" /tmp/out; fi
+# F2 (docs/phase5-consolidation.md §2): the writable island root is MS_NOEXEC while the entry bind laid
+# on top is independently exec-capable. island-ran above is the POSITIVE proof (the pin could not run if
+# the member bind were noexec under the sealed parent); this SANDBOX-ISLAND-FLAGS line is the DIRECT
+# statfs proof (root noexec + entry not-noexec), emitted only after the fail-closed self-check passes.
+if grep -q 'SANDBOX-ISLAND-FLAGS parent-noexec=1 members-exec-ok=1' /tmp/out; then pass "F2: island root NOEXEC, entry mount independently exec-capable (statfs self-check)"; else fail "F2 island-flags self-check absent" /tmp/out; fi
 if grep -q 'SHREK_GATE: PASS gate=island-grant-mmap-exec-eperm' /tmp/out; then pass "mutable grant mmap(PROT_EXEC) ⇒ EPERM (MS_NOEXEC blocks library-load laundering)"; else fail "grant mmap-exec not EPERM" /tmp/out; fi
 if grep -q 'SHREK_GATE: PASS gate=island-grant-execve-denied' /tmp/out; then pass "mutable grant execve ⇒ denied (NOEXEC + Landlock no-EXECUTE)"; else fail "grant execve not denied" /tmp/out; fi
 
@@ -224,6 +229,10 @@ if grep -q 'derived=T-pinned' /tmp/out && grep -q 'pinned=true' /tmp/out && grep
 else fail "dynamic classification" /tmp/out; fi
 if grep -q 'construct-at=T0 island=closure' /tmp/out; then pass "closure island route taken at T0 (N-inode)"; else fail "closure route not taken (rc=$RC)" /tmp/out; fi
 if grep -q 'SHREK_GATE: PASS gate=island-ran' /tmp/out; then pass "pinned DYNAMIC entrypoint executed — full closure (interp + libs) resolved to pinned inodes"; else fail "dynamic pin did not run" /tmp/out; fi
+# F2: island root NOEXEC while entry + every closure member (lib) bind is independently exec-capable.
+# island-ran is the positive proof (ld.so mmap(PROT_EXEC)-loaded the pinned libs under the sealed
+# parent); SANDBOX-ISLAND-FLAGS is the direct statfs proof (root noexec, entry+libs not-noexec).
+if grep -q 'SANDBOX-ISLAND-FLAGS parent-noexec=1 members-exec-ok=1' /tmp/out; then pass "F2: island root NOEXEC, all closure-member mounts independently exec-capable (statfs self-check)"; else fail "F2 island-flags self-check absent under closure" /tmp/out; fi
 if grep -q 'SHREK_GATE: PASS gate=island-grant-mmap-exec-eperm' /tmp/out; then pass "under the closure island, a mutable-grant mmap(PROT_EXEC) still ⇒ EPERM (non-member NOEXEC)"; else fail "grant mmap-exec not EPERM under closure" /tmp/out; fi
 
 echo "== (9) fail-closed: a TAMPERED closure member (wrong interp digest) ⇒ construction fails, bytes never run =="

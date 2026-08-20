@@ -38,9 +38,10 @@ use crate::linux_uapi::{
     SECCOMP_RET_KILL_PROCESS,
 };
 use crate::linux_uapi::{openat2, OpenHow, AT_FDCWD, O_CLOEXEC, O_PATH};
+use crate::linux_uapi::path_is_noexec;
 use crate::mount_plane::{
     mask_with_empty, open_anchor, pin_beneath, relocate_exec_island, relocate_member,
-    seal_noexec_in_place, seal_subtree_noexec, Pinned,
+    seal_noexec_in_place, seal_subtree_noexec, seal_subtree_noexec_writable, Pinned,
 };
 use std::ffi::CString;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -244,6 +245,49 @@ fn island_path(id: &str) -> PathBuf {
 /// `DT_NEEDED`. Each pinned library is bound at `island_lib_path(id)/<soname>` (slice-10).
 fn island_lib_path(id: &str, soname: &str) -> PathBuf {
     PathBuf::from(format!("/run/shrek/{id}/exec/lib/{soname}"))
+}
+
+/// The writable exec-island ROOT for a request (`/run/shrek/<id>/exec`) — parent of both the entry
+/// island and the lib dir. F2 (docs/phase5-consolidation.md §2): this subtree is sealed `MS_NOEXEC`
+/// (writable) BEFORE any member bind, so the only exec-capable surface under it is the set of
+/// re-verified member binds laid on top.
+fn island_root(id: &str) -> PathBuf {
+    PathBuf::from(format!("/run/shrek/{id}/exec"))
+}
+
+/// F2 self-check + proof: after the island is built, assert the writable island ROOT is `MS_NOEXEC`
+/// while the entrypoint island and each re-verified member bind laid on top are **independently
+/// exec-capable** (their own mount lacks `noexec`). Runs in P1 (root, pre-Landlock, `/proc`+`statfs`
+/// available). Fail-closed if the parent seal did not take (would open a laundering surface) or a
+/// member wrongly inherited `noexec` (would break the pinned workload). The emitted audit line is what
+/// the host oracle / sealed-VM gate grep to prove the mount-flag independence directly. `member_libs`
+/// is the SONAME list (empty for a static-PIE island — entry only).
+fn verify_island_exec_flags(id: &str, member_libs: &[String]) -> io::Result<()> {
+    let check = |p: &Path, want_noexec: bool, what: &str| -> io::Result<()> {
+        let c = CString::new(p.to_string_lossy().as_bytes())
+            .map_err(|_| io::Error::from_raw_os_error(22))?;
+        let got = path_is_noexec(&c).map_err(|e| {
+            io::Error::new(e.kind(), format!("island-flags statfs {} ({what}): {e}", p.display()))
+        })?;
+        if got != want_noexec {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("island-flags: {what} {} noexec={got} want={want_noexec}", p.display()),
+            ));
+        }
+        Ok(())
+    };
+    // Parent island root MUST be noexec; entry + each member bind MUST be exec-capable (not noexec).
+    check(&island_root(id), true, "island-root")?;
+    check(&island_path(id), false, "island-entry")?;
+    for so in member_libs {
+        check(&island_lib_path(id, so), false, "island-lib")?;
+    }
+    eprintln!(
+        "SANDBOX-ISLAND-FLAGS parent-noexec=1 members-exec-ok=1 entry=1 libs={}",
+        member_libs.len()
+    );
+    Ok(())
 }
 
 /// Reject anything that is not a static (loader-free) ELF64 — Fork A, slice-9. A `PT_INTERP` program
@@ -483,6 +527,15 @@ fn build_closure_island(spec: &T0Spec, exec_fd: RawFd, closure: &ClosureSpec) ->
     // 2b. Mask loader config so no preload/cache input can steer resolution outside the closure (I8/I9).
     ctx("mask-ld-preload", mask_with_empty(Path::new("/etc/ld.so.preload")))?;
     ctx("mask-ld-cache", mask_with_empty(Path::new("/etc/ld.so.cache")))?;
+    // 2c. F2 (docs/phase5-consolidation.md §2): seal the WRITABLE exec-island root `/run/shrek/<id>/exec`
+    //     `MS_NOEXEC` BEFORE any entry/member bind, so the island directory itself is not an
+    //     executable-mapping surface. This is an `MS_NOEXEC` barrier independent of — and co-load-bearing
+    //     with — Landlock's `MAKE_REG`/`WRITE` deny-all: even if a byte reached the island dir, it could
+    //     not be `mmap(PROT_EXEC)`-loaded. Fresh member binds placed on top (steps 3–4) each re-add exec
+    //     for exactly their one re-verified inode (same seal-then-reopen-per-inode pattern as `/usr`).
+    let iroot = island_root(&spec.id);
+    ctx("mkdir-island-lib", std::fs::create_dir_all(iroot.join("lib")))?;
+    ctx("seal-island-root", seal_subtree_noexec_writable(&iroot))?;
     // 3. The entrypoint exec island (reuse the slice-9 machinery unchanged) — exec-capable, re-verified
     //    (dev,ino)+fs-verity against der.exec_fd.
     ctx("relocate-island", relocate_exec_island(Path::new(&spec.workload[0]), exec_fd, &island_path(&spec.id)))?;
@@ -508,6 +561,10 @@ fn build_closure_island(spec: &T0Spec, exec_fd: RawFd, closure: &ClosureSpec) ->
     }
     // 5. Authenticate the entrypoint's loader inputs against the pinned closure (PT_INTERP + DT_NEEDED).
     ctx("authenticate-closure", authenticate_closure(&island_path(&spec.id), closure))?;
+    // 6. F2 self-check + proof: parent island root is `noexec`; the entry island and every member bind
+    //    are independently exec-capable (their own mount lacks `noexec`). Fail-closed on any mismatch.
+    let libs: Vec<String> = closure.libs.iter().map(|l| l.name.clone()).collect();
+    ctx("verify-island-flags", verify_island_exec_flags(&spec.id, &libs))?;
     Ok(())
 }
 
@@ -526,6 +583,12 @@ fn build_exec_island(spec: &T0Spec, exec_fd: RawFd) -> io::Result<()> {
         let p = pin_beneath(&anchor, name).map_err(|e| io::Error::new(e.kind(), format!("pin-grant {name}: {e}")))?;
         ctx(&format!("seal-grant {name}"), seal_noexec_in_place(&p, &spec.anchor.join(name)))?;
     }
+    // 1b. F2 (docs/phase5-consolidation.md §2): seal the writable exec-island root `MS_NOEXEC` before the
+    //     entry bind, so the island directory is not an executable-mapping surface (independent of
+    //     Landlock's deny-all). The static path has no lib dir — entry is the only member.
+    let iroot = island_root(&spec.id);
+    ctx("mkdir-island-root", std::fs::create_dir_all(&iroot))?;
+    ctx("seal-island-root", seal_subtree_noexec_writable(&iroot))?;
     // 2. Bind the pinned entrypoint inode onto its island, re-verify (dev,ino)+fs-verity digest, and
     //    harden RO|NOSUID|NODEV WITHOUT NOEXEC (the one deliberate exception, for this one inode). The
     //    entrypoint is re-opened by path IN THIS ns (bind sources must be ns-local) and re-verified
@@ -533,6 +596,9 @@ fn build_exec_island(spec: &T0Spec, exec_fd: RawFd) -> io::Result<()> {
     ctx("relocate-island", relocate_exec_island(Path::new(&spec.workload[0]), exec_fd, &island_path(&spec.id)))?;
     // 3. Static-PIE only (Fork A): reject a PT_INTERP entrypoint before it can run.
     ctx("static-pie-check", reject_if_dynamic(&island_path(&spec.id)))?;
+    // 4. F2 self-check + proof: parent island root is `noexec`; the entry bind is independently
+    //    exec-capable. Fail-closed on any mismatch.
+    ctx("verify-island-flags", verify_island_exec_flags(&spec.id, &[]))?;
     Ok(())
 }
 

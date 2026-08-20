@@ -416,6 +416,32 @@ pub fn seal_subtree_noexec(path: &Path) -> io::Result<()> {
     .map_err(|e| lbl("remount-noexec", e))
 }
 
+/// F2 (docs/phase5-consolidation.md §2) — force an existing subtree `MS_NOEXEC` (plus `NOSUID|NODEV`)
+/// **WITHOUT `MS_RDONLY`**, in the caller's private mount ns. Unlike [`seal_subtree_noexec`] this keeps
+/// the subtree WRITABLE, because it is applied to the exec-island root (`/run/shrek/<id>/exec`) BEFORE
+/// the entrypoint/member binds are laid on top — those binds must still be able to create their target
+/// files under it. The `NOEXEC` makes the writable island directory a non-executable-mapping surface
+/// (so even a byte the workload could somehow place there cannot be `mmap(PROT_EXEC)`-loaded), an
+/// `MS_NOEXEC` barrier that is independent of, and co-load-bearing with, Landlock's `MAKE_REG`/`WRITE`
+/// deny-all. Each re-verified member bind placed AFTER this call is a fresh mount that re-adds exec for
+/// exactly its one inode (see [`relocate_member`] / [`relocate_exec_island`]) — the same seal-then-
+/// re-open-per-inode pattern already used for `/usr` (`seal_subtree_noexec`).
+pub fn seal_subtree_noexec_writable(path: &Path) -> io::Result<()> {
+    let lbl = |s: &str, e: io::Error| io::Error::new(e.kind(), format!("{s}: {e}"));
+    let p = path_cstr(path)?;
+    // Recursive self-bind so the flags attach to `path` as its own mount (no submounts exist yet — the
+    // member binds are placed afterwards — so MS_REC has nothing to wrongly NOEXEC).
+    mount(&p, &p, None, MS_BIND | MS_REC, None).map_err(|e| lbl("bind-island-root", e))?;
+    mount(
+        &p,
+        &p,
+        None,
+        MS_BIND | MS_REC | MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC,
+        None,
+    )
+    .map_err(|e| lbl("remount-island-noexec", e))
+}
+
 /// slice-10 — mask a loader-config file (`/etc/ld.so.preload`, `/etc/ld.so.cache`) by binding an empty
 /// read-only file over it in the caller's private mount ns, so the dynamic loader gets NO preload or
 /// cache input that could steer resolution outside the sealed closure (I8/I9, v1). A path already

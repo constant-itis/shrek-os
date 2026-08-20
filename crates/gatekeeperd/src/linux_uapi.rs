@@ -23,6 +23,7 @@ pub const SYS_IOCTL: i64 = 16;
 pub const SYS_FORK: i64 = 57;
 pub const SYS_GETSOCKOPT: i64 = 55;
 pub const SYS_PRCTL: i64 = 157;
+pub const SYS_STATFS: i64 = 137;
 pub const SYS_MOUNT: i64 = 165;
 pub const SYS_UMOUNT2: i64 = 166;
 pub const SYS_UNSHARE: i64 = 272;
@@ -355,6 +356,23 @@ pub fn open_rdwr(path: &CStr) -> io::Result<OwnedFd> {
 /// result (an api-version int, or a new VM fd) or the errno.
 pub fn ioctl(fd: RawFd, request: u64, arg: u64) -> io::Result<i64> {
     res(unsafe { sc3(SYS_IOCTL, fd as i64, request as i64, arg as i64) })
+}
+
+/// `ST_NOEXEC` mount flag as reported in `statfs.f_flags` (linux/statfs.h). Set when the mount the
+/// path resolves to was mounted `MS_NOEXEC` — the flag that blocks `execve` AND file-backed
+/// `mmap(PROT_EXEC)` on that mount (finding F2's executable-mapping boundary).
+pub const ST_NOEXEC: u64 = 8;
+
+/// Return whether the mount that `path` resolves to carries `MS_NOEXEC`, via `statfs(2)`. Used by the
+/// exec-island self-check (finding F2) to assert the writable island subtree is `noexec` while each
+/// re-verified member bind laid on top is independently exec-capable. On x86-64 `struct statfs` is 120
+/// bytes and `f_flags` is the 11th 8-byte word (offset 80). Fails closed on any errno (the caller
+/// treats an unreadable/absent mount as a broken island and refuses).
+pub fn path_is_noexec(path: &CStr) -> io::Result<bool> {
+    // 15 * 8 = 120 bytes = sizeof(struct statfs) on x86-64; f_flags is word index 10 (byte offset 80).
+    let mut buf = [0u64; 15];
+    res(unsafe { sc2(SYS_STATFS, path.as_ptr() as i64, buf.as_mut_ptr() as i64) })?;
+    Ok(buf[10] & ST_NOEXEC != 0)
 }
 
 /// `struct fsverity_digest` (linux/fsverity.h): the algorithm id, the digest length, then the digest

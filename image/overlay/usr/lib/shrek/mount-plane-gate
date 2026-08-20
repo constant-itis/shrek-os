@@ -310,6 +310,11 @@ else
           printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" \
             && emit "PASS S7-$g" || { emit "FAIL S7-$g"; s6fail=1; }
         done
+        # F2 (docs/phase5-consolidation.md §2): island root NOEXEC, entry mount independently
+        # exec-capable — the fail-closed statfs self-check emits this only when the invariant holds.
+        printf '%s\n' "$OUT" | grep -q 'SANDBOX-ISLAND-FLAGS parent-noexec=1 members-exec-ok=1' \
+          && emit "PASS S7-island-flags (root NOEXEC, entry mount independently exec-capable)" \
+          || { emit "FAIL S7-island-flags (self-check absent)"; s6fail=1; }
 
         # anti-spoof: the one-byte-different second verity inode is not pinned ⇒ T-hostile ⇒ no island is
         # constructed and the pinned bytes never run. Its T0 request is a downgrade-below-floor(T2)
@@ -398,6 +403,11 @@ else
           printf '%s\n' "$OUT" | grep -q "^SHREK_GATE: PASS gate=$g" \
             && emit "PASS S8-$g" || { emit "FAIL S8-$g"; s8fail=1; }
         done
+        # F2: island root NOEXEC while entry + every closure-member (lib) mount is independently
+        # exec-capable — the statfs self-check line proves the mount-flag independence directly.
+        printf '%s\n' "$OUT" | grep -q 'SANDBOX-ISLAND-FLAGS parent-noexec=1 members-exec-ok=1' \
+          && emit "PASS S8-island-flags (root NOEXEC, all closure-member mounts independently exec-capable)" \
+          || { emit "FAIL S8-island-flags (self-check absent under closure)"; s8fail=1; }
         # ---- negative: a tampered (byte-different, unpinned) interp inode ⇒ fail closed ----
         # The entrypoint digest still matches (⇒ derived=T-pinned), but relocate_member re-measures the
         # interp against the baked digest and rejects the tampered bytes ⇒ island never completes.
