@@ -282,6 +282,65 @@ pub struct T2Spec {
     /// legacy single-`--egress` behavior. Per-destination identity (the swamp broker's no-SNAT carve-out)
     /// survives the union because it is keyed on the sealed host name, not on being the sole profile.
     pub egress: Vec<&'static EgressProfile>,
+    /// Phase-8 slice-1: the decision-time display projection (subject + re-checked tier/trust/caps/
+    /// profile + model mode). `Some` only on the decision-plane path; when the session is swamp-capable
+    /// gatekeeperd writes the effective-authority view (`session_view`) from THIS + the realized spec,
+    /// alongside `authority_record`/`net_binding`. `None` (e.g. legacy T2 tests) writes no view.
+    pub session_meta: Option<crate::session_view::SessionMeta>,
+}
+
+/// Map a sealed egress profile NAME to its model provider label for the view's `model.provider`
+/// (derived from the sealed name, never from the caller's workload argv). `-` for a non-model profile.
+fn provider_of(profile_name: &str) -> &'static str {
+    match profile_name {
+        "model-anthropic" => "anthropic",
+        "model-claude-cli" => "claude-cli",
+        "model-codex-cli" => "codex",
+        "model-local" => "local",
+        _ => "-",
+    }
+}
+
+/// Build the effective-authority view from the re-checked decision (`meta`) + the realized spec. The
+/// `grants`/`egress` fields are projections of the SAME decision that wrote `authority_record`/
+/// `net_binding`, so the display can never diverge from enforcement truth (docs §2.3). The MODEL
+/// egress profile is the first non-swamp-query profile (a session may hold model + swamp-query).
+fn build_session_view(
+    spec: &T2Spec,
+    meta: &crate::session_view::SessionMeta,
+    grant_paths: &[PathBuf],
+) -> crate::session_view::SessionView {
+    let model = spec.egress.iter().find(|p| !p.grants_swamp_query()).or_else(|| spec.egress.first());
+    let (egress_profile, egress_dst) = match model {
+        Some(p) => {
+            let dst = p.rules.first().map(|r| format!("{}:{}", r.host, r.port)).unwrap_or_else(|| "-".into());
+            (p.name.to_string(), dst)
+        }
+        None => ("-".into(), "-".into()),
+    };
+    let provider = provider_of(&egress_profile).to_string();
+    // Canonicalize grant paths so the view matches authority_record's canonical form (C2 parity).
+    let grants: Vec<String> = grant_paths
+        .iter()
+        .map(|g| std::fs::canonicalize(g).unwrap_or_else(|_| g.clone()).to_string_lossy().into_owned())
+        .collect();
+    let swamp = is_swamp_capable(&spec.egress);
+    crate::session_view::SessionView {
+        session: spec.id.clone(),
+        subject: meta.subject.clone(),
+        tier: meta.tier.clone(),
+        trust: meta.trust.clone(),
+        caps: meta.caps.clone(),
+        profile: meta.profile.clone(),
+        grants,
+        egress_profile,
+        egress_dst,
+        workload: spec.workload.clone(),
+        provider,
+        model_mode: if meta.model_mode.is_empty() { "deterministic".into() } else { meta.model_mode.clone() },
+        semantic_available: swamp,
+        semantic_tier: if swamp { "fts+semantic".into() } else { "fts".into() },
+    }
 }
 
 /// Proper JSON string escaping: backslash, double-quote, and control characters (a raw newline/tab in
@@ -647,6 +706,18 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
             "gatekeeperd/t2_plane: swamp session identity committed cip={cont_ip} grants={} (authority record + cont_ip→H binding written, SHREK_SESSION injected)",
             grant_paths.len()
         );
+        // Phase-8 slice-1: write the effective-authority VIEW from the same re-checked decision. This is
+        // a display projection, NOT part of the fail-closed enforcement transaction above (authority_
+        // record + net_binding remain the enforcement truth) — a view-write failure logs but does not
+        // abort the session; its absence only makes `shrek session status` fail closed. Keyed by the
+        // caller session id (spec.id), it is removed on every teardown path below (C3).
+        if let Some(meta) = &spec.session_meta {
+            let view = build_session_view(spec, meta, &grant_paths);
+            match crate::session_view::write_view(&crate::session_view::view_dir(), &view) {
+                Ok(p) => eprintln!("gatekeeperd/t2_plane: session-view written {} (effective tier={} egress={})", p.display(), view.tier, view.egress_profile),
+                Err(e) => eprintln!("gatekeeperd/t2_plane: WARN session-view write failed (display only, session unaffected): {e}"),
+            }
+        }
     }
 
     // Drive runsc directly (no shim, no containerd). Network: a granted egress session joins the
@@ -702,6 +773,11 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
             let _ = net_binding::remove_binding(&net_binding::binding_dir(), n.cont_ip);
         }
         let _ = authority_record::remove_record(&authority_record::authority_dir(), h);
+        // Phase-8 slice-1: remove the effective-authority view (C3 — no residual). Idempotent; keyed
+        // by the caller session id it was written under, and only present when session_meta was set.
+        if spec.session_meta.is_some() {
+            let _ = crate::session_view::remove_view(&crate::session_view::view_dir(), &spec.id);
+        }
     }
     // Slice-1b: tear the egress netns down (deletes the nft table + veth + netns). Leaves NO residual
     // plumbing — the fail-closed default is "no network".
@@ -768,6 +844,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
             egress: vec![],
+            session_meta: None,
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
         let j = build_config_json(&spec, &grants, &spec.rootfs, None, None);
@@ -806,6 +883,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
             egress: vec![],
+            session_meta: None,
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
         let h = mint_session_handle().expect("urandom available in test env");
@@ -850,6 +928,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
             egress: vec![], // config shape is driven by netns_path, not this field
+            session_meta: None,
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
         let ns_path = net_plane::SandboxNet::for_id("coder").ns_path();
@@ -878,6 +957,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
             egress: vec![],
+            session_meta: None,
         };
         let grants = vec![
             GrantMount { name: "deps".into(), source: PathBuf::from("/srv/deps"), rw: false },
@@ -909,6 +989,7 @@ mod tests {
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
             egress: vec![],
+            session_meta: None,
         };
         let grants = vec![
             GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },

@@ -14,4 +14,5 @@ pub mod pin_manifest;
 pub mod proc_plane;
 pub mod provenance_plane;
 pub mod sandbox;
+pub mod session_view;
 pub mod t2_plane;

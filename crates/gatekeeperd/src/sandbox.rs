@@ -354,6 +354,11 @@ pub fn cli(args: &[String]) -> i32 {
     let mut rw_grant: Option<String> = None;
     let mut build_grant: Option<String> = None;
     let mut ingest_harness = false;
+    // Phase-8 slice-1: attested-subject stand-in (display only) + model mode for the effective-authority
+    // view. Both are NON-authoritative: `--subject` is recorded verbatim (real attestation is a later
+    // slice); `--live` only labels the view's model.mode (the deterministic gate omits it).
+    let mut subject: Option<String> = None;
+    let mut live = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -376,6 +381,9 @@ pub fn cli(args: &[String]) -> i32 {
             // Repeatable (Phase-6 Swamp slice-2): each `--egress-profile NAME` adds one sealed profile;
             // the decision plane resolves each independently and unions the resolved endpoints.
             "--egress-profile" => { i += 1; if let Some(v) = args.get(i) { egress_names.push(v.clone()); } }
+            // Phase-8 slice-1: the agent-session display projection inputs (non-authoritative).
+            "--subject" => { i += 1; subject = args.get(i).cloned(); }
+            "--live" => { live = true; }
             "--" => { workload = args[i + 1..].to_vec(); break; }
             other => { eprintln!("gatekeeperd/sandbox: unknown arg {other}"); return 2; }
         }
@@ -519,6 +527,19 @@ pub fn cli(args: &[String]) -> i32 {
                         "SANDBOX-DECISION cleared construct-at=T2 effective=T2 platform={} why=\"{}\" requested={} trust={} caps={} profile={} egress={egr}",
                         choice.platform.flag(), choice.why, requested.label(), trust.label(), caps.label(), profile.label()
                     );
+                    // Phase-8 slice-1: project the RE-CHECKED decision (effective tier + the derived
+                    // trust band + the re-checked caps/profile) into the session-view meta — the SAME
+                    // authoritative values used to construct, never the caller's requested argv. The
+                    // subject stand-in is recorded verbatim (display only). t2_plane writes the view from
+                    // this + the realized grants/egress alongside authority_record/net_binding.
+                    let session_meta = Some(crate::session_view::SessionMeta {
+                        subject: subject.clone().unwrap_or_else(|| "-".into()),
+                        tier: effective.label().to_string(),
+                        trust: trust.label().to_string(),
+                        caps: caps.label().to_string(),
+                        profile: profile.label().to_string(),
+                        model_mode: if live { "live".into() } else { "deterministic".into() },
+                    });
                     let t2 = T2Spec {
                         id: id.clone(),
                         anchor: anchor.clone(),
@@ -532,6 +553,7 @@ pub fn cli(args: &[String]) -> i32 {
                         mem_max: DEFAULT_MEM_MAX,
                         pids_max: DEFAULT_PIDS_MAX,
                         egress: t2_egress,
+                        session_meta,
                     };
                     return match t2_plane::construct(&t2) {
                         Ok(code) => code,

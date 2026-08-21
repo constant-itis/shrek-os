@@ -403,6 +403,13 @@ fn main() {
     if argv.first().map(String::as_str) == Some("net-binding") {
         std::process::exit(gatekeeperd::net_binding::cli(&argv[1..]));
     }
+    // `session-view` (Phase-8 slice-1) writes/removes the ephemeral effective-authority view record.
+    // Production writes it inline in the T2 construct (t2_plane), from the same re-checked decision as
+    // authority-record/net-binding; this verb exists for the host-side agentd-session oracle (C1–C3)
+    // to drive the writer directly for format/permission parity — display projection, not enforcement.
+    if argv.first().map(String::as_str) == Some("session-view") {
+        std::process::exit(gatekeeperd::session_view::cli(&argv[1..]));
+    }
     // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Compiled out of
     // production/default builds — this whole dispatch arm exists ONLY under `--features spike` (finding
     // F1). A default build has no `pin-verity` verb: the argument falls through to the broker path and
