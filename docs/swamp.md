@@ -117,7 +117,16 @@ install carries none of its weight.
 |-------|-------|--------|------|
 | Metadata | physical + structural map | SQLite tables | mandatory core |
 | FTS | full-text search | SQLite FTS5 | opt |
-| Vector | semantic similarity | separate vector store | opt |
+| Vector | semantic similarity | SQLite `chunks`/`vectors` tables (BLOB) | opt |
+
+> **Slice-4 amendment (Fork F3).** The vector index is *not* a separate engine/store; it is a pair of
+> logical tables (`chunks`, `vectors`) in the SAME SQLite store, empty on a metadata/FTS install (light
+> by default — a core install carries none of their weight). This keeps the sealed base free of any
+> vector-DB dependency: storage is BLOBs in the already-bundled sqlite and similarity is `std` f32
+> cosine, so the semantic tier links **zero new crates in-base**. Scope-first brute-force similarity over
+> the authorized candidate set is the v1 search; a scale ANN index is deferred and, if ever added, must
+> be scope-partitioned — never a global index filtered after (`phase6-swamp-slice4-semantic-provider.md`
+> §1.1/§5).
 
 The filesystem stays authoritative. The index is a *cache of derived facts about* the
 filesystem; if it and the filesystem disagree, the filesystem wins and the record is repaired
@@ -254,6 +263,18 @@ separate packages/layers a person adds by need — and can enable per domain.
   pattern graph is itself an asset that earns its own threat pass first.
 - **Modularity stops at the wall.** Every tier, installed or not, runs under the §5 allow-set.
   What is modular is *which enrichment runs*; that `swampd` is a confined subject is not.
+
+**Realization (slice-4, SWAMP SEMANTIC).** The semantic tier ships as a pluggable embedding-provider
+abstraction (`crates/swampd/src/embed.rs`: a versioned `EmbeddingBackend` interface + a socket-framed
+backend) over a mandatory FTS floor. Per-domain enablement is a `semantic` flag on each sealed
+`IndexableDomain` (`shrek-policy::swamp`) — `projects`/`documents` on, `downloads` off — so "semantic
+over ~/Projects, metadata over ~/Media" is a first-class config. Crucially, the base stays network-free:
+`swampd` never dials a provider; it speaks a tiny plaintext binary framing to a LOCAL socket, and the
+**off-image** `swamp-embed-proxy` is the only party that reaches the LAN provider over the gated egress
+plane (the model-proxy pattern; `swampd`'s `handled_access_net` stays `0`). Missing/unreachable/erroring
+provider ⇒ semantic & hybrid retrieval degrade to lexical FTS with an explicit `semantic unavailable`
+capability signal — never disabling Swamp (§10). No model weights or inference deps enter the sealed
+base. Full design + threat model: `docs/phase6-swamp-slice4-semantic-provider.md`.
 
 ## 9. Query API — caller-scoped, authorize-before-retrieve
 

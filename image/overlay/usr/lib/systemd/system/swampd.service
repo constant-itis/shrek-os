@@ -12,6 +12,7 @@
 Description=Shrek swampd (filesystem intelligence — disabled by default; Landlock-confined)
 Documentation=file:///usr/share/doc/shrek/swamp.md
 Documentation=file:///usr/share/doc/shrek/phase6-swamp-slice3-live-persistent.md
+Documentation=file:///usr/share/doc/shrek/phase6-swamp-slice4-semantic-provider.md
 # The index lives on the dedicated persistent partition (var-lib-swamp.mount); swampd must not start
 # until it is mounted, or it would write the index onto the volatile tmpfs /var and lose it on reboot.
 Requires=var-lib-swamp.mount
