@@ -144,9 +144,12 @@ enters the sealed image — the oracle is the gate.
 - **Token-refresh under a read-only `auth.json`.** The credential file is ro-bound; a short inference call
   uses the existing access token, but if a refresh is ever needed it would fail. A refresh path (or a
   pre-task health probe) is a hardening follow.
-- **Stateful `--resume` session.** v1 flattens the transcript per call (as slice-4). A `--resume` session
-  preserving structured turns is a hardening follow — best done ONCE across both CLI brokers now that the
-  pattern is proven for two providers.
+- **Stateful `--resume` session.** ~~v1 flattens the transcript per call (as slice-4).~~ **DELIVERED in
+  slice-7** ([`phase6-slice7-cross-provider-session.md`](phase6-slice7-cross-provider-session.md)): an
+  opaque `X-Shrek-Session` handle maps to a native `codex exec resume` session (state in a broker-owned
+  per-session dir bound rw into the sterile view, `--ephemeral` dropped on sessioned calls), forwarding
+  only the new tail turn — designed ONCE across both CLI brokers, with the flatten path kept as the
+  correctness fallback.
 - **A shared `broker-core` lib.** `claude-broker` and `codex-broker` now share the HTTP reader, messages
   parse/wrap, and breadcrumb machinery. Factoring a common lib (without merging the distinct egress
   identities) is a clean later refactor once the duplication is proven stable.

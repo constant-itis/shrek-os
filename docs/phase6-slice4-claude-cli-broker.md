@@ -112,9 +112,11 @@ image, so the endpoint-free sealed-VM path is unaffected — the oracle is the g
 
 ## 6. Deferred / residuals (tracked, not built)
 
-- **Stateful `--resume` session.** v1 flattens the transcript to a text prompt per call. A `--resume`
-  session id that preserves structured turns (fewer tokens, closer to the messages API's own statefulness)
-  is a hardening follow, not needed for the bounded coder loop.
+- **Stateful `--resume` session.** ~~v1 flattens the transcript to a text prompt per call.~~ **DELIVERED
+  in slice-7** ([`phase6-slice7-cross-provider-session.md`](phase6-slice7-cross-provider-session.md)): an
+  opaque `X-Shrek-Session` handle maps to a broker-minted `claude --session-id`/`--resume` native session
+  (fewer tokens, closer to the messages API's own statefulness), forwarding only the new tail turn, with
+  the flatten path kept as the correctness fallback.
 - **The LIVE smoke** is wired but opt-in; a real end-to-end against the subscription is a separate,
   non-gating, quota-spending run.
 - **A self-contained / musl-static broker** — v1 is glibc-dynamic + one vendored dep, like the coder; a
