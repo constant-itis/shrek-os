@@ -25,3 +25,12 @@
 # Phase-5 slice-6: the T2 gVisor ExtraTree (pinned runsc ~100MB + busybox rootfs), assembled at build
 # time by scripts/seal-t2-artifacts.sh and sealed via 30-t2-gvisor.conf. Build artifact, not source.
 /image/mkosi.extra.t2/
+# Desktop Bootstrap-0: EPHEMERAL staged layer artifacts. ui/ is the source of record (staged into the
+# overlay at build); the Quickshell binary + its Qt QML plugins are build products. The tracked overlay
+# source is only the wrapper, sway.config, and layer marker.
+/layers/shrek-desktop/overlay/usr/share/shrek/ui/
+/layers/shrek-desktop/overlay/usr/bin/quickshell
+/layers/shrek-desktop/overlay/usr/lib/x86_64-linux-gnu/
+/layers/shrek-desktop/overlay/usr/lib/qt6/
+/layers/shrek-desktop/overlay/usr/share/qt6/
+/layers/shrek-desktop/overlay/usr/share/quickshell/

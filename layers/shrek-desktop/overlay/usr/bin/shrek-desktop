@@ -1,0 +1,17 @@
+#!/bin/sh
+# shrek-desktop — Bootstrap-0 desktop session launcher.
+#
+# Sets the minimum Wayland env and execs Sway; Sway's config execs Quickshell, which owns ALL shell
+# surfaces (bar / launcher / work-drawer). This is deliberately NOT a full login/session stack (no
+# greetd, no UWSM) — Bootstrap 0 proves the runtime, not the login flow. The caller may override any
+# env (the desktop smoke test sets the headless/software path).
+set -eu
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+# Qt Quick renders QML with no GPU/EGL under the software backend — keeps the shell GPU-free.
+export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+
+exec sway -c /usr/share/shrek/desktop/sway.config "$@"

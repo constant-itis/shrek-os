@@ -1,0 +1,21 @@
+# Desktop Bootstrap-0 version pins — mirrors image/supply/gvisor.pin intent.
+# Consumed by scripts/build-desktop-layer.sh + scripts/desktop-smoke.sh.
+# NEVER track main/latest in a real build — pin the EXACT tag. As with gvisor.pin, an AUTO
+# resolution is permitted ONCE for bring-up; the resolved value is then recorded here.
+
+[desktop]
+distribution = "debian"
+release      = "trixie"
+
+[quickshell]
+# Source-built (unpackaged in Debian). Mirror: github.com/quickshell-mirror/quickshell.
+# Qt-runtime-coupled → must be compiled against the same Qt6 it will load (staged-binary delivery,
+# NOT a portable supply-pin). See docs/desktop-bootstrap-0.md §Delivery.
+repo           = "https://github.com/quickshell-mirror/quickshell"
+quickshell_tag = "AUTO-FIRST-BUILD"   # bring-up: script resolves newest tag + logs it to record here
+
+[uwsm]
+# trixie-backports only (shell-architecture.md caveat); NOT a stable-suite guarantee.
+# Not wired in Bootstrap 0 (no session/login stack yet) — pinned here for the next slice.
+uwsm_suite   = "trixie-backports"
+uwsm_version = "0.26.4"                # VERIFY at build
