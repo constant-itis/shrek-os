@@ -725,6 +725,51 @@ else
           fi
         fi
 
+        # ---- Phase-6 Swamp slice-4: the SEMANTIC TIER (embedding-provider abstraction + FTS floor) ----
+        # docs/phase6-swamp-slice4-semantic-provider.md. The full semantic path (available / degrade-to-
+        # lexical / authority-before-vector) is oracle territory (scripts/swamp-broker-find-proof.sh
+        # section E, 46 gates, with a hermetic provider + the off-image swamp-embed-proxy). On the sealed
+        # image we prove what only the seal can: (a) the seal is not stale w.r.t. slice-4 — the IN-BASE
+        # surface (the embedding-provider seam, the chunks/vectors store, the `semantic` wire, the coder
+        # note) is sealed; (b) NO model weights / inference deps / HTTP egress entered the base — the
+        # swamp-embed-proxy is OFF-image and ABSENT; and (c) the KEY on-image guarantee: with NO provider
+        # present (the proxy + model are off-image and never in the VM) the sealed swampd FAILS CLOSED to
+        # the FTS floor and reports semantic=unavailable — never unavailable, never more authority.
+        if grep -aq 'SWAMP_EMBED_SOCKET' "$SWAMPD_BIN" && grep -aq 'vectors' "$SWAMPD_BIN"; then
+          emit "PASS P62-swamp4 sealed swampd carries the semantic-tier surface (provider seam + vector store)"
+        else
+          emit "FAIL P62-swamp4 sealed swampd lacks the semantic tier (stale seal — rebuild the image)"; p6fail=1
+        fi
+        if grep -aq 'semantic tier ENABLED' "$SWAMPD_BIN"; then
+          emit "PASS P62-swamp4 sealed swampd carries the provider-channel wiring (SWAMP_EMBED_SOCKET-gated)"
+        else
+          emit "FAIL P62-swamp4 sealed swampd lacks the provider-channel wiring (stale seal)"; p6fail=1
+        fi
+        if grep -aq 'semantic=' /usr/lib/shrek/t2-rootfs/usr/bin/coder; then
+          emit "PASS P62-swamp4 sealed coder surfaces the semantic-availability note to the model"
+        else
+          emit "FAIL P62-swamp4 sealed coder lacks the semantic note (stale seal — re-run seal-t2-artifacts)"; p6fail=1
+        fi
+        # The off-image proxy carries the ONLY HTTP/embedding egress; it must be ABSENT from the sealed base.
+        if [ ! -e /usr/libexec/shrek/swamp-embed-proxy ] && [ ! -e /usr/bin/swamp-embed-proxy ]; then
+          emit "PASS P62-swamp4 off-image proxy ABSENT from the sealed base (no HTTP/embedding egress in-image)"
+        else
+          emit "FAIL P62-swamp4 swamp-embed-proxy leaked into the sealed image (must be off-image)"; p6fail=1
+        fi
+        # Behavioural fail-closed on the REAL sealed swampd: NO provider configured ⇒ the FTS floor is
+        # built AND semantic is reported unavailable — the exact 'no provider present in the VM' guarantee.
+        SW4H=/var/lib/swamp-gate4-home; SW4ST="$SWPART/gate4-reconcile"; SW4AU=/run/shrek/authority
+        rm -rf "$SW4H" "$SW4ST"; mkdir -p "$SW4H/Projects/proj" "$SW4ST" "$SW4AU"
+        echo 'sealed swamp slice4 token SEAL4TOKEN' > "$SW4H/Projects/proj/a.txt"
+        env SWAMP_HOME="$SW4H" SWAMP_STATE_DIR="$SW4ST" SWAMP_AUTHORITY_DIR="$SW4AU" \
+          "$SWAMPD_BIN" reconcile >/tmp/sw4.log 2>&1
+        if grep -q 'objects=' /tmp/sw4.log && grep -q 'semantic=unavailable' /tmp/sw4.log; then
+          emit "PASS P62-swamp4 no-provider reconcile builds the FTS floor AND reports semantic=unavailable (fails closed)"
+        else
+          emit "FAIL P62-swamp4 no-provider reconcile ($(tr -d '\n' </tmp/sw4.log | tail -c 160))"; p6fail=1
+        fi
+        rm -rf "$SW4H" "$SW4ST"
+
         P62TASK="Make the program print REAL-COMPILE-RUN-OK and exit 42."
         OUT62=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
                   --caps C-net --profile C-net --ingest-harness --id p62 --anchor "$P6SRV" \

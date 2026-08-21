@@ -39,13 +39,25 @@
 #   D6 persistence   — the DB survives a swampd restart, and the startup reconcile catches a CREATE and a
 #                      DELETE that happened while swampd was DOWN (offline-change reconciliation).
 #
+# Slice-4 adds the SEMANTIC-TIER gates (a hermetic canned embeddings provider bridged by the off-image
+# swamp-embed-proxy; swampd stays network-free), proving the abstraction + graceful degradation:
+#   E0/E5 channel    — the off-image proxy serves its local socket and swampd wires the provider channel.
+#   E1 available     — a healthy routed response reports `semantic available`.
+#   E2 FTS floor     — the in-scope hit is still returned with semantic ON (lexical floor preserved).
+#   E3 authority     — authority-before-vector: the out-of-scope token/project stay ABSENT with semantic
+#                      ON (the vector tier obeys the SAME scope gate; a global-ANN leak is impossible).
+#   E4 no-side-chan  — the wire carries no score/count/similarity line (projection shape unchanged).
+#   E6 degrade       — provider DOWN → `semantic unavailable` AND the FTS floor still serves (never
+#                      makes Swamp unavailable — the load-bearing failure asymmetry).
+#   E7 fail-closed   — a broker fail-closed projection carries `semantic unavailable`.
+#
 # Usage: scripts/swamp-broker-find-proof.sh
 set -u
 
 if [ "${IN_CONTAINER:-0}" != "1" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
-  echo "=== building release swampd + gatekeeperd + shrek + swamp-broker + coder (host) ==="
-  ( cd "$REPO_ROOT" && cargo build --release -p swampd -p gatekeeperd -p shrek -p swamp-broker -p coder ) || exit 3
+  echo "=== building release swampd + gatekeeperd + shrek + swamp-broker + coder + swamp-embed-proxy (host) ==="
+  ( cd "$REPO_ROOT" && cargo build --release -p swampd -p gatekeeperd -p shrek -p swamp-broker -p coder -p swamp-embed-proxy ) || exit 3
   echo "=== launching privileged debian:trixie oracle ==="
   exec docker run --rm --privileged --cgroupns=private -e IN_CONTAINER=1 \
     -v "$REPO_ROOT/scripts/swamp-broker-find-proof.sh:/proof.sh:ro" \
@@ -54,6 +66,7 @@ if [ "${IN_CONTAINER:-0}" != "1" ]; then
     -v "$REPO_ROOT/target/release/shrek:/shrek:ro" \
     -v "$REPO_ROOT/target/release/swamp-broker:/swamp-broker:ro" \
     -v "$REPO_ROOT/target/release/coder:/coder:ro" \
+    -v "$REPO_ROOT/target/release/swamp-embed-proxy:/swamp-embed-proxy:ro" \
     debian:trixie bash /proof.sh
 fi
 
@@ -329,17 +342,77 @@ for _ in $(seq 1 100); do [ -S /run/swamp/query.sock ] && env SWAMP_QUERY_SOCK=/
 has       "D6c restart reconcile catches the offline CREATE" "$(route_query sbA sessH OFFLINEADD)" "offline.rs"
 gate_empty "D6d restart reconcile catches the offline DELETE" "$(route_query sbA sessH OFFLINEDEL)"
 
+echo "=== E semantic tier (slice-4): provider abstraction, FTS floor, degrade-to-lexical ==="
+# A HERMETIC canned embeddings provider (deterministic dim-8 vectors) on HOST loopback, bridged to
+# swampd by the OFF-IMAGE swamp-embed-proxy over a LOCAL unix socket. swampd stays network-free (it only
+# speaks the local socket); the proxy is the only party that speaks HTTP. This exercises the whole
+# channel + the authority/availability invariants with NO dependency on any live model.
+cat > /tmp/embed_responder.py <<'PYEOF'
+import http.server, json
+def vec(s):
+    out=[]
+    for i in range(8):
+        acc=0
+        for ch in s.encode(): acc=(acc*131 + ch + i*7) % 1000003
+        out.append((acc%1000)/1000.0 + 0.001)   # deterministic, non-zero
+    return out
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self,*a): pass
+    def do_POST(self):
+        n=int(self.headers.get('content-length',0)); req=json.loads(self.rfile.read(n) or b'{}')
+        data=[{"embedding":vec(x)} for x in req.get("input",[])]
+        body=json.dumps({"model":req.get("model","canned"),"data":data}).encode()
+        self.send_response(200); self.send_header('content-type','application/json')
+        self.send_header('content-length',str(len(body))); self.end_headers(); self.wfile.write(body)
+http.server.HTTPServer(('127.0.0.1',8109), H).serve_forever()
+PYEOF
+python3 /tmp/embed_responder.py >/tmp/embed_responder.log 2>&1 &
+for _ in $(seq 1 50); do curl -s -m1 -o /dev/null -X POST -d '{"input":["x"]}' "http://127.0.0.1:8109/v1/embeddings" 2>/dev/null && break; sleep 0.1; done
+# The embed socket lives UNDER swampd's granted state dir so the Landlocked daemon can reach it.
+EMBSOCK=/run/swamp/embed.sock
+SWAMP_EMBED_SOCKET=$EMBSOCK SWAMP_EMBED_UPSTREAM=127.0.0.1:8109 SWAMP_EMBED_MODEL=canned /swamp-embed-proxy >/tmp/embedproxy.log 2>&1 &
+for _ in $(seq 1 50); do [ -S "$EMBSOCK" ] && break; sleep 0.1; done
+[ -S "$EMBSOCK" ] && pass "E0 swamp-embed-proxy serving its local socket" || fail "E0 embed proxy socket missing"
+# Restart swampd WITH the semantic tier wired (dim 8 = the canned responder's width).
+pkill -x swampd 2>/dev/null || true; sleep 0.5; rm -f /run/swamp/query.sock
+runuser -u swamp -- env SWAMP_HOME=$H SWAMP_STATE_DIR=/run/swamp SWAMP_AUTHORITY_DIR=/run/shrek/authority \
+  SWAMP_ALLOW_UID=$TESTER_UID SWAMP_EMBED_SOCKET=$EMBSOCK SWAMP_EMBED_DIM=8 SWAMP_EMBED_MODEL=canned SWAMP_EMBED_PROVIDER=oracle \
+  /swampd serve >/tmp/swampd_sem.log 2>&1 &
+for _ in $(seq 1 100); do [ -S /run/swamp/query.sock ] && env SWAMP_QUERY_SOCK=/run/swamp/query.sock /shrek find --session sessH __ping__ >/dev/null 2>&1 && break; sleep 0.1; done
+sleep 1.5   # let the startup reconcile embed the tree through the proxy
+has "E5 swampd wired the semantic provider channel (base stays network-free)" "$(cat /tmp/swampd_sem.log)" "semantic tier ENABLED"
+E_WIRE=$(route_query sbA sessH ISCOPETOKEN)
+has    "E1 healthy routed response reports semantic=available" "$E_WIRE" "semantic available"
+has    "E2 the in-scope hit is still returned with semantic ON (FTS floor preserved)" "$E_WIRE" "app-a"
+absent "E3 authority-before-vector: the out-of-scope token stays absent WITH semantic ON" "$(route_query sbA sessH BBSECRET)" "BBSECRET"
+absent "E3b the out-of-scope project stays absent WITH semantic ON" "$E_WIRE" "app-b"
+# No score/count/similarity side channel: EVERY wire line must be a known header or a hit (projection
+# shape byte-identical to FTS — the discipline of index.rs, extended to the vector tier).
+BADLINE=$(printf '%s\n' "$E_WIRE" | grep -vE '^(RESULT |freshness |semantic |hit |END|$)' | head -1)
+[ -z "$BADLINE" ] && pass "E4 wire exposes no score/count side channel (projection shape unchanged)" || fail "E4 unexpected wire line: $BADLINE"
+# DEGRADE: kill the provider channel; a query must fall back to the FTS floor AND report unavailable —
+# never make Swamp unavailable (§1.2 T7). This is the load-bearing failure-asymmetry gate.
+pkill -x swamp-embed-proxy 2>/dev/null || true; pkill -f embed_responder.py 2>/dev/null || true; sleep 0.3
+DEG=$(route_query sbA sessH ISCOPETOKEN)
+has "E6a provider DOWN → response reports semantic=unavailable (degrade, not disable)" "$DEG" "semantic unavailable"
+has "E6b provider DOWN → the FTS floor STILL returns the in-scope hit (never unavailable)" "$DEG" "app-a"
+# A broker fail-closed projection (stolen handle) carries semantic=unavailable alongside freshness=unknown.
+has "E7 a broker fail-closed projection carries semantic=unavailable" "$(route_query sbB sessH ISCOPETOKEN)" "semantic unavailable"
+
 # ---- teardown + verdict ----
 pkill -x swamp-broker 2>/dev/null || true; pkill -x swampd 2>/dev/null || true; pkill -f responder.py 2>/dev/null || true
+pkill -x swamp-embed-proxy 2>/dev/null || true; pkill -f embed_responder.py 2>/dev/null || true
 for n in srv sbA sbB sbC sbU; do ip netns del "$n" 2>/dev/null || true; done
 nft delete table ip swamp_oracle 2>/dev/null || true
 
 echo "-----------------------------------------------------------------------------"
-if [ "$FAILN" = "0" ] && [ "$PASS" -ge 32 ]; then
-  echo "SHREK_GATE: PASS swamp-live-persistent-slice3 ($PASS gates, 0 fail)"
+if [ "$FAILN" = "0" ] && [ "$PASS" -ge 42 ]; then
+  echo "SHREK_GATE: PASS swamp-semantic-slice4 ($PASS gates, 0 fail)"
   exit 0
 else
-  echo "SHREK_GATE: FAIL swamp-live-persistent-slice3 (pass=$PASS fail=$FAILN)"
+  echo "SHREK_GATE: FAIL swamp-semantic-slice4 (pass=$PASS fail=$FAILN)"
+  echo "--- swampd_sem.log ---"; tail -25 /tmp/swampd_sem.log 2>/dev/null
+  echo "--- embedproxy.log ---"; tail -15 /tmp/embedproxy.log 2>/dev/null
   echo "--- swampd2.log ---"; tail -20 /tmp/swampd2.log 2>/dev/null
   echo "--- broker.log ---"; tail -30 /tmp/broker.log 2>/dev/null
   echo "--- swampd.log ---"; tail -20 /tmp/swampd.log 2>/dev/null
