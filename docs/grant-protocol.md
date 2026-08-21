@@ -215,6 +215,15 @@ the same transport, auth, fail, and audit machinery. The tainted-origin **action
 an in-profile action's intent, not to extend authority, but rides identical transport/fail/audit so the
 ack and its timeout are enforced by the broker, not left to the agent's compliance.
 
+## Not in scope — the subscription-CLI login
+
+The "Sign in with Claude" flow for the subscription-model provider
+([`phase6-slice5-claude-login-ux.md`](phase6-slice5-claude-login-ux.md)) is deliberately **not** this
+trusted path. That login is a **broker-host operator ceremony** — the official `claude auth login` runs
+in the operator's own terminal on the broker host, where the `claude` CLI (off the sealed image) owns all
+credential state. There is **no sandboxed agent in that loop** to spoof a prompt, so the SAK/VT anchor
+this document specs does not apply; Shrek records only provider-availability, never the credential.
+
 ## Deferred / open
 
 - **Graphical trusted overlay** (Rung-2 in-session prompt) — Phase-10 UX; requires the per-compositor
