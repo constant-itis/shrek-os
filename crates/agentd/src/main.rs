@@ -23,11 +23,18 @@
 //! With no subcommand the daemon is the disabled Phase-1 scaffold (holds no privilege).
 
 use shrek_policy::{effective_tier, CapsProfile, Tier, TrustBand};
+use std::os::unix::process::CommandExt;
 
 fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     if argv.first().map(String::as_str) == Some("resolve") {
         std::process::exit(resolve_cli(&argv[1..]));
+    }
+    // Phase-8 slice-1: `session` extends `resolve` from print-argv into orchestrate — it makes the
+    // SAME deterministic decision, attaches the attested-subject stand-in, and EXECS the gatekeeperd
+    // wall (which re-checks). Still unprivileged; still constructs nothing.
+    if argv.first().map(String::as_str) == Some("session") {
+        std::process::exit(session_cli(&argv[1..]));
     }
 
     eprintln!("agentd: Phase-1 disabled scaffold — resolves nothing, holds no privilege");
@@ -135,4 +142,102 @@ fn resolve_cli(args: &[String]) -> i32 {
     out.extend(workload);
     println!("{}", out.join(" "));
     0
+}
+
+/// `agentd session --trust T --caps C [--profile C] [--escalate Tn] --subject S [--live]
+/// <gatekeeperd-sandbox passthrough…> -- WORKLOAD…`
+///
+/// The UNPRIVILEGED session orchestrator (Phase-8 slice-1): ceiling-check `caps ⊆ profile`, compute the
+/// effective tier deterministically, attach the attested-subject stand-in, and EXEC gatekeeperd (the
+/// privileged wall, which RE-CHECKS every number — isolation.md §7). agentd interprets ONLY the decision
+/// flags + `--subject`/`--live`; EVERY other arg (`--anchor`/`--grant`/`--rw-grant`/`--build-grant`/
+/// `--egress-profile`/`--id`/`--guest-prefix`/`--ingest-harness` and the `-- WORKLOAD`) passes THROUGH
+/// verbatim. agentd OWNS `--tier` (drops any caller-supplied one) and holds no privilege.
+fn session_cli(args: &[String]) -> i32 {
+    let mut trust_s = String::new();
+    let mut caps_s = String::new();
+    let mut profile_s: Option<String> = None;
+    let mut escalate_s: Option<String> = None;
+    let mut subject: Option<String> = None;
+    let mut live = false;
+    let mut pass: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--trust" => { i += 1; trust_s = args.get(i).cloned().unwrap_or_default(); }
+            "--caps" => { i += 1; caps_s = args.get(i).cloned().unwrap_or_default(); }
+            "--profile" => { i += 1; profile_s = args.get(i).cloned(); }
+            "--escalate" => { i += 1; escalate_s = args.get(i).cloned(); }
+            "--subject" => { i += 1; subject = args.get(i).cloned(); }
+            "--live" => live = true,
+            // agentd is the tier authority — drop any caller `--tier` and re-derive it below.
+            "--tier" => { i += 1; }
+            // On `--`, the remainder is the workload: copy verbatim (may hold flag-shaped args).
+            "--" => { pass.push("--".into()); pass.extend(args[i + 1..].iter().cloned()); break; }
+            // Everything else is gatekeeperd's to re-check; pass through untouched.
+            other => pass.push(other.to_string()),
+        }
+        i += 1;
+    }
+
+    if trust_s.is_empty() || caps_s.is_empty() {
+        eprintln!(
+            "usage: agentd session --trust T --caps C [--profile C] [--escalate Tn] --subject S [--live] \
+             --anchor DIR (--grant|--rw-grant|--build-grant) NAME [--egress-profile NAME]... -- WORKLOAD..."
+        );
+        return 2;
+    }
+
+    // Fail-high parse (as `resolve`): garbled/absent trust ⇒ Hostile, caps ⇒ Broad. Profile defaults
+    // to the requested caps (grant == request).
+    let trust = TrustBand::parse(&trust_s);
+    let caps = CapsProfile::parse(&caps_s);
+    let profile = profile_s.as_deref().map(CapsProfile::parse).unwrap_or(caps);
+    let escalation: Option<Tier> = match escalate_s.as_deref() {
+        None => None,
+        Some(s) => match Tier::parse(s) {
+            Some(t) => Some(t),
+            None => { eprintln!("agentd/session: bad --escalate {s:?}"); return 2; }
+        },
+    };
+
+    // Step 1: caps ⊆ granted profile — refused BEFORE any construction (nothing is built; exit 11).
+    if !caps.subset_of(profile) {
+        eprintln!(
+            "AGENTD-DECISION refused reason=caps-exceed-profile trust={} caps={} profile={}",
+            trust.label(), caps.label(), profile.label()
+        );
+        return 11;
+    }
+    // Step 2: deterministic effective tier (no LLM).
+    let tier = effective_tier(trust, caps, escalation);
+    let subj = subject.unwrap_or_else(|| "-".into());
+    eprintln!(
+        "AGENTD-DECISION session tier={} trust={} caps={} profile={} subject={} mode={}",
+        tier.label(), trust.label(), caps.label(), profile.label(), subj,
+        if live { "live" } else { "deterministic" }
+    );
+
+    // Steps 3+4: compose the construction request (agentd owns tier + subject) and EXEC the wall. The
+    // decision flags are injected FIRST; the passthrough (grants/egress/anchor + `-- WORKLOAD`) follows,
+    // so the `--` and workload stay last. gatekeeperd re-checks EVERY value against its sealed matrix.
+    let gk = std::env::var("SHREK_GATEKEEPERD").unwrap_or_else(|_| "gatekeeperd".to_string());
+    let mut a: Vec<String> = vec![
+        "sandbox".into(),
+        "--tier".into(), tier.label().into(),
+        "--trust".into(), trust.label().into(),
+        "--caps".into(), caps.label().into(),
+        "--profile".into(), profile.label().into(),
+        "--subject".into(), subj,
+    ];
+    if live {
+        a.push("--live".into());
+    }
+    a.extend(pass);
+    let err = std::process::Command::new(&gk).args(&a).exec();
+    // Only reached if exec itself failed (binary missing / not privileged to run it).
+    eprintln!("agentd/session: cannot exec `{gk}`: {err}");
+    eprintln!("                set SHREK_GATEKEEPERD or ensure gatekeeperd is on PATH (privileged).");
+    127
 }
