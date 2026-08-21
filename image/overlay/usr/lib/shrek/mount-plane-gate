@@ -833,6 +833,71 @@ fi
 [ "$p6fail" = 0 ] && emit "PASS P6 untrusted-ingest coding-session VM gate" || emit "FAIL P6 untrusted-ingest coding-session VM gate"
 verdict_done=1
 
+# ============= Phase-8 slice-1: agent-session effective-authority view (Pn-agentd-session) =============
+# docs/phase8-slice1-agent-session.md. The endpoint-free VM cannot fully CONSTRUCT an egress session (no
+# NIC/resolver ⇒ fail-closed before the identity commit, exactly as P62/P63 above), so — the established
+# P62-swamp pattern — we prove on the REAL sealed agentd + gatekeeperd what only the seal can: the
+# session-view surface is sealed in, and the decision + record writer + C1–C3 behave correctly on the
+# sealed binaries. (The inline write rides the SAME t2_plane construct/teardown seam that authors
+# authority_record/net_binding, proven end-to-end by the host oracle scripts/agentd-session-proof.sh.)
+AGENTD=/usr/libexec/shrek/agentd
+psfail=0
+# (a) seal freshness — a stale image would lack these strings (mirrors P62-swamp2/4 seal checks).
+grep -aq 'shrek-session/1' "$GK" \
+  && emit "PASS Pn-agentd-session seal: sealed gatekeeperd carries the shrek-session/1 view surface" \
+  || { emit "FAIL Pn-agentd-session seal (gatekeeperd lacks shrek-session/1 — stale image)"; psfail=1; }
+grep -aq 'AGENTD-DECISION session' "$AGENTD" \
+  && emit "PASS Pn-agentd-session seal: sealed agentd carries the session orchestrator" \
+  || { emit "FAIL Pn-agentd-session seal (agentd lacks the session subcommand — stale image)"; psfail=1; }
+PSD=$(mktemp -d); PSPROJ="$PSD/proj"; mkdir -p "$PSPROJ"; PSCANON=$(readlink -f "$PSPROJ")
+# (b1) decision + exec seam: agentd owns the tier (T-untrust,C-net ⇒ T2), attaches the subject, and
+#      passes the grants/egress through. A stub gatekeeperd captures the argv agentd would exec.
+cat > "$PSD/stub" <<'STUB'
+#!/bin/sh
+echo "$*" > "$PS_ARGV"
+STUB
+chmod +x "$PSD/stub"
+PS_ARGV="$PSD/argv" SHREK_GATEKEEPERD="$PSD/stub" "$AGENTD" session --trust T-untrust --caps C-net \
+  --profile C-net --subject dev1 --anchor "$PSD" --rw-grant proj --egress-profile model-anthropic \
+  -- coder --provider anthropic >/dev/null 2>&1
+PSARGV=$(cat "$PSD/argv" 2>/dev/null || echo "")
+{ echo "$PSARGV" | grep -q 'sandbox --tier T2 ' && echo "$PSARGV" | grep -q -- '--subject dev1' \
+  && echo "$PSARGV" | grep -q -- '--egress-profile model-anthropic' \
+  && echo "$PSARGV" | grep -q -- '-- coder --provider anthropic'; } \
+  && emit "PASS Pn-agentd-session decision: agentd owns tier=T2 + attaches subject + passes grants/egress through" \
+  || { emit "FAIL Pn-agentd-session decision (argv=[$PSARGV])"; psfail=1; }
+# (b2) ceiling refuse — caps ⊄ profile ⇒ agentd refuses (exit 11); no session is ever produced.
+SHREK_GATEKEEPERD=/bin/true "$AGENTD" session --trust T-untrust --caps C-net --profile C-proj-rw \
+  --subject dev1 --anchor "$PSD" --rw-grant proj -- coder >/dev/null 2>&1
+psrc=$?
+[ "$psrc" = 11 ] \
+  && emit "PASS Pn-agentd-session ceiling: caps⊄profile refused (exit 11), nothing constructed" \
+  || { emit "FAIL Pn-agentd-session ceiling (rc=$psrc, want 11)"; psfail=1; }
+# (b3) the view record — gatekeeperd writes the effective-authority projection; assert effective.* MATCHES
+#      the decision (C2) and the record is root-write-only 0640 (C1: a non-owner cannot forge/widen it).
+SHREK_SESSION_DIR="$PSD/session" "$GK" session-view --session s0 --subject dev1 --tier T2 \
+  --trust T-untrust --caps cnet --profile cnet --grant "$PSPROJ" --egress-profile model-anthropic \
+  --egress-dst shrek-model-proxy:8200 --workload-arg coder --provider anthropic --mode deterministic \
+  --semantic-available --semantic-tier fts+semantic >/dev/null 2>&1
+PSREC="$PSD/session/s0.json"
+{ [ -f "$PSREC" ] && grep -q '"shrek-session/1"' "$PSREC" && grep -q '"tier": "T2"' "$PSREC" \
+  && grep -q '"egress_dst": "shrek-model-proxy:8200"' "$PSREC" && grep -qF "$PSCANON" "$PSREC"; } \
+  && emit "PASS Pn-agentd-session view: effective-authority record matches the re-checked decision (C2)" \
+  || { emit "FAIL Pn-agentd-session view (record: $(tr -d '\n' <"$PSREC" 2>/dev/null | tail -c 200))"; psfail=1; }
+PSMODE=$(stat -c '%a' "$PSREC" 2>/dev/null || echo "")
+[ "$PSMODE" = 640 ] \
+  && emit "PASS Pn-agentd-session C1: view is root-write-only 0640 (non-owner cannot forge/widen)" \
+  || { emit "FAIL Pn-agentd-session C1 (mode=$PSMODE, want 640)"; psfail=1; }
+# (b4) C3 clean teardown — remove the record; a reader must then find nothing (no residual).
+SHREK_SESSION_DIR="$PSD/session" "$GK" session-view --session s0 --rm >/dev/null 2>&1
+[ ! -e "$PSREC" ] \
+  && emit "PASS Pn-agentd-session C3: teardown removed the view record (no residual)" \
+  || { emit "FAIL Pn-agentd-session C3 (record survived teardown)"; psfail=1; }
+rm -rf "$PSD"
+[ "$psfail" = 0 ] \
+  && emit "PASS Pn-agentd-session agent-session effective-authority VM gate" \
+  || emit "FAIL Pn-agentd-session agent-session effective-authority VM gate"
+
 # ---------------------------------------------------------------------------------------------------
 # Phase-6 Swamp slice-3 reboot-persistence SEED (phase 1). Runs LAST, after the verdict is printed and
 # verdict_done=1 (so the reboot's shutdown SIGTERM cannot trip the crash-FAIL EXIT trap). If the
