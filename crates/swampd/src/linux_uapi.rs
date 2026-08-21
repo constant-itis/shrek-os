@@ -20,12 +20,35 @@ use std::io;
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
 
 // ---- syscall numbers (x86-64) ----
+pub const SYS_POLL: i64 = 7;
 pub const SYS_GETSOCKOPT: i64 = 55;
+pub const SYS_INOTIFY_ADD_WATCH: i64 = 254;
+pub const SYS_INOTIFY_RM_WATCH: i64 = 255;
+pub const SYS_INOTIFY_INIT1: i64 = 294;
 pub const SYS_PRCTL: i64 = 157;
 pub const SYS_OPENAT2: i64 = 437;
 pub const SYS_LANDLOCK_CREATE_RULESET: i64 = 444;
 pub const SYS_LANDLOCK_ADD_RULE: i64 = 445;
 pub const SYS_LANDLOCK_RESTRICT_SELF: i64 = 446;
+
+// ---- inotify (linux/inotify.h) ----
+pub const IN_CLOEXEC: i64 = 0o2000000;
+pub const IN_NONBLOCK: i64 = 0o4000;
+// event mask bits swampd arms + reads
+pub const IN_CLOSE_WRITE: u32 = 0x0000_0008; // a writable fd was closed → content settled (coalesce point)
+pub const IN_MOVED_FROM: u32 = 0x0000_0040; // child moved out of a watched dir (old name)
+pub const IN_MOVED_TO: u32 = 0x0000_0080; // child moved into a watched dir (new name)
+pub const IN_CREATE: u32 = 0x0000_0100; // child created
+pub const IN_DELETE: u32 = 0x0000_0200; // child deleted
+pub const IN_DELETE_SELF: u32 = 0x0000_0400; // the watched dir itself was deleted
+pub const IN_MOVE_SELF: u32 = 0x0000_0800; // the watched dir itself was moved
+pub const IN_IGNORED: u32 = 0x0000_8000; // watch was removed (auto or explicit) — reap the wd
+pub const IN_Q_OVERFLOW: u32 = 0x0000_4000; // kernel event queue overflowed (wd == -1) → STALE + reconcile
+pub const IN_ONLYDIR: u32 = 0x0100_0000; // fail add_watch if target is not a directory
+pub const IN_ISDIR: u32 = 0x4000_0000; // event subject is a directory (set in event mask, not add_watch)
+
+// ---- poll (2) ----
+pub const POLLIN: i16 = 0x0001;
 
 // ---- prctl ----
 pub const PR_SET_NO_NEW_PRIVS: i64 = 38;
@@ -82,6 +105,15 @@ pub struct Ucred {
     pub gid: u32,
 }
 
+/// `struct pollfd` — s32 + 2×s16, 8 bytes.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
 /// `struct landlock_ruleset_attr` — 3×u64.
 #[repr(C)]
 #[derive(Default, Clone, Copy)]
@@ -103,6 +135,16 @@ pub struct LandlockPathBeneathAttr {
 // -------------------------------------------------------------------------------------------------
 // Raw syscall primitives (x86-64). rax=nr; args rdi,rsi,rdx,r10,r8; rcx/r11 clobbered; ret in rax.
 // -------------------------------------------------------------------------------------------------
+
+#[inline]
+unsafe fn sc1(n: i64, a1: i64) -> i64 {
+    let ret: i64;
+    core::arch::asm!("syscall",
+        inlateout("rax") n => ret,
+        in("rdi") a1,
+        lateout("rcx") _, lateout("r11") _, options(nostack));
+    ret
+}
 
 #[inline]
 unsafe fn sc2(n: i64, a1: i64, a2: i64) -> i64 {
@@ -244,6 +286,39 @@ pub fn landlock_restrict_self(ruleset_fd: RawFd) -> io::Result<()> {
     res(ret).map(|_| ())
 }
 
+/// `inotify_init1(IN_CLOEXEC | IN_NONBLOCK)` — the watcher fd. NONBLOCK so the reactor drains it
+/// after `poll` reports it readable and stops on `EAGAIN` without blocking the query path.
+pub fn inotify_init1(flags: i64) -> io::Result<OwnedFd> {
+    let ret = unsafe { sc1(SYS_INOTIFY_INIT1, flags) };
+    let fd = res(ret)? as RawFd;
+    // Safety: a successful inotify_init1 yields a fresh, owned fd.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// `inotify_add_watch(fd, path, mask)` — returns the watch descriptor (>=0). A re-add on an already
+/// watched path returns the SAME wd with the mask updated (kernel semantics), so re-arming is idempotent.
+/// `ENOSPC` here = watch limit exhausted; the caller treats it as a freshness-degrading failure.
+pub fn inotify_add_watch(fd: RawFd, path: &CStr, mask: u32) -> io::Result<i32> {
+    let ret =
+        unsafe { sc3(SYS_INOTIFY_ADD_WATCH, fd as i64, path.as_ptr() as i64, mask as i64) };
+    Ok(res(ret)? as i32)
+}
+
+/// `inotify_rm_watch(fd, wd)`. Best-effort — a wd the kernel already reaped (IN_IGNORED) returns EINVAL.
+pub fn inotify_rm_watch(fd: RawFd, wd: i32) -> io::Result<()> {
+    let ret = unsafe { sc2(SYS_INOTIFY_RM_WATCH, fd as i64, wd as i64) };
+    res(ret).map(|_| ())
+}
+
+/// `poll(fds, nfds, timeout_ms)` — block until one of `fds` is ready (or timeout). `timeout_ms < 0`
+/// blocks indefinitely. Returns the number of ready fds. EINTR is surfaced to the caller (it re-polls).
+pub fn poll(fds: &mut [PollFd], timeout_ms: i32) -> io::Result<i32> {
+    let ret = unsafe {
+        sc3(SYS_POLL, fds.as_mut_ptr() as i64, fds.len() as i64, timeout_ms as i64)
+    };
+    Ok(res(ret)? as i32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -255,6 +330,7 @@ mod tests {
         assert_eq!(size_of::<Ucred>(), 12, "struct ucred is 12 bytes, no padding");
         assert_eq!(size_of::<LandlockRulesetAttr>(), 24, "3×u64");
         assert_eq!(size_of::<LandlockPathBeneathAttr>(), 12, "packed u64+s32 — no padding");
+        assert_eq!(size_of::<PollFd>(), 8, "struct pollfd is s32 + 2×s16");
         assert_eq!(offset_of!(LandlockPathBeneathAttr, allowed_access), 0);
         assert_eq!(offset_of!(LandlockPathBeneathAttr, parent_fd), 8);
         assert_eq!(align_of::<Ucred>(), 4);

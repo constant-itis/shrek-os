@@ -20,8 +20,10 @@
 //! query that matched nothing, so a caller cannot probe which sessions exist.
 
 use crate::authority;
+use crate::crawl;
 use crate::index::{Index, Intent};
-use crate::linux_uapi;
+use crate::linux_uapi::{self, PollFd, POLLIN};
+use crate::watch::{Freshness, Watcher};
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -43,31 +45,89 @@ impl<'a> Server<'a> {
         Server { index, authority_dir, allowed_uids }
     }
 
-    /// Bind the query socket and serve forever (single-threaded, synchronous — queries are fast and
-    /// swampd is availability-plane). The socket is 0666 + SO_PEERCRED-gated, matching the broker.
-    pub fn serve(&self, sock_path: &Path) -> std::io::Result<()> {
+    /// Bind the query socket and run the single-thread reactor: `poll` the query listener AND the
+    /// inotify watcher fd together, so live map-repair (§6) and caller-scoped queries (§9) share one
+    /// thread, one `rusqlite::Connection`, and no locks. Queries are fast and swampd is availability-
+    /// plane, so a synchronous reactor is right; the watcher never blocks a query and vice-versa.
+    ///
+    /// `freshness` is the boot state (STALE until the initial reconcile + arm succeeded). It flips to
+    /// STALE on an inotify overflow or a watch failure and returns to FRESH only after a successful
+    /// full reconcile AND watcher re-arm. Every query response carries the current freshness.
+    pub fn serve(
+        &self,
+        sock_path: &Path,
+        watcher: &mut Watcher,
+        home: &Path,
+        mut freshness: Freshness,
+    ) -> std::io::Result<()> {
         let _ = std::fs::remove_file(sock_path);
         let listener = UnixListener::bind(sock_path)?;
+        listener.set_nonblocking(true)?;
         let _ = std::fs::set_permissions(sock_path, std::fs::Permissions::from_mode(0o666));
         eprintln!(
-            "swampd: query socket {} (allowed uids {:?})",
+            "swampd: query socket {} (allowed uids {:?}) freshness={}",
             sock_path.display(),
-            self.allowed_uids
+            self.allowed_uids,
+            freshness.wire()
         );
-        for conn in listener.incoming() {
-            match conn {
-                Ok(stream) => {
-                    if let Err(e) = self.handle(stream) {
-                        eprintln!("swampd: query conn error: {e}");
+        let lfd = listener.as_raw_fd();
+        loop {
+            // A hard-broken inotify fd is dropped from the set (fd < 0 ⇒ `poll` ignores it) so we serve a
+            // STALE static index instead of busy-spinning on a permanently-ready error fd.
+            let wfd = if watcher.broken() { -1 } else { watcher.raw_fd() };
+            if watcher.broken() && freshness == Freshness::Fresh {
+                freshness = Freshness::Stale;
+            }
+            let mut fds = [
+                PollFd { fd: lfd, events: POLLIN, revents: 0 },
+                PollFd { fd: wfd, events: POLLIN, revents: 0 },
+            ];
+            match linux_uapi::poll(&mut fds, -1) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+
+            // Watcher first: applying pending fs events keeps the map current before we answer queries.
+            if fds[1].revents & POLLIN != 0 {
+                let overflow = watcher.process(self.index, home);
+                if overflow {
+                    // Dropped events → the incremental map is untrustworthy. Full reconcile + re-arm,
+                    // then recompute freshness. FRESH only if BOTH succeed (fork 1).
+                    watcher.reset_health();
+                    let stats = crawl::reconcile_full(self.index, home, watcher);
+                    freshness = if watcher.healthy() { Freshness::Fresh } else { Freshness::Stale };
+                    eprintln!(
+                        "swampd: post-overflow reconcile objects={} deleted={} freshness={}",
+                        stats.objects, stats.deleted, freshness.wire()
+                    );
+                } else if !watcher.healthy() && freshness == Freshness::Fresh {
+                    // A watch/read failure during incremental apply — degrade until the next reconcile.
+                    freshness = Freshness::Stale;
+                    eprintln!("swampd: watcher degraded — serving STALE until reconcile");
+                }
+            }
+
+            if fds[0].revents & POLLIN != 0 {
+                loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            if let Err(e) = self.handle(stream, freshness) {
+                                eprintln!("swampd: query conn error: {e}");
+                            }
+                        }
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                        Err(e) => {
+                            eprintln!("swampd: accept error: {e}");
+                            break;
+                        }
                     }
                 }
-                Err(e) => eprintln!("swampd: accept error: {e}"),
             }
         }
-        Ok(())
     }
 
-    fn handle(&self, mut stream: UnixStream) -> std::io::Result<()> {
+    fn handle(&self, mut stream: UnixStream, freshness: Freshness) -> std::io::Result<()> {
         // Authenticate the peer. Identity ONLY — authority comes from the session record, not this uid.
         let cred = linux_uapi::peer_cred(stream.as_raw_fd())?;
         if !self.allowed_uids.contains(&cred.uid) {
@@ -95,7 +155,12 @@ impl<'a> Server<'a> {
             .query(req.intent, &req.query, &effective, &verb_domains, req.limit)
             .unwrap_or_default();
 
+        // Freshness rides as a header line after RESULT and before the hits. Existing consumers ignore
+        // unrecognized lines, so this is backward-compatible; the RESULT/hit/END structural core is
+        // unchanged, preserving slice-2's deny-vs-zero-hit indistinguishability. Freshness is index-
+        // global — it discloses nothing about which sessions or objects exist.
         writeln!(stream, "RESULT {}", hits.len())?;
+        writeln!(stream, "freshness {}", freshness.wire())?;
         for h in &hits {
             writeln!(stream, "hit {}\t{}", sanitize(&h.path), sanitize(&h.snippet))?;
         }

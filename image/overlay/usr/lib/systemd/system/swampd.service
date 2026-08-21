@@ -1,14 +1,36 @@
-# swampd — filesystem-intelligence daemon (Phase 6+). PHASE-1: DISABLED SCAFFOLD.
-# No [Install] section — cannot be enabled. Indexes nothing; opens no sockets; holds no privilege.
-# When implemented, swampd runs Landlocked DEFAULT-DENY to an explicit allow-set (security-model.md §5).
+# swampd — filesystem-intelligence daemon (Phase 6+). Slice-3: live inotify watcher + PERSISTENT index.
+#
+# STILL DISABLED BY DEFAULT: there is deliberately NO [Install] section, so `systemctl enable swampd`
+# cannot arm it. "swampd goes live as an enabled boot service" is a separate, explicit decision; slice-3
+# only makes the unit CORRECT for the durable-state design so it can be started/restarted by hand (the
+# sealed-VM gate does exactly that — see mount-plane-gate P62-swamp3 — rather than enabling it globally).
+#
+# The real indexing boundary is Landlock: swampd Landlocks ITSELF default-deny to the sealed indexable
+# allow-set before reading a byte (swamp.md §5). systemd's sandboxing here is defence-in-depth, tuned
+# only so it does not PREEMPT the allow-set roots swampd must read.
 [Unit]
-Description=Shrek swampd (Phase-1 disabled scaffold)
-Documentation=file:///usr/share/doc/shrek/security-model.md
+Description=Shrek swampd (filesystem intelligence — disabled by default; Landlock-confined)
+Documentation=file:///usr/share/doc/shrek/swamp.md
+Documentation=file:///usr/share/doc/shrek/phase6-swamp-slice3-live-persistent.md
+# The index lives on the dedicated persistent partition (var-lib-swamp.mount); swampd must not start
+# until it is mounted, or it would write the index onto the volatile tmpfs /var and lose it on reboot.
+Requires=var-lib-swamp.mount
+After=var-lib-swamp.mount
 
 [Service]
 Type=simple
-ExecStart=/usr/libexec/shrek/swampd
+ExecStart=/usr/libexec/shrek/swampd serve
+# Durable derived state on the persistent partition mounted at /var/lib/swamp (survives reboot). NOT a
+# StateDirectory — that would create the path on the volatile tmpfs /var and shadow the real partition.
+# swampd defaults SWAMP_STATE_DIR to this same path. RequiresMountsFor re-asserts the mount dependency.
+Environment=SWAMP_STATE_DIR=/var/lib/swamp
+RequiresMountsFor=/var/lib/swamp
+# Availability plane (swamp.md §10): a crash restarts, but the wall never depends on it running.
+Restart=on-failure
+RestartSec=2
 NoNewPrivileges=yes
 ProtectSystem=strict
-ProtectHome=yes
-Restart=no
+# read-only, NOT yes: swampd must READ the user's home to index the allow-set member trees; Landlock
+# then narrows that to exactly the sealed indexable domains. `ProtectHome=yes` would hide /home entirely
+# and preempt the allow-set before Landlock could enforce it.
+ProtectHome=read-only

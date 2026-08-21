@@ -348,25 +348,50 @@ fn build_swamp_body(q: &str, intent: Option<&str>, scope: Option<&str>, limit: O
     b
 }
 
-/// Render the swamp broker's `RESULT n / hit path\tsnippet / END` wire into a compact, model-readable
-/// tool result. A missing/garbled `RESULT` header is surfaced as an error; a fail-closed empty (`RESULT
-/// 0`) reads as an honest "nothing matched" (indistinguishable from a denied query, by design).
+/// Render the swamp broker's `RESULT n / freshness x / hit path\tsnippet / END` wire into a compact,
+/// model-readable tool result. A missing/garbled `RESULT` header is surfaced as an error; a fail-closed
+/// empty (`RESULT 0`) reads as an honest "nothing matched" (indistinguishable from a denied query, by
+/// design). The `freshness` line (slice-3) is surfaced EXPLICITLY: when it is not `fresh`, the result is
+/// prefixed with a caution so the model never treats a miss as proof of absence — a stale/unknown index
+/// may simply be behind the filesystem. The broker relays swampd's freshness verbatim and never rewrites
+/// it; `unknown` means the broker reached no healthy index (deny / swampd down).
 fn format_swamp_result(raw: &str) -> String {
     let mut lines = raw.lines();
     let n = lines.next().and_then(|l| l.strip_prefix("RESULT ")).and_then(|s| s.trim().parse::<usize>().ok());
+    // Scan the body once for the freshness header and the hits (both live between RESULT and END). A
+    // pre-slice-3 index omits the freshness line entirely → treated as `fresh` (no caution).
+    let mut freshness: Option<&str> = None;
+    let mut hit_lines: Vec<String> = Vec::new();
+    for line in lines {
+        if line == "END" {
+            break;
+        }
+        if let Some(f) = line.strip_prefix("freshness ") {
+            freshness = Some(f.trim());
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("hit ") {
+            let (path, snippet) = rest.split_once('\t').unwrap_or((rest, ""));
+            hit_lines.push(format!("- {path}: {snippet}"));
+        }
+    }
+    let caution = match freshness {
+        None | Some("fresh") => String::new(),
+        Some(state) => format!(
+            "NOTE swamp_find index freshness={state}: the index may be behind the filesystem — treat a \
+             miss as 'not found in a possibly-stale index', NOT proof a file/term is absent.\n"
+        ),
+    };
     match n {
         None => format!("ERROR swamp_find: malformed or failed result:\n{}", cap(raw)),
-        Some(0) => "OK swamp_find: 0 hits (nothing in this session's authority matched).".to_string(),
+        Some(0) => {
+            format!("{caution}OK swamp_find: 0 hits (nothing in this session's authority matched).")
+        }
         Some(count) => {
-            let mut out = format!("OK swamp_find: {count} hit(s):\n");
-            for line in lines {
-                if line == "END" {
-                    break;
-                }
-                if let Some(rest) = line.strip_prefix("hit ") {
-                    let (path, snippet) = rest.split_once('\t').unwrap_or((rest, ""));
-                    out.push_str(&format!("- {path}: {snippet}\n"));
-                }
+            let mut out = format!("{caution}OK swamp_find: {count} hit(s):\n");
+            for h in &hit_lines {
+                out.push_str(h);
+                out.push('\n');
             }
             out
         }
@@ -915,12 +940,35 @@ mod tests {
 
     #[test]
     fn swamp_result_formats_hits_zero_and_malformed() {
+        // Pre-slice-3 wire (no freshness line) still parses; absent freshness ⇒ treated as fresh.
         let hits = "RESULT 2\nhit /srv/project/a.c\tint main()\nhit /srv/project/b.c\treturn 0\nEND\n";
         let f = format_swamp_result(hits);
         assert!(f.contains("2 hit(s)") && f.contains("- /srv/project/a.c: int main()") && f.contains("- /srv/project/b.c: return 0"));
+        assert!(!f.contains("NOTE swamp_find index freshness"), "no caution when freshness is absent/fresh");
         assert!(format_swamp_result("RESULT 0\nEND\n").contains("0 hits"));
         // A denied/empty query is indistinguishable from a legitimate no-match (both RESULT 0).
         assert!(format_swamp_result("garbage").starts_with("ERROR swamp_find"));
+    }
+
+    #[test]
+    fn swamp_result_surfaces_freshness_state() {
+        // Slice-3 wire: a `freshness` header after RESULT is parsed, not shown as a hit.
+        let fresh = "RESULT 1\nfreshness fresh\nhit /srv/project/a.c\tint main()\nEND\n";
+        let ff = format_swamp_result(fresh);
+        assert!(ff.contains("1 hit(s)") && ff.contains("- /srv/project/a.c: int main()"));
+        assert!(!ff.contains("freshness=fresh"), "fresh state adds no caution");
+        assert!(!ff.contains("- freshness"), "the freshness line is never rendered as a hit");
+
+        // STALE: a caution is prefixed so the model does not read a miss as proof of absence.
+        let stale = "RESULT 0\nfreshness stale\nEND\n";
+        let fs = format_swamp_result(stale);
+        assert!(fs.starts_with("NOTE swamp_find index freshness=stale"));
+        assert!(fs.contains("0 hits"));
+        assert!(fs.contains("NOT proof"));
+
+        // UNKNOWN (broker fail-closed / swampd down): same conservative caution.
+        let unknown = "RESULT 0\nfreshness unknown\nEND\n";
+        assert!(format_swamp_result(unknown).starts_with("NOTE swamp_find index freshness=unknown"));
     }
 
     #[test]

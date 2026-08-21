@@ -388,6 +388,7 @@ fn find(args: &[String]) -> i32 {
 
     let reader = BufReader::new(&stream);
     let mut count: Option<usize> = None;
+    let mut freshness: Option<String> = None;
     let mut printed = 0usize;
     for line in reader.lines() {
         let line = match line {
@@ -403,6 +404,12 @@ fn find(args: &[String]) -> i32 {
         }
         if let Some(rest) = line.strip_prefix("RESULT ") {
             count = rest.trim().parse().ok();
+            continue;
+        }
+        // Slice-3: index freshness (fresh|stale). Surfaced so a miss against a stale index is not read
+        // as proof of absence. A pre-slice-3 swampd omits it entirely.
+        if let Some(rest) = line.strip_prefix("freshness ") {
+            freshness = Some(rest.trim().to_string());
             continue;
         }
         if line == "END" {
@@ -421,7 +428,15 @@ fn find(args: &[String]) -> i32 {
 
     match count {
         Some(n) => {
-            eprintln!("shrek find: {n} hit(s) in session {session}'s authority");
+            let fresh = freshness.as_deref().unwrap_or("fresh");
+            if fresh == "fresh" {
+                eprintln!("shrek find: {n} hit(s) in session {session}'s authority");
+            } else {
+                eprintln!(
+                    "shrek find: {n} hit(s) in session {session}'s authority [index freshness={fresh}: \
+                     results may be behind the filesystem — a miss is not proof of absence]"
+                );
+            }
             let _ = printed;
             0
         }

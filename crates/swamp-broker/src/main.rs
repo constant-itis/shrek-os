@@ -39,8 +39,13 @@ const SESSION_HEADER: &str = "x-shrek-session";
 const MAX_BODY: usize = 16 * 1024;
 const MAX_LIMIT: usize = 500;
 const DEFAULT_LIMIT: usize = 50;
-/// The fail-closed empty projection — indistinguishable from a query that matched nothing.
-const EMPTY_RESULT: &str = "RESULT 0\nEND\n";
+/// The fail-closed empty projection. The `RESULT 0` / `END` structural core is byte-identical to
+/// swampd's zero-hit wire, so a denied caller still cannot distinguish denial from a legitimate empty
+/// match (slice-2). It carries `freshness unknown` because on this path the broker never reached a
+/// healthy swampd (deny, or swampd down) — the honest state. Freshness is index-global (no per-session/
+/// per-object signal), so `unknown` vs a forwarded `fresh|stale` is not an existence oracle; and the
+/// broker never REINTERPRETS a swampd-supplied freshness — a forwarded response is relayed verbatim.
+const EMPTY_RESULT: &str = "RESULT 0\nfreshness unknown\nEND\n";
 
 fn main() {
     std::process::exit(run());
@@ -412,9 +417,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_result_is_the_swampd_zero_hit_wire() {
-        // The fail-closed empty projection is byte-identical to swampd's own zero-hit response, so a
-        // denied caller cannot distinguish it from a query that legitimately matched nothing.
-        assert_eq!(EMPTY_RESULT, "RESULT 0\nEND\n");
+    fn empty_result_preserves_zero_hit_core_and_marks_freshness_unknown() {
+        // The RESULT/END core stays byte-identical to swampd's zero-hit wire (denied ≡ empty match), and
+        // the fail-closed path honestly reports freshness=unknown (the broker reached no healthy index).
+        assert_eq!(EMPTY_RESULT, "RESULT 0\nfreshness unknown\nEND\n");
+        assert!(EMPTY_RESULT.starts_with("RESULT 0\n"));
+        assert!(EMPTY_RESULT.trim_end().ends_with("END"));
+        assert!(EMPTY_RESULT.contains("freshness unknown"));
     }
 }
