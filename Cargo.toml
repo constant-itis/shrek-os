@@ -15,13 +15,16 @@ members = [
     "crates/shrek",       # user-facing CLI: `shrek run` front door       (Phase 6)
     "crates/coder",       # coding-agent WORKLOAD for `shrek run` (model-driven) (Phase 6 slice-2)
     "crates/model-proxy", # broker-side authenticated egress proxy for hosted models (Phase 6 slice-3)
+    "crates/claude-broker", # broker-side subscription-model provider: shells the logged-in claude CLI (Phase 6 slice-4)
     "crates/shrek-gate-probe", # spike-only sealed closed-world in-sandbox acceptance probe (P5/B1)
 ]
 
-# The sealed appliance image builds ONLY these (default `cargo build`/STAGE 1). model-proxy is
-# deliberately EXCLUDED: it is a BROKER-SIDE component (not sealed into the image) and carries the one
-# TLS dependency tree (rustls) — keeping it out of the default set means the appliance build pulls no
-# TLS stack and stays dep-lean. Build/test the proxy explicitly with `-p model-proxy`.
+# The sealed appliance image builds ONLY these (default `cargo build`/STAGE 1). model-proxy AND
+# claude-broker are deliberately EXCLUDED: both are BROKER-SIDE components (not sealed into the image).
+# model-proxy carries the one TLS dependency tree (rustls); claude-broker shells the host's `claude`
+# CLI (a broker-side host dependency, never in the sealed rootfs). Keeping them out of the default set
+# means the appliance build pulls no TLS stack and no CLI coupling. Build/test them explicitly with
+# `-p model-proxy` / `-p claude-broker`.
 default-members = [
     "crates/swampd",
     "crates/agentd",

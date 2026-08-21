@@ -114,6 +114,19 @@ const MODEL_ANTHROPIC: &[EgressRule] = &[
     EgressRule { host: "shrek-model-proxy", proto: Proto::Tcp, port: 8200 },
 ];
 
+// The coding-agent's SUBSCRIPTION-model endpoint (Claude via the logged-in official CLI), Phase-6
+// slice-4. Same shape as `model-anthropic` — the box reaches EXACTLY ONE destination — but the broker
+// here is `crates/claude-broker` (`shrek-claude-cli`), NOT the api-key TLS proxy. That broker shells
+// the ALREADY-authenticated `claude -p` CLI: Shrek never handles the subscription OAuth credential at
+// all (the CLI owns its own login), so no secret enters this policy OR the box. Deliberately a DISTINCT
+// profile name from `model-anthropic` (not a reused name pointed at a different backend): the box must
+// EXPLICITLY select the subscription path, and the api-key proxy path stays byte-for-byte unchanged —
+// no silent backend swap on one egress name (docs/phase6-slice3-provider-abstraction.md §2). Plaintext
+// tcp:8300; the box speaks the same messages-API wire, the broker translates to the CLI broker-side.
+const MODEL_CLAUDE_CLI: &[EgressRule] = &[
+    EgressRule { host: "shrek-claude-cli", proto: Proto::Tcp, port: 8300 },
+];
+
 /// THE sealed egress table — the single, compiled-in source of egress policy. gatekeeperd resolves
 /// names against this; there is no runtime or writable source. Deny-by-default: a name absent here
 /// resolves to `None` and gatekeeperd fails the C-net construct closed.
@@ -124,6 +137,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "rust-crates", rules: RUST_CRATES },
     EgressProfile { name: "model-local", rules: MODEL_LOCAL },
     EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
+    EgressProfile { name: "model-claude-cli", rules: MODEL_CLAUDE_CLI },
 ];
 
 /// Resolve a profile NAME to its sealed destination set. STRICT + FAIL-CLOSED, mirroring
@@ -169,6 +183,32 @@ mod tests {
         assert!(!m.allows("api.anthropic.com", Proto::Tcp, 443));
         assert!(!m.allows("shrek-model-proxy", Proto::Tcp, 443));
         assert!(!m.allows("shrek-model", Proto::Tcp, 8100)); // not the local-model dst either
+    }
+
+    #[test]
+    fn model_claude_cli_reaches_only_the_broker() {
+        // The subscription-model profile reaches exactly ONE dst — the CLI broker — NEVER Anthropic
+        // directly and NEVER any other port/host. No secret lives here: the broker shells the
+        // logged-in `claude` CLI, which owns its own auth (Phase-6 slice-4).
+        let m = resolve("model-claude-cli").unwrap();
+        assert_eq!(m.rules.len(), 1, "model-claude-cli must reach exactly one destination (the broker)");
+        assert!(m.allows("shrek-claude-cli", Proto::Tcp, 8300));
+        // The box must NOT reach Anthropic directly, the api-key proxy, or the local model.
+        assert!(!m.allows("api.anthropic.com", Proto::Tcp, 443));
+        assert!(!m.allows("shrek-model-proxy", Proto::Tcp, 8200)); // not the api-key proxy dst
+        assert!(!m.allows("shrek-model", Proto::Tcp, 8100));       // not the local-model dst
+    }
+
+    #[test]
+    fn subscription_and_apikey_paths_are_distinct_profiles() {
+        // The two hosted paths must be SEPARATE sealed names pointing at DIFFERENT brokers — never one
+        // name silently reused for two backends. This is the no-silent-backend-swap invariant made
+        // testable: neither profile's single destination overlaps the other's.
+        let cli = resolve("model-claude-cli").unwrap();
+        let api = resolve("model-anthropic").unwrap();
+        assert_ne!(cli.name, api.name);
+        assert!(!cli.allows("shrek-model-proxy", Proto::Tcp, 8200));
+        assert!(!api.allows("shrek-claude-cli", Proto::Tcp, 8300));
     }
 
     #[test]

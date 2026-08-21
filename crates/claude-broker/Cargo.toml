@@ -1,0 +1,22 @@
+[package]
+name = "claude-broker"
+version.workspace = true
+edition.workspace = true
+
+# The broker-side SUBSCRIPTION-model provider (Phase-6 slice-4, docs/phase6-slice4-claude-cli-broker.md).
+#
+# It is NOT a control plane and is NOT sealed into the appliance image. It runs BROKER-SIDE, outside the
+# T2 sandbox. The sandboxed coder speaks the SAME plaintext messages-API wire it already speaks to the
+# api-key proxy (crates/model-proxy) — but over the sealed one-destination `model-claude-cli` egress —
+# and this broker TRANSLATES that request into an invocation of the host's ALREADY-LOGGED-IN `claude`
+# CLI (`claude -p --output-format json`), then wraps the reply back into the messages-API shape the
+# coder expects. Shrek handles NO subscription OAuth credential: the CLI owns its own login. The box
+# never holds a secret and never reaches Anthropic directly (the lethal-trifecta break, unchanged).
+#
+# Dep policy mirrors the coder: exactly ONE build-time dependency, `tinyjson` — a pure-Rust,
+# ZERO-transitive JSON parser/encoder, already vendored in-tree (vendor/, .cargo/config.toml). We parse
+# the model's arbitrary JSON with a real parser rather than hand-rolling one; the CLI is invoked via
+# std::process (argv vector, NO shell) so no caller string is ever interpreted as a command. This crate
+# is excluded from the sealed image's default build (workspace default-members) — see the root Cargo.toml.
+[dependencies]
+tinyjson = "2"
