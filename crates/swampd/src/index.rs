@@ -18,7 +18,12 @@ use std::path::{Path, PathBuf};
 /// Bumped whenever the on-disk schema/semantics change. A persistent DB whose stored version differs
 /// (older layout, or a corrupt/foreign file) is wiped and rebuilt by the startup reconcile — invalid
 /// durable state fails toward a clean rebuild, never a corrupt serve (slice-3 §6).
-const SCHEMA_VERSION: &str = "3";
+///
+/// v4 (slice-4) adds the semantic tier's `chunks`/`vectors` tables. They are empty on a core/FTS-only
+/// install (light by default, `filesystem-intelligence.md` §6). The bump from 3→4 wipes+rebuilds a
+/// slice-3 DB, which simply re-derives metadata+FTS and leaves the new tables empty until a semantic
+/// backend is present.
+const SCHEMA_VERSION: &str = "4";
 
 /// One object as the crawler discovers it (swamp.md §3, the fields this slice populates). `id` is
 /// `(dev,ino)`-derived stable-ish identity for v1; the opaque rename-surviving id is deferred.
@@ -90,8 +95,32 @@ impl Index {
              -- FTS5 content-storing index keyed by rowid = objects.id. Its existence here is also the
              -- compile-time proof that the bundled SQLite has FTS5 enabled. Rows are DELETE/re-INSERTed
              -- on live updates (slice-3), which a content-storing fts5 table supports directly.
-             CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(content, tokenize='unicode61');",
+             CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(content, tokenize='unicode61');
+             -- SEMANTIC TIER (slice-4, opt-in — empty on a core/FTS install). `chunks` are the
+             -- deterministic sub-object units; `vectors` are their embeddings. Both hang off `objects`
+             -- via ON DELETE CASCADE so an object delete/subtree-delete/prune drops its chunks AND
+             -- vectors — 'deletion really removes content' extends to the semantic tier (slice-3 §6).
+             -- FK cascade fires only with foreign_keys=ON (set as a connection pragma below).
+             CREATE TABLE IF NOT EXISTS chunks (
+                 id         INTEGER PRIMARY KEY,
+                 object_id  INTEGER NOT NULL REFERENCES objects(id) ON DELETE CASCADE,
+                 ordinal    INTEGER NOT NULL,   -- deterministic order within the object
+                 byte_start INTEGER NOT NULL,   -- reproducible boundary (into the extracted text)
+                 byte_end   INTEGER NOT NULL,
+                 text_hash  TEXT NOT NULL,       -- idempotent-skip / incremental re-embed (slice-4 F5)
+                 text       TEXT NOT NULL,       -- the chunk's own in-scope text (semantic snippet source)
+                 UNIQUE(object_id, ordinal)
+             );
+             CREATE INDEX IF NOT EXISTS idx_chunks_object ON chunks(object_id);
+             CREATE TABLE IF NOT EXISTS vectors (
+                 chunk_id         INTEGER PRIMARY KEY REFERENCES chunks(id) ON DELETE CASCADE,
+                 vec              BLOB NOT NULL,  -- dim×f32, little-endian
+                 semantic_version TEXT NOT NULL  -- provider_id|model_id|dim|schema (rebuild key)
+             );",
         )?;
+        // Enable FK cascades for the whole connection (chunks→objects, vectors→chunks). SQLite defaults
+        // this OFF; without it an object delete would orphan chunk/vector rows.
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
         let idx = Index { conn };
         idx.enforce_schema_version()?;
         Ok(idx)
@@ -109,7 +138,9 @@ impl Index {
         if stored.as_deref() != Some(SCHEMA_VERSION) {
             if stored.is_some() {
                 // Present but mismatched → drop all derived rows; reconcile rebuilds from the filesystem.
-                self.conn.execute_batch("DELETE FROM fts; DELETE FROM objects;")?;
+                // Explicit order (vectors→chunks→fts→objects) is correct with or without FK cascade.
+                self.conn
+                    .execute_batch("DELETE FROM vectors; DELETE FROM chunks; DELETE FROM fts; DELETE FROM objects;")?;
             }
             self.conn.execute(
                 "INSERT INTO meta (k, v) VALUES ('schema_version', ?1)
@@ -306,6 +337,240 @@ impl Index {
         }
         Ok(hits)
     }
+
+    // ─── SEMANTIC TIER (slice-4) ────────────────────────────────────────────────────────────────
+    //
+    // The semantic query is a SECOND query kind that REUSES the same guard and the same scope
+    // construction as `query` above — it never introduces a parallel path with its own gate. The
+    // authorized candidate set is CONSTRUCTED (scope ∩ domain-ceiling) before any vector is scored;
+    // cosine similarity is computed ONLY over the vectors of objects already in that set, so an
+    // out-of-authority vector is never loaded into the ranking (authority-before-vector, slice-4 §1.1).
+    // The projection shape is byte-identical to the FTS projection: in-scope `path` + in-scope
+    // `snippet` only — NO similarity score and NO candidate/global count crosses the wire (§1.1 T2).
+
+    /// The persisted semantic_version (`provider|model|dim|schema`), or None if the semantic tier has
+    /// never run against this store.
+    pub fn semantic_version(&self) -> Option<String> {
+        self.conn
+            .query_row("SELECT v FROM meta WHERE k='semantic_version'", [], |r| r.get(0))
+            .ok()
+    }
+
+    /// Reconcile the store's semantic_version against the present backend's identity. On mismatch (a
+    /// different provider/model/dim, or a first-ever run against a differing prior) the chunks+vectors
+    /// are WIPED so re-embedding rebuilds them from scratch — a wipe only degrades ranking, never
+    /// correctness (slice-4 §2, mirrors the schema-version reconcile). Returns whether a wipe happened.
+    pub fn reconcile_semantic_version(&self, sv: &str) -> rusqlite::Result<bool> {
+        let stored: Option<String> = self.semantic_version();
+        if stored.as_deref() == Some(sv) {
+            return Ok(false);
+        }
+        // vectors cascade from chunks; delete both explicitly so it holds regardless of FK state.
+        self.conn.execute_batch("DELETE FROM vectors; DELETE FROM chunks;")?;
+        self.conn.execute(
+            "INSERT INTO meta (k, v) VALUES ('semantic_version', ?1)
+             ON CONFLICT(k) DO UPDATE SET v=excluded.v",
+            params![sv],
+        )?;
+        Ok(stored.is_some())
+    }
+
+    /// The ordered per-chunk text hashes currently stored for an object — the incremental-skip
+    /// signature. If it equals the freshly-chunked signature, re-embedding is unnecessary (slice-4 §7).
+    pub fn object_chunk_signature(&self, object_id: i64) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT text_hash FROM chunks WHERE object_id=?1 ORDER BY ordinal")
+        {
+            if let Ok(rows) = stmt.query_map(params![object_id], |r| r.get::<_, String>(0)) {
+                for r in rows.flatten() {
+                    out.push(r);
+                }
+            }
+        }
+        out
+    }
+
+    /// Replace ALL chunks+vectors for an object with a fresh set (idempotent: prior chunks for this
+    /// object are deleted first, cascading their vectors). `sv` is the current semantic_version stamped
+    /// onto every vector so a later version mismatch is filterable. Keeps `chunks.object_id` aligned so
+    /// the scope JOIN in `semantic_query` is exact.
+    pub fn replace_object_vectors(
+        &self,
+        object_id: i64,
+        sv: &str,
+        chunks: &[ChunkVec],
+    ) -> rusqlite::Result<()> {
+        // Delete existing chunks for this object (vectors cascade via FK) then re-insert.
+        self.conn.execute("DELETE FROM chunks WHERE object_id=?1", params![object_id])?;
+        for c in chunks {
+            let chunk_id: i64 = self.conn.query_row(
+                "INSERT INTO chunks (object_id, ordinal, byte_start, byte_end, text_hash, text)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) RETURNING id",
+                params![object_id, c.ordinal, c.byte_start as i64, c.byte_end as i64, c.text_hash, c.text],
+                |r| r.get(0),
+            )?;
+            self.conn.execute(
+                "INSERT INTO vectors (chunk_id, vec, semantic_version) VALUES (?1, ?2, ?3)",
+                params![chunk_id, vec_to_blob(&c.vec), sv],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Drop all chunks+vectors for an object without touching its metadata/FTS — used when a live edit
+    /// turns a once-textual file binary/oversized, or the semantic tier is disabled for its domain.
+    pub fn clear_object_vectors(&self, object_id: i64) -> rusqlite::Result<()> {
+        self.conn.execute("DELETE FROM chunks WHERE object_id=?1", params![object_id])?;
+        Ok(())
+    }
+
+    /// The authorize-before-VECTOR query (slice-4 §1.1 — THE CRUX). Same fail-closed guard and same
+    /// `matches ∩ session-grants ∩ domain-ceiling` scope as [`Index::query`]; similarity is scored ONLY
+    /// over the scoped candidate vectors. `sv` filters to the current semantic_version. Returns the same
+    /// `Hit { path, snippet }` shape as FTS — no score, no count.
+    pub fn semantic_query(
+        &self,
+        query_vec: &[f32],
+        sv: &str,
+        grants: &[PathBuf],
+        verb_domains: &[&str],
+        limit: usize,
+    ) -> rusqlite::Result<Vec<Hit>> {
+        if grants.is_empty() || verb_domains.is_empty() || query_vec.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut binds: Vec<String> = Vec::new();
+        let scope = scope_predicate(grants, &mut binds);
+        let dom_clause = domain_predicate(verb_domains, &mut binds);
+        let sv_idx = binds.len() + 1;
+        binds.push(sv.to_string());
+
+        // Candidate set is CONSTRUCTED here — the WHERE scopes the JOIN before any vector is read.
+        let sql = format!(
+            "SELECT o.path, c.text, v.vec \
+             FROM vectors v \
+             JOIN chunks c ON v.chunk_id = c.id \
+             JOIN objects o ON c.object_id = o.id \
+             WHERE {scope} AND {dom_clause} AND v.semantic_version = ?{sv_idx}"
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let params: Vec<Box<dyn rusqlite::ToSql>> = binds.into_iter().map(|s| Box::new(s) as _).collect();
+        let rows = stmt.query_map(params_from_iter(params.iter().map(|b| b.as_ref())), |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+        })?;
+
+        // Score in-Rust over ONLY the scoped candidates; keep the best chunk per object path.
+        let mut best: std::collections::HashMap<String, (f32, String)> = std::collections::HashMap::new();
+        for row in rows {
+            let (path, text, blob) = row?;
+            let v = blob_to_vec(&blob);
+            let score = cosine(query_vec, &v);
+            let e = best.entry(path).or_insert((f32::MIN, String::new()));
+            if score > e.0 {
+                *e = (score, text);
+            }
+        }
+        let mut ranked: Vec<(String, f32, String)> =
+            best.into_iter().map(|(p, (s, t))| (p, s, t)).collect();
+        // Deterministic order: score desc, then path asc as a stable tie-break.
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+        ranked.truncate(limit);
+        Ok(ranked
+            .into_iter()
+            .map(|(path, _score, text)| Hit { path, snippet: snippet_of(&text) })
+            .collect())
+    }
+}
+
+/// Build the `matches ∩ session-grants` path-scope predicate over the `o.path` column, pushing its
+/// text binds onto `binds`. Byte-for-byte the same predicate [`Index::query`] compiles inline —
+/// `substr`-prefix (not GLOB/LIKE) so paths with glob metacharacters can neither escape nor over-match,
+/// and a component boundary so `/a/app` never matches sibling `/a/app-b`. Sharing it guarantees the
+/// semantic path can never drift from the frozen FTS gate.
+fn scope_predicate(grants: &[PathBuf], binds: &mut Vec<String>) -> String {
+    let mut scope = String::from("(");
+    for (i, g) in grants.iter().enumerate() {
+        let gs = g.to_string_lossy().to_string();
+        if i > 0 {
+            scope.push_str(" OR ");
+        }
+        let a = binds.len() + 1;
+        let b = binds.len() + 2;
+        scope.push_str(&format!("(o.path = ?{a} OR substr(o.path,1,length(?{b})+1) = ?{b} || '/')"));
+        binds.push(gs.clone());
+        binds.push(gs);
+    }
+    scope.push(')');
+    scope
+}
+
+/// Build the domain-ceiling predicate (`o.domain IN (...)`), pushing its binds onto `binds`.
+fn domain_predicate(verb_domains: &[&str], binds: &mut Vec<String>) -> String {
+    let ph: Vec<String> = (0..verb_domains.len()).map(|i| format!("?{}", binds.len() + 1 + i)).collect();
+    let clause = format!("o.domain IN ({})", ph.join(","));
+    for d in verb_domains {
+        binds.push((*d).to_string());
+    }
+    clause
+}
+
+/// dim×f32 → little-endian bytes for BLOB storage.
+fn vec_to_blob(v: &[f32]) -> Vec<u8> {
+    let mut b = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        b.extend_from_slice(&x.to_le_bytes());
+    }
+    b
+}
+
+/// little-endian BLOB → dim×f32. A byte length not divisible by 4 yields the truncated prefix (a
+/// malformed vector then scores like a mismatched-dim vector and is discarded by `cosine`).
+fn blob_to_vec(b: &[u8]) -> Vec<f32> {
+    b.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+/// Cosine similarity in `[-1, 1]`; returns `-1.0` (worst) for a dimension mismatch or a zero vector, so
+/// a malformed/poisoned candidate can only sink in ranking, never leak or crash (slice-4 §1.2 T6).
+fn cosine(a: &[f32], b: &[f32]) -> f32 {
+    if a.len() != b.len() {
+        return -1.0;
+    }
+    let (mut dot, mut na, mut nb) = (0f32, 0f32, 0f32);
+    for i in 0..a.len() {
+        dot += a[i] * b[i];
+        na += a[i] * a[i];
+        nb += b[i] * b[i];
+    }
+    if na == 0.0 || nb == 0.0 {
+        return -1.0;
+    }
+    dot / (na.sqrt() * nb.sqrt())
+}
+
+/// A short in-scope snippet from the matched chunk's OWN text (the chunk always belongs to an
+/// authorized object — see `semantic_query`), truncated on a char boundary.
+fn snippet_of(text: &str) -> String {
+    const MAX: usize = 120;
+    let t = text.trim();
+    if t.chars().count() <= MAX {
+        return t.to_string();
+    }
+    let mut s: String = t.chars().take(MAX).collect();
+    s.push('…');
+    s
+}
+
+/// One deterministic chunk + its embedding, the input to [`Index::replace_object_vectors`].
+pub struct ChunkVec {
+    pub ordinal: i64,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub text_hash: String,
+    pub text: String,
+    pub vec: Vec<f32>,
 }
 
 #[cfg(test)]
@@ -543,5 +808,190 @@ mod tests {
         let hits = idx.query(Intent::Search, "isolation", &grants, &["projects"], 50).unwrap();
         assert_eq!(hits.len(), 1, "sibling app-b leaked across a substring boundary: {hits:?}");
         assert!(hits[0].path.contains("/app/"));
+    }
+
+    // ─── SEMANTIC TIER (slice-4) ───────────────────────────────────────────────────────────────
+
+    const SV: &str = "test-provider|test-model|3|4";
+
+    /// Seed three objects, each with ONE 3-dim chunk vector along a basis axis. app-a and app-b are
+    /// ordinary projects; Vault models a file the crawler would never insert — we insert it anyway to
+    /// prove the semantic gate never scores it once it is out of the caller's grant scope. Its vector is
+    /// [0,0,1], deliberately the one a hostile query will match EXACTLY.
+    fn seed_semantic() -> Index {
+        let idx = Index::open_in_memory().unwrap();
+        idx.reconcile_semantic_version(SV).unwrap();
+        let rows = [
+            ("/home/u/Projects/app-a/notes.md", "projects", "app-a isolation notes", [1.0f32, 0.0, 0.0]),
+            ("/home/u/Projects/app-b/lib.rs", "projects", "app-b secret sauce", [0.0, 1.0, 0.0]),
+            ("/home/u/Vault/passwords.txt", "projects", "master password hunter2", [0.0, 0.0, 1.0]),
+        ];
+        for (i, (p, dom, text, vec)) in rows.iter().enumerate() {
+            let id = idx
+                .upsert_object(&ObjectRecord {
+                    path: (*p).into(),
+                    dev: 1,
+                    ino: 200 + i as i64,
+                    size: text.len() as i64,
+                    mtime: 0,
+                    domain: (*dom).into(),
+                    is_dir: false,
+                })
+                .unwrap();
+            idx.replace_object_vectors(
+                id,
+                SV,
+                &[ChunkVec {
+                    ordinal: 0,
+                    byte_start: 0,
+                    byte_end: text.len(),
+                    text_hash: format!("h{i}"),
+                    text: (*text).into(),
+                    vec: vec.to_vec(),
+                }],
+            )
+            .unwrap();
+        }
+        idx
+    }
+
+    #[test]
+    fn semantic_scope_excludes_vault_even_when_query_matches_it_exactly() {
+        // THE CRUX (slice-4 §1.1 T1). The query vector is IDENTICAL to the Vault chunk's vector
+        // (cosine = 1.0 — it would rank #1 in a GLOBAL ANN). A session scoped to app-a must never see
+        // it: the Vault vector is absent from the candidate set, not ranked-then-filtered.
+        let idx = seed_semantic();
+        let grants = vec![PathBuf::from("/home/u/Projects/app-a")];
+        let hits = idx.semantic_query(&[0.0, 0.0, 1.0], SV, &grants, &["projects"], 50).unwrap();
+        assert!(hits.iter().all(|h| !h.path.contains("Vault")), "Vault vector leaked: {hits:?}");
+        assert!(hits.iter().all(|h| h.path.contains("/app-a/")));
+        assert!(!hits.is_empty(), "in-scope app-a should still be returned");
+    }
+
+    #[test]
+    fn semantic_ranks_in_scope_candidates_by_similarity() {
+        let idx = seed_semantic();
+        // Whole-Projects scope; query nearest app-a's axis → app-a ranks first, app-b present, no Vault.
+        let grants = vec![PathBuf::from("/home/u/Projects")];
+        let hits = idx.semantic_query(&[1.0, 0.0, 0.0], SV, &grants, &["projects"], 50).unwrap();
+        assert!(hits.iter().all(|h| !h.path.contains("Vault")));
+        assert_eq!(hits.first().map(|h| h.path.contains("/app-a/")), Some(true), "closest should lead");
+        assert!(hits.iter().any(|h| h.path.contains("/app-b/")));
+    }
+
+    #[test]
+    fn semantic_snippet_comes_from_the_matched_chunk() {
+        let idx = seed_semantic();
+        let grants = vec![PathBuf::from("/home/u/Projects/app-a")];
+        let hits = idx.semantic_query(&[1.0, 0.0, 0.0], SV, &grants, &["projects"], 50).unwrap();
+        assert_eq!(hits[0].snippet, "app-a isolation notes");
+    }
+
+    #[test]
+    fn semantic_empty_grants_and_empty_domains_reveal_nothing() {
+        let idx = seed_semantic();
+        let grants = vec![PathBuf::from("/home/u/Projects")];
+        assert!(idx.semantic_query(&[0.0, 0.0, 1.0], SV, &[], &["projects"], 50).unwrap().is_empty());
+        assert!(idx.semantic_query(&[0.0, 0.0, 1.0], SV, &grants, &[], 50).unwrap().is_empty());
+        assert!(idx.semantic_query(&[], SV, &grants, &["projects"], 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn semantic_version_mismatch_filters_out_stale_vectors() {
+        let idx = seed_semantic();
+        let grants = vec![PathBuf::from("/home/u/Projects")];
+        // Querying under a DIFFERENT semantic_version returns nothing — stale-version vectors never score.
+        let hits = idx.semantic_query(&[1.0, 0.0, 0.0], "other|model|3|4", &grants, &["projects"], 50).unwrap();
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn reconcile_semantic_version_wipes_on_change() {
+        let idx = seed_semantic();
+        assert_eq!(idx.semantic_version().as_deref(), Some(SV));
+        // A provider/model/dim change wipes chunks+vectors (returns true = a prior version existed).
+        let wiped = idx.reconcile_semantic_version("newprov|newmodel|768|4").unwrap();
+        assert!(wiped);
+        let grants = vec![PathBuf::from("/home/u/Projects")];
+        // Old vectors are gone even under the new version key.
+        assert!(idx
+            .semantic_query(&[1.0, 0.0, 0.0], "newprov|newmodel|768|4", &grants, &["projects"], 50)
+            .unwrap()
+            .is_empty());
+        // Same version again is a no-op (no wipe reported).
+        assert!(!idx.reconcile_semantic_version("newprov|newmodel|768|4").unwrap());
+    }
+
+    #[test]
+    fn deleting_an_object_cascades_its_chunks_and_vectors() {
+        let idx = seed_semantic();
+        // app-b has one chunk before delete.
+        // (object_id is (dev,ino)-independent row id; fetch via a targeted query.)
+        let id: i64 = idx
+            .conn
+            .query_row("SELECT id FROM objects WHERE path=?1", params!["/home/u/Projects/app-b/lib.rs"], |r| r.get(0))
+            .unwrap();
+        assert_eq!(idx.object_chunk_signature(id).len(), 1);
+        assert!(idx.delete_path("/home/u/Projects/app-b/lib.rs").unwrap());
+        // FK cascade removed its chunks AND vectors.
+        assert!(idx.object_chunk_signature(id).is_empty());
+        let n: i64 = idx.conn.query_row("SELECT COUNT(*) FROM vectors", [], |r| r.get(0)).unwrap();
+        assert_eq!(n, 2, "app-b vector should have cascaded away");
+    }
+
+    #[test]
+    fn replace_object_vectors_is_idempotent_and_signature_tracks_it() {
+        let idx = Index::open_in_memory().unwrap();
+        idx.reconcile_semantic_version(SV).unwrap();
+        let oid = idx
+            .upsert_object(&ObjectRecord {
+                path: "/home/u/Projects/app/x.md".into(),
+                dev: 1,
+                ino: 1,
+                size: 1,
+                mtime: 0,
+                domain: "projects".into(),
+                is_dir: false,
+            })
+            .unwrap();
+        let mk = |h: &str, v: [f32; 3]| ChunkVec {
+            ordinal: 0,
+            byte_start: 0,
+            byte_end: 1,
+            text_hash: h.into(),
+            text: "t".into(),
+            vec: v.to_vec(),
+        };
+        idx.replace_object_vectors(oid, SV, &[mk("hA", [1.0, 0.0, 0.0])]).unwrap();
+        assert_eq!(idx.object_chunk_signature(oid), vec!["hA".to_string()]);
+        // Re-embed after an edit REPLACES (no duplicate rowid, exactly one chunk).
+        idx.replace_object_vectors(oid, SV, &[mk("hB", [0.0, 1.0, 0.0])]).unwrap();
+        assert_eq!(idx.object_chunk_signature(oid), vec!["hB".to_string()]);
+        let n: i64 = idx.conn.query_row("SELECT COUNT(*) FROM chunks WHERE object_id=?1", params![oid], |r| r.get(0)).unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn clear_object_vectors_drops_semantic_but_keeps_object() {
+        let idx = seed_semantic();
+        let id: i64 = idx
+            .conn
+            .query_row("SELECT id FROM objects WHERE path=?1", params!["/home/u/Projects/app-a/notes.md"], |r| r.get(0))
+            .unwrap();
+        idx.clear_object_vectors(id).unwrap();
+        assert!(idx.object_chunk_signature(id).is_empty());
+        // Object row itself survives (still discoverable by path via the metadata gate).
+        let grants = vec![PathBuf::from("/home/u/Projects/app-a")];
+        assert!(!idx.query(Intent::Discover, "notes", &grants, &["projects"], 50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn vec_blob_roundtrips() {
+        let v = vec![1.5f32, -2.25, 0.0, 3.125];
+        assert_eq!(blob_to_vec(&vec_to_blob(&v)), v);
+        // cosine of identical vectors is ~1, orthogonal ~0, mismatched-dim is -1 (discarded).
+        assert!((cosine(&v, &v) - 1.0).abs() < 1e-6);
+        assert!((cosine(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-6);
+        assert_eq!(cosine(&[1.0, 0.0, 0.0], &[1.0, 0.0]), -1.0);
     }
 }

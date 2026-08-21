@@ -348,19 +348,24 @@ fn build_swamp_body(q: &str, intent: Option<&str>, scope: Option<&str>, limit: O
     b
 }
 
-/// Render the swamp broker's `RESULT n / freshness x / hit path\tsnippet / END` wire into a compact,
-/// model-readable tool result. A missing/garbled `RESULT` header is surfaced as an error; a fail-closed
-/// empty (`RESULT 0`) reads as an honest "nothing matched" (indistinguishable from a denied query, by
-/// design). The `freshness` line (slice-3) is surfaced EXPLICITLY: when it is not `fresh`, the result is
-/// prefixed with a caution so the model never treats a miss as proof of absence — a stale/unknown index
-/// may simply be behind the filesystem. The broker relays swampd's freshness verbatim and never rewrites
-/// it; `unknown` means the broker reached no healthy index (deny / swampd down).
+/// Render the swamp broker's `RESULT n / freshness x / semantic y / hit path\tsnippet / END` wire into a
+/// compact, model-readable tool result. A missing/garbled `RESULT` header is surfaced as an error; a
+/// fail-closed empty (`RESULT 0`) reads as an honest "nothing matched" (indistinguishable from a denied
+/// query, by design). Two capability signals are surfaced EXPLICITLY:
+///   * `freshness` (slice-3): when not `fresh`, a caution so the model never treats a miss as proof of
+///     absence — a stale/unknown index may simply be behind the filesystem.
+///   * `semantic` (slice-4): when not `available`, a note that similarity ranking was NOT applied, so the
+///     results are lexical FTS only — a paraphrase/concept miss is "no semantic tier today," not absence.
+/// The broker relays swampd's headers verbatim and never rewrites them; `unknown`/`unavailable` mean the
+/// broker reached no healthy index (deny / swampd down) or no provider is configured. A pre-slice-3/-4
+/// index omits these lines → treated as fresh / (semantic not-in-play), no note.
 fn format_swamp_result(raw: &str) -> String {
     let mut lines = raw.lines();
     let n = lines.next().and_then(|l| l.strip_prefix("RESULT ")).and_then(|s| s.trim().parse::<usize>().ok());
-    // Scan the body once for the freshness header and the hits (both live between RESULT and END). A
-    // pre-slice-3 index omits the freshness line entirely → treated as `fresh` (no caution).
+    // Scan the body once for the freshness/semantic headers and the hits (all live between RESULT and
+    // END). A pre-slice index omits these header lines entirely → treated as fresh / no semantic note.
     let mut freshness: Option<&str> = None;
+    let mut semantic: Option<&str> = None;
     let mut hit_lines: Vec<String> = Vec::new();
     for line in lines {
         if line == "END" {
@@ -370,18 +375,32 @@ fn format_swamp_result(raw: &str) -> String {
             freshness = Some(f.trim());
             continue;
         }
+        if let Some(s) = line.strip_prefix("semantic ") {
+            semantic = Some(s.trim());
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("hit ") {
             let (path, snippet) = rest.split_once('\t').unwrap_or((rest, ""));
             hit_lines.push(format!("- {path}: {snippet}"));
         }
     }
-    let caution = match freshness {
+    let mut caution = match freshness {
         None | Some("fresh") => String::new(),
         Some(state) => format!(
             "NOTE swamp_find index freshness={state}: the index may be behind the filesystem — treat a \
              miss as 'not found in a possibly-stale index', NOT proof a file/term is absent.\n"
         ),
     };
+    // Semantic-availability note (additive; capability, not correctness). `available` (or absent) = no
+    // note. Anything else = ranking is lexical-only right now.
+    if let Some(state) = semantic {
+        if state != "available" {
+            caution.push_str(&format!(
+                "NOTE swamp_find semantic={state}: similarity ranking was NOT applied — results are \
+                 lexical (keyword) only; a concept/paraphrase miss is 'no semantic tier now', not absence.\n"
+            ));
+        }
+    }
     match n {
         None => format!("ERROR swamp_find: malformed or failed result:\n{}", cap(raw)),
         Some(0) => {
@@ -969,6 +988,32 @@ mod tests {
         // UNKNOWN (broker fail-closed / swampd down): same conservative caution.
         let unknown = "RESULT 0\nfreshness unknown\nEND\n";
         assert!(format_swamp_result(unknown).starts_with("NOTE swamp_find index freshness=unknown"));
+    }
+
+    #[test]
+    fn swamp_result_surfaces_semantic_availability() {
+        // Slice-4 wire: a `semantic` header rides after freshness. `available` adds NO note.
+        let avail = "RESULT 1\nfreshness fresh\nsemantic available\nhit /srv/p/a.c\tint main()\nEND\n";
+        let fa = format_swamp_result(avail);
+        assert!(fa.contains("1 hit(s)") && fa.contains("- /srv/p/a.c: int main()"));
+        assert!(!fa.contains("semantic="), "available adds no note");
+        assert!(!fa.contains("- semantic"), "the semantic line is never rendered as a hit");
+
+        // UNAVAILABLE: a capability note is surfaced (results are lexical only), WITHOUT blocking hits.
+        let unavail = "RESULT 1\nfreshness fresh\nsemantic unavailable\nhit /srv/p/a.c\tint main()\nEND\n";
+        let fu = format_swamp_result(unavail);
+        assert!(fu.contains("NOTE swamp_find semantic=unavailable"));
+        assert!(fu.contains("lexical (keyword) only"));
+        assert!(fu.contains("1 hit(s)"), "the note is additive — hits still render");
+
+        // Absent semantic line (pre-slice-4 swampd) ⇒ no semantic note (backward compatible).
+        let old = "RESULT 1\nfreshness fresh\nhit /srv/p/a.c\tint main()\nEND\n";
+        assert!(!format_swamp_result(old).contains("semantic="));
+
+        // Both cautions can stack: stale index AND semantic unavailable.
+        let both = "RESULT 0\nfreshness stale\nsemantic unavailable\nEND\n";
+        let fb = format_swamp_result(both);
+        assert!(fb.contains("freshness=stale") && fb.contains("semantic=unavailable"));
     }
 
     #[test]

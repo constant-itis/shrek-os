@@ -13,6 +13,7 @@
 //! subtree-reconciled, closing the recursive-watch race (a child created before the watch is armed is
 //! still caught by the immediate reconcile).
 
+use crate::embed::SemanticCtx;
 use crate::index::Index;
 use crate::linux_uapi as k;
 use std::collections::HashMap;
@@ -115,7 +116,7 @@ impl Watcher {
     /// Drain and apply all pending inotify events. Returns `true` if the kernel queue overflowed
     /// (`IN_Q_OVERFLOW`) — the reactor then does a full reconcile + re-arm and recomputes freshness,
     /// because an overflow means events were dropped and the incremental map can no longer be trusted.
-    pub fn process(&mut self, index: &Index, home: &Path) -> bool {
+    pub fn process(&mut self, index: &Index, home: &Path, sem: Option<&SemanticCtx>) -> bool {
         let mut overflow = false;
         let mut buf = [0u8; 16 * 1024];
         loop {
@@ -142,7 +143,7 @@ impl Watcher {
                     break; // truncated (should not happen with whole-event reads); stop safely
                 }
                 let name = parse_name(&buf[name_start..name_end]);
-                if self.apply_event(index, home, wd, mask, name.as_deref()) {
+                if self.apply_event(index, home, wd, mask, name.as_deref(), sem) {
                     overflow = true;
                 }
                 off = name_end;
@@ -159,6 +160,7 @@ impl Watcher {
         wd: i32,
         mask: u32,
         name: Option<&str>,
+        sem: Option<&SemanticCtx>,
     ) -> bool {
         if mask & k::IN_Q_OVERFLOW != 0 {
             eprintln!("swampd: inotify queue overflow — events dropped, forcing reconcile");
@@ -199,16 +201,16 @@ impl Watcher {
         if mask & (k::IN_CREATE | k::IN_MOVED_TO) != 0 {
             if is_dir {
                 // Arm the new dir THEN reconcile its subtree — the race-closing order (fork 1).
-                crate::crawl::reconcile_subtree(index, home, self, &path);
+                crate::crawl::reconcile_subtree(index, home, self, &path, sem);
             } else {
-                let _ = crate::crawl::index_object(index, home, &path);
+                let _ = crate::crawl::index_object(index, home, &path, sem);
             }
             return false;
         }
 
         if mask & k::IN_CLOSE_WRITE != 0 {
-            // Content settled → (re)map + (re)extract this one file.
-            let _ = crate::crawl::index_object(index, home, &path);
+            // Content settled → (re)map + (re)extract + (re)embed this one file.
+            let _ = crate::crawl::index_object(index, home, &path, sem);
         }
         false
     }

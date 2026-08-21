@@ -76,6 +76,13 @@ pub struct IndexableDomain {
     pub name: &'static str,
     pub members: &'static [&'static str],
     pub ceiling: DomainCeiling,
+    /// SWAMP SEMANTIC tier enablement for THIS domain (slice-4, swamp.md §8 "per-domain enablement").
+    /// `true` ⇒ the embedder chunks+vectorizes this domain's readable text; `false` ⇒ metadata+FTS only
+    /// (no embeddings — "nothing but metadata over ~/Media", filesystem-intelligence.md §6). This is an
+    /// enrichment switch, NEVER an authority term: it only governs *which enrichment runs*, so a domain
+    /// with `semantic:false` is fully FTS-searchable; it just contributes no vectors. The mandatory FTS
+    /// floor is unconditional (search ceiling), independent of this flag.
+    pub semantic: bool,
 }
 
 // ---- the sealed allow-set template --------------------------------------------------------------
@@ -88,10 +95,14 @@ pub struct IndexableDomain {
 /// read-only intelligence at slice-1. Human-only trees (`~/Vault`, keys, identity) are ABSENT by
 /// construction — they are not members, so default-deny covers them, and [`NEVER_INDEXABLE`] makes
 /// the nested case authoritative too.
+// `semantic`: SWAMP SEMANTIC is opt-in PER DOMAIN (swamp.md §8). Text-heavy domains that benefit from
+// similarity — `projects`, `documents` — enable it; `downloads` (memes, installers, binaries) stays
+// FTS+metadata only so a modest box does not burn CPU embedding junk (filesystem-intelligence.md §6).
+// The FTS floor is unconditional regardless of this flag.
 pub const INDEXABLE_DOMAINS: &[IndexableDomain] = &[
-    IndexableDomain { name: "projects", members: &["Projects"], ceiling: DomainCeiling::RO_SEARCH },
-    IndexableDomain { name: "documents", members: &["Documents"], ceiling: DomainCeiling::RO_SEARCH },
-    IndexableDomain { name: "downloads", members: &["Downloads"], ceiling: DomainCeiling::RO_SEARCH },
+    IndexableDomain { name: "projects", members: &["Projects"], ceiling: DomainCeiling::RO_SEARCH, semantic: true },
+    IndexableDomain { name: "documents", members: &["Documents"], ceiling: DomainCeiling::RO_SEARCH, semantic: true },
+    IndexableDomain { name: "downloads", members: &["Downloads"], ceiling: DomainCeiling::RO_SEARCH, semantic: false },
 ];
 
 /// Human-only path-COMPONENT markers. A path any of whose components equals one of these is NEVER
@@ -259,6 +270,18 @@ mod tests {
                 assert!(!m.starts_with('/'), "member must be $HOME-relative (no leading /): {:?}", m);
                 assert!(!m.contains(".."), "member must not escape home: {:?}", m);
             }
+        }
+    }
+
+    #[test]
+    fn semantic_is_per_domain_and_never_affects_the_search_ceiling() {
+        // Text-heavy domains enable the semantic tier; downloads does not.
+        assert!(resolve_domain("projects").unwrap().semantic);
+        assert!(resolve_domain("documents").unwrap().semantic);
+        assert!(!resolve_domain("downloads").unwrap().semantic);
+        // The FTS floor is unconditional: EVERY domain still grants search regardless of the flag.
+        for d in INDEXABLE_DOMAINS {
+            assert!(d.ceiling.search, "domain {:?} must keep the FTS search ceiling", d.name);
         }
     }
 

@@ -21,7 +21,8 @@
 
 use crate::authority;
 use crate::crawl;
-use crate::index::{Index, Intent};
+use crate::embed::SemanticCtx;
+use crate::index::{Hit, Index, Intent};
 use crate::linux_uapi::{self, PollFd, POLLIN};
 use crate::watch::{Freshness, Watcher};
 use std::io::{BufRead, BufReader, Write};
@@ -38,11 +39,20 @@ pub struct Server<'a> {
     index: &'a Index,
     authority_dir: PathBuf,
     allowed_uids: Vec<u32>,
+    /// The semantic tier context, or `None` when no embedding provider is configured. Its presence adds
+    /// similarity ranking on `search`; its absence (or a per-query provider failure) degrades to the FTS
+    /// floor with `semantic unavailable`. It NEVER affects authority — the frozen gate runs regardless.
+    sem: Option<&'a SemanticCtx<'a>>,
 }
 
 impl<'a> Server<'a> {
-    pub fn new(index: &'a Index, authority_dir: PathBuf, allowed_uids: Vec<u32>) -> Self {
-        Server { index, authority_dir, allowed_uids }
+    pub fn new(
+        index: &'a Index,
+        authority_dir: PathBuf,
+        allowed_uids: Vec<u32>,
+        sem: Option<&'a SemanticCtx<'a>>,
+    ) -> Self {
+        Server { index, authority_dir, allowed_uids, sem }
     }
 
     /// Bind the query socket and run the single-thread reactor: `poll` the query listener AND the
@@ -90,12 +100,12 @@ impl<'a> Server<'a> {
 
             // Watcher first: applying pending fs events keeps the map current before we answer queries.
             if fds[1].revents & POLLIN != 0 {
-                let overflow = watcher.process(self.index, home);
+                let overflow = watcher.process(self.index, home, self.sem);
                 if overflow {
                     // Dropped events → the incremental map is untrustworthy. Full reconcile + re-arm,
                     // then recompute freshness. FRESH only if BOTH succeed (fork 1).
                     watcher.reset_health();
-                    let stats = crawl::reconcile_full(self.index, home, watcher);
+                    let stats = crawl::reconcile_full(self.index, home, watcher, self.sem);
                     freshness = if watcher.healthy() { Freshness::Fresh } else { Freshness::Stale };
                     eprintln!(
                         "swampd: post-overflow reconcile objects={} deleted={} freshness={}",
@@ -150,23 +160,64 @@ impl<'a> Server<'a> {
         // Domain ceiling: the domains whose sealed ceiling grants this verb.
         let verb_domains = domains_granting(req.intent);
 
-        let hits = self
+        // The FTS/metadata result — the MANDATORY LEXICAL FLOOR, produced by the FROZEN authorization
+        // gate, untouched by this slice. It is always computed and always authoritative for correctness.
+        let fts_hits = self
             .index
             .query(req.intent, &req.query, &effective, &verb_domains, req.limit)
             .unwrap_or_default();
 
-        // Freshness rides as a header line after RESULT and before the hits. Existing consumers ignore
-        // unrecognized lines, so this is backward-compatible; the RESULT/hit/END structural core is
-        // unchanged, preserving slice-2's deny-vs-zero-hit indistinguishability. Freshness is index-
-        // global — it discloses nothing about which sessions or objects exist.
+        // Semantic tier — ADDITIVE, and only on `search`. It is `available` iff a provider is configured
+        // AND this query's terms embed successfully; on absence or ANY provider failure we serve the FTS
+        // floor and report `unavailable` (§1.2 T7 — provider loss degrades, never disables). The semantic
+        // candidate set is built by the SAME scope+ceiling as the FTS gate, so merging two authorized
+        // result sets can never widen authority (§1.1).
+        let (hits, semantic_avail) = match (req.intent, self.sem) {
+            (Intent::Search, Some(ctx)) => match ctx.embed_query(&req.query) {
+                Some(qvec) => {
+                    let sem_hits = self
+                        .index
+                        .semantic_query(&qvec, &ctx.semantic_version, &effective, &verb_domains, req.limit)
+                        .unwrap_or_default();
+                    (merge_semantic_led(sem_hits, fts_hits, req.limit), true)
+                }
+                None => (fts_hits, false), // provider unreachable/erroring → FTS floor
+            },
+            _ => (fts_hits, false), // discover intent, or no provider → lexical/metadata only
+        };
+
+        // Freshness (slice-3) and semantic-availability (slice-4) ride as header lines after RESULT and
+        // before the hits. Existing consumers ignore unrecognized lines, so this stays backward-
+        // compatible; the RESULT/hit/END structural core is unchanged, preserving slice-2's deny-vs-zero-
+        // hit indistinguishability. BOTH signals are index-global — they disclose nothing about which
+        // sessions or objects exist.
         writeln!(stream, "RESULT {}", hits.len())?;
         writeln!(stream, "freshness {}", freshness.wire())?;
+        writeln!(stream, "semantic {}", if semantic_avail { "available" } else { "unavailable" })?;
         for h in &hits {
             writeln!(stream, "hit {}\t{}", sanitize(&h.path), sanitize(&h.snippet))?;
         }
         writeln!(stream, "END")?;
         Ok(())
     }
+}
+
+/// Semantic-led fusion (slice-4 Fork F6 — the mycelium bake-off proved equal-weight RRF drags a strong
+/// semantic ranking DOWN). Lead with the semantic order, then append lexical hits not already present as
+/// the exact-match booster/floor. Deduped by path, capped at `limit`. Both inputs already passed the
+/// SAME authority gate, so their union is authorized by construction.
+fn merge_semantic_led(semantic: Vec<Hit>, lexical: Vec<Hit>, limit: usize) -> Vec<Hit> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(limit.min(semantic.len() + lexical.len()));
+    for h in semantic.into_iter().chain(lexical) {
+        if out.len() >= limit {
+            break;
+        }
+        if seen.insert(h.path.clone()) {
+            out.push(h);
+        }
+    }
+    out
 }
 
 struct Request {
