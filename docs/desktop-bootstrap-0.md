@@ -130,8 +130,8 @@ PASS/FAIL lines:
    report ready via a log line; and/or `swaymsg -t get_tree` shows the layer-shell surfaces).
 4. **Clean logout** — `swaymsg exit` tears the session down with rc 0 and no orphaned processes.
 
-Sealed-VM boot integration of the desktop layer (merging `shrek-desktop` in the KVM gate) is the
-**next** execution step after the container smoke is green; tracked, not done in this slab.
+Sealed-VM boot integration of the desktop layer (merging `shrek-desktop` in the KVM gate) is done in
+the **sealed close-out** below (`scripts/desktop-sealed-proof.sh`), after the container smoke is green.
 
 ### Bring-up result — VERIFIED GREEN (2026-08-21)
 `scripts/desktop-smoke.sh` → **`PASS=4 FAIL=0`**: `DB0-sway` (Sway starts headless) · `DB0-qs-load`
@@ -149,6 +149,39 @@ acceptance line is met. What the bring-up nailed down (the whole point of the sl
 - **Headless/software path proven**: Sway `WLR_BACKENDS=headless WLR_RENDERER=pixman` + Quickshell as
   a Wayland client (`QT_QPA_PLATFORM=wayland`, `QT_QUICK_BACKEND=software`) → GPU-free, deterministic.
 - **Config-folder rule**: the `ui/shell.qml` root entry is required (see §Session).
+
+## Sealed close-out — Pn-desktop (the KVM gate) — VERIFIED GREEN (2026-08-21)
+The container smoke proves the *stack*; this proves it **merges onto the sealed dm-verity `/usr` and
+instantiates in the real boot**. `scripts/desktop-sealed-proof.sh` runs the pipeline — build the signed
+DDI → bake the sealed root → assemble the store → boot the KVM gate → assert — and reads the verdict off
+`out/vm-console.log`:
+```
+oniond: shrek-desktop (sysext) -> merged      # broker merged the signed layer onto sealed /usr
+SHREK_GATE: PASS Pn-desktop-merge / -sway / -qs-load / -surfaces / -logout   (DESKTOP PASS=5 FAIL=0)
+  ds| INFO: Launching config: "/usr/share/shrek/ui/shell.qml"
+  ds| DEBUG qml: SHREK-DESKTOP shell surfaces instantiated
+  ds| INFO: Configuration Loaded
+```
+Wiring: `image/overlay/usr/lib/shrek/onion-policy` gains `enable shrek-desktop`; the new baked
+`shrek-desktop-gate.service` runs the real session (`/usr/bin/shrek-desktop` → Sway → Quickshell)
+headless after the Onion merge and mirrors the verdict to the serial console (it never fails the boot).
+
+**Integration unknowns this close-out actually resolved** (the mechanical work, not turnkey):
+- **Packaged sysext needs a base tree.** mkosi 25.3 refuses `Packages=` in an extension without one
+  (`Cannot install packages in extension images without a base tree`). `scripts/build-desktop-layer.sh`
+  builds a throwaway base tree of the sealed-base runtime closure and builds the layer with
+  `--base-tree … --overlay`, so only the new desktop files land in the DDI.
+- **overlayfs-on-overlay2.** mkosi assembles the overlay under `/var/tmp`, which is docker's overlay2 →
+  `mount(overlay) EINVAL`. The build bind-mounts a host ext4 dir over `/var/tmp` so every mkosi
+  workspace lands on real ext4 (the disk-format base image build sidesteps this via systemd-repart).
+- **Runtime lib the dev-smoke masked.** Quickshell links `libQt6Widgets.so.6`; the dev-package smoke
+  pulled it transitively, the runtime layer did not — added `libqt6widgets6` to the layer `Packages=`.
+- **Poweroff ordering.** `shrek-mount-gate.service` owns `poweroff-force`; it is now ordered
+  `After=shrek-desktop-gate.service` so the desktop surface proof completes before the VM powers off.
+- **Shared-log error scoping.** The sealed gate runs Sway+Quickshell into one log, so the qs-load error
+  scan is scoped to Quickshell/QML failures (Sway's benign `[ERROR]`/Xwayland lines must not count);
+  `xwayland disable` in `sway.config` drops the X dependency and the noise. (Benign remainder: a
+  Fontconfig `Cannot load default config` warning — surfaces instantiate regardless.)
 
 ## Build plan (owner-split commits; no Co-Authored-By)
 1. **feat(ui)** — `ui/` QML skeleton + provider seam + tokens.
