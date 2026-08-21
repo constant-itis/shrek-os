@@ -15,8 +15,10 @@
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 
-QS_REPO="$(sed -n 's/^\s*repo\s*=\s*"\(.*\)"/\1/p' image/supply/desktop.pins | head -1)"
-QS_TAG="$(sed -n 's/^\s*quickshell_tag\s*=\s*"\(.*\)"/\1/p' image/supply/desktop.pins | head -1)"
+# robust pin reader: strip inline comments, then take the quoted value
+pin() { grep -E "^[[:space:]]*$1[[:space:]]*=" image/supply/desktop.pins | head -1 | sed 's/#.*//' | cut -d'"' -f2; }
+QS_REPO="$(pin repo)"
+QS_TAG="$(pin quickshell_tag)"
 
 echo "=== Desktop Bootstrap-0 smoke (repo=${QS_REPO} tag=${QS_TAG}) in debian:trixie ==="
 docker run --rm --privileged \
@@ -30,17 +32,18 @@ docker run --rm --privileged \
 
     echo "--- apt: runtime + build deps ---"
     apt-get update -qq >/dev/null
+    # REQUIRED core — atomic; ca-certificates first (git/apt HTTPS needs it in the bare trixie image).
     apt-get install -y --no-install-recommends -qq \
-      sway foot \
-      qt6-wayland qml6-module-qtquick qml6-module-qtquick-window qml6-module-qtquick-layouts \
-      qml6-module-qtquick-shapes qml6-module-qtquick-controls qml6-module-qtquick-templates \
-      libgl1-mesa-dri libglx-mesa0 fonts-dejavu-core \
+      ca-certificates openssl \
+      sway foot qt6-wayland qml6-module-qtquick \
       git cmake ninja-build build-essential pkg-config \
-      qt6-base-dev qt6-declarative-dev qt6-declarative-private-dev qt6-wayland-dev \
-      qt6-shadertools-dev libwayland-dev wayland-protocols libjemalloc-dev >/dev/null 2>&1 || \
-      apt-get install -y --no-install-recommends \
-      sway foot qt6-wayland qml6-module-qtquick git cmake ninja-build build-essential pkg-config \
       qt6-base-dev qt6-declarative-dev qt6-declarative-private-dev qt6-wayland-dev libwayland-dev
+    # BEST-EFFORT extras — a wrong/absent name must NOT sink the whole run.
+    for p in qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
+             qml6-module-qtquick-controls qt6-declarative-dev-tools qt6-shadertools-dev \
+             wayland-protocols libjemalloc-dev libgl1-mesa-dri fonts-dejavu-core; do
+      apt-get install -y --no-install-recommends -qq "$p" >/dev/null 2>&1 || echo "WARN optional pkg missing: $p"
+    done
 
     export XDG_RUNTIME_DIR=/run/xdgr; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
     export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
@@ -52,7 +55,7 @@ import QtQuick
 Rectangle { width: 64; height: 64; color: "#5aa02c"
   Component.onCompleted: { console.log("SHREK-QT-SW ok"); Qt.callLater(Qt.quit) } }
 QML
-    QMLRUN="$(command -v qml6 || command -v qml || true)"
+    QMLRUN="$(command -v qml6 || command -v qml || ls /usr/lib/qt6/bin/qml 2>/dev/null || true)"
     if [ -n "$QMLRUN" ] && timeout 30 "$QMLRUN" /tmp/probe.qml 2>&1 | grep -q "SHREK-QT-SW ok"; then
       gate ok DB0-qt-sw; else gate no DB0-qt-sw; fi
 
