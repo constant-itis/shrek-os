@@ -1,0 +1,24 @@
+# Shrek OS — Phase-6 Swamp slice-3: mount the dedicated persistent swamp-index partition at
+# /var/lib/swamp. /var itself is a volatile tmpfs (systemd.volatile=state); this real ext4 partition
+# overlays exactly the /var/lib/swamp subtree so the index survives reboot while the rest of /var does
+# not. Bound by GPT partition label (image/mkosi.repart/30-swamp-state.conf sets Label=shrek-swamp).
+#
+# systemd creates the mountpoint (mkdir -p /var/lib/swamp on the fresh tmpfs /var) before mounting.
+# Enabled via the local-fs.target.wants symlink shipped in the overlay, so it mounts early on every
+# boot — independent of whether swampd itself is enabled (swampd stays disabled by default).
+[Unit]
+Description=Shrek swamp persistent index store (/var/lib/swamp)
+Documentation=file:///usr/share/doc/shrek/phase6-swamp-slice3-live-persistent.md
+After=var.mount
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Mount]
+What=/dev/disk/by-partlabel/shrek-swamp
+Where=/var/lib/swamp
+Type=ext4
+Options=noatime,nosuid,nodev,noexec
+
+[Install]
+WantedBy=local-fs.target
