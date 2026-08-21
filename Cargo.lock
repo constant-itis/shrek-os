@@ -292,6 +292,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "swamp-embed-proxy"
+version = "0.0.1"
+dependencies = [
+ "tinyjson",
+]
+
+[[package]]
 name = "swampd"
 version = "0.0.1"
 dependencies = [
