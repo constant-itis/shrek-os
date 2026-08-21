@@ -1,0 +1,32 @@
+[package]
+name = "codex-broker"
+version.workspace = true
+edition.workspace = true
+
+# The broker-side SECOND subscription-model provider (Phase-6 slice-6,
+# docs/phase6-slice6-codex-cli-broker.md) — a SIBLING of claude-broker that proves the broker/provider
+# pattern generalizes beyond Claude.
+#
+# It is NOT a control plane and is NOT sealed into the appliance image. It runs BROKER-SIDE, outside the
+# T2 sandbox. The sandboxed coder speaks the SAME plaintext messages-API wire it already speaks to the
+# api-key proxy (crates/model-proxy) and the claude broker — but over the sealed one-destination
+# `model-codex-cli` egress — and this broker ADAPTS that request into an invocation of the host's
+# ALREADY-LOGGED-IN `codex exec` CLI, then wraps the reply back into the messages-API shape the coder
+# expects. Shrek handles NO subscription credential: the CLI owns its own login. The coder is UNCHANGED.
+#
+# THE ONE THING THAT DIFFERS FROM claude-broker (and why this slice needed its own design review): the
+# `codex` CLI is an AGENTIC EXECUTOR with its own shell/exec tool surface, not a plain completion like
+# `claude -p`. So the broker (a) confines the spawned `codex` in an unprivileged `bubblewrap` STERILE
+# VIEW — only the runtime + a ro-bound `auth.json` + one rw scratch file are visible; no project/home/
+# vault, no writable host paths — and (b) DISABLES the model's tool surface (empty `[tools]` allowlist +
+# `--disable shell_tool/unified_exec`), so the model can never read the ro-bound credential and exfil it
+# through the reply. The host confinement is authoritative; codex's own `-s read-only`/`--ephemeral` are
+# defense-in-depth. `bwrap` is a broker-side HOST binary dependency (like the host `codex`/`claude`
+# binary), never in the sealed rootfs.
+#
+# Dep policy mirrors the coder and claude-broker: exactly ONE build-time dependency, `tinyjson` — a
+# pure-Rust, ZERO-transitive JSON parser/encoder, already vendored in-tree. The CLIs (`bwrap`, `codex`)
+# are invoked via std::process (argv vector, NO shell) so no caller string is ever interpreted as a
+# command. Excluded from the sealed image's default build (workspace default-members) — see root Cargo.toml.
+[dependencies]
+tinyjson = "2"

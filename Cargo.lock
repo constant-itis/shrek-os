@@ -58,6 +58,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-broker"
+version = "0.0.1"
+dependencies = [
+ "tinyjson",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

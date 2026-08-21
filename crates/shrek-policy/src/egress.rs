@@ -127,6 +127,19 @@ const MODEL_CLAUDE_CLI: &[EgressRule] = &[
     EgressRule { host: "shrek-claude-cli", proto: Proto::Tcp, port: 8300 },
 ];
 
+// The coding-agent's SECOND subscription-model endpoint (Codex via the logged-in official CLI),
+// Phase-6 slice-6. IDENTICAL shape to `model-claude-cli` — the box reaches EXACTLY ONE destination —
+// but the broker is `crates/codex-broker` (`shrek-codex-cli`), a sibling of claude-broker that shells
+// the ALREADY-authenticated `codex exec` CLI under an unprivileged bubblewrap confinement. Shrek
+// handles NO subscription credential (the CLI owns its own login). A THIRD distinct profile name (not
+// `model-anthropic`, not `model-claude-cli`): selecting Codex is an explicit, separately-sealed choice
+// — the no-silent-backend-swap invariant (docs/phase6-slice3-provider-abstraction.md §2) now proven to
+// GENERALIZE across two subscription providers. Plaintext tcp:8301 (distinct port from claude's 8300);
+// the box speaks the same messages-API wire, the broker adapts it to the Codex wire broker-side.
+const MODEL_CODEX_CLI: &[EgressRule] = &[
+    EgressRule { host: "shrek-codex-cli", proto: Proto::Tcp, port: 8301 },
+];
+
 /// THE sealed egress table — the single, compiled-in source of egress policy. gatekeeperd resolves
 /// names against this; there is no runtime or writable source. Deny-by-default: a name absent here
 /// resolves to `None` and gatekeeperd fails the C-net construct closed.
@@ -138,6 +151,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "model-local", rules: MODEL_LOCAL },
     EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
     EgressProfile { name: "model-claude-cli", rules: MODEL_CLAUDE_CLI },
+    EgressProfile { name: "model-codex-cli", rules: MODEL_CODEX_CLI },
 ];
 
 /// Resolve a profile NAME to its sealed destination set. STRICT + FAIL-CLOSED, mirroring
@@ -209,6 +223,41 @@ mod tests {
         assert_ne!(cli.name, api.name);
         assert!(!cli.allows("shrek-model-proxy", Proto::Tcp, 8200));
         assert!(!api.allows("shrek-claude-cli", Proto::Tcp, 8300));
+    }
+
+    #[test]
+    fn model_codex_cli_reaches_only_the_broker() {
+        // The SECOND subscription-model profile reaches exactly ONE dst — the Codex CLI broker — and
+        // nothing else. No secret lives here: the broker shells the logged-in `codex exec` CLI, which
+        // owns its own auth (Phase-6 slice-6). Distinct port (8301) from the claude broker (8300).
+        let m = resolve("model-codex-cli").unwrap();
+        assert_eq!(m.rules.len(), 1, "model-codex-cli must reach exactly one destination (the broker)");
+        assert!(m.allows("shrek-codex-cli", Proto::Tcp, 8301));
+        // The box must NOT reach OpenAI directly, the claude broker, the api-key proxy, or the local model.
+        assert!(!m.allows("api.openai.com", Proto::Tcp, 443));
+        assert!(!m.allows("chatgpt.com", Proto::Tcp, 443));
+        assert!(!m.allows("shrek-claude-cli", Proto::Tcp, 8300)); // not the claude broker
+        assert!(!m.allows("shrek-model-proxy", Proto::Tcp, 8200)); // not the api-key proxy
+        assert!(!m.allows("shrek-model", Proto::Tcp, 8100));       // not the local-model dst
+    }
+
+    #[test]
+    fn all_three_provider_paths_are_mutually_distinct_profiles() {
+        // The no-silent-backend-swap invariant now GENERALIZES: api-key, Claude-subscription, and
+        // Codex-subscription are THREE separate sealed names at THREE different brokers/ports. No
+        // profile's single destination overlaps any other's — selecting a provider is always explicit.
+        let api = resolve("model-anthropic").unwrap();
+        let claude = resolve("model-claude-cli").unwrap();
+        let codex = resolve("model-codex-cli").unwrap();
+        // Names are pairwise distinct.
+        assert_ne!(api.name, claude.name);
+        assert_ne!(api.name, codex.name);
+        assert_ne!(claude.name, codex.name);
+        // Destinations are pairwise non-overlapping (each reaches exactly its own broker).
+        assert!(!codex.allows("shrek-model-proxy", Proto::Tcp, 8200));
+        assert!(!codex.allows("shrek-claude-cli", Proto::Tcp, 8300));
+        assert!(!claude.allows("shrek-codex-cli", Proto::Tcp, 8301));
+        assert!(!api.allows("shrek-codex-cli", Proto::Tcp, 8301));
     }
 
     #[test]
