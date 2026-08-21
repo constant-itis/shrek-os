@@ -26,6 +26,13 @@ fn main() {
     match argv.first().map(String::as_str) {
         Some("run") => std::process::exit(run(&argv[1..])),
         Some("find") => std::process::exit(find(&argv[1..])),
+        // Phase-8 slice-1: the agent-session front door. `shrek session status <id>` reads the
+        // effective-authority view; otherwise it composes a session and routes it through agentd (which
+        // decides the tier + attaches an identity), so the session carries a visible authority record.
+        Some("session") => std::process::exit(match argv.get(1).map(String::as_str) {
+            Some("status") => session_status(&argv[2..]),
+            _ => session(&argv[1..]),
+        }),
         Some("-h") | Some("--help") | None => {
             usage();
             std::process::exit(0);
@@ -267,6 +274,209 @@ fn dispatch(p: Plan) -> i32 {
     eprintln!("           set SHREK_GATEKEEPERD or ensure gatekeeperd is on PATH, and run with the");
     eprintln!("           privilege sandbox construction needs (mounts + netns), as the proofs do.");
     127
+}
+
+/// `shrek session --project DIR [--egress NAME]... [--subject S] [--live] [opts] -- WORKLOAD…`
+///
+/// Same isolation shape as `shrek run` (T2 write-through project + exec build area + sealed named
+/// egress), but routed through `agentd session`: agentd makes the deterministic tier decision, attaches
+/// the attested-subject stand-in, and execs gatekeeperd — which RE-CHECKS and, because the session
+/// carries an identity, authors the effective-authority VIEW (`shrek session status`). agentd owns the
+/// tier, so this front door does NOT claim one.
+fn session(args: &[String]) -> i32 {
+    let mut project: Option<String> = None;
+    let mut build: Option<String> = None;
+    let mut no_build = false;
+    let mut egress: Vec<String> = Vec::new();
+    let mut trust = String::from("T-hostile");
+    let mut subject: Option<String> = None;
+    let mut live = false;
+    let mut ingest_harness = true;
+    let mut no_chdir = false;
+    let mut id: Option<String> = None;
+    let mut guest_prefix = String::from("/srv");
+    let mut dry_run = false;
+    let mut workload: Vec<String> = Vec::new();
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--project" => { i += 1; project = args.get(i).cloned(); }
+            "--build" => { i += 1; build = args.get(i).cloned(); }
+            "--no-build" => no_build = true,
+            "--egress" => { i += 1; if let Some(v) = args.get(i) { egress.push(v.clone()); } }
+            "--trust" => { i += 1; if let Some(v) = args.get(i) { trust = v.clone(); } }
+            "--subject" => { i += 1; subject = args.get(i).cloned(); }
+            "--live" => live = true,
+            "--no-ingest-harness" => ingest_harness = false,
+            "--no-chdir" => no_chdir = true,
+            "--id" => { i += 1; id = args.get(i).cloned(); }
+            "--guest-prefix" => { i += 1; if let Some(v) = args.get(i) { guest_prefix = v.clone(); } }
+            "--dry-run" => dry_run = true,
+            "-h" | "--help" => { usage(); return 0; }
+            "--" => { workload = args[i + 1..].to_vec(); break; }
+            other => { eprintln!("shrek session: unknown arg `{other}`"); return 2; }
+        }
+        i += 1;
+    }
+
+    let Some(project) = project else {
+        eprintln!("shrek session: --project DIR is required");
+        return 2;
+    };
+    if workload.is_empty() {
+        eprintln!("shrek session: a workload is required (… -- CMD ARG…)");
+        return 2;
+    }
+    let project = absolutize(Path::new(&project));
+    if !project.is_dir() {
+        eprintln!("shrek session: project is not a directory: {}", project.display());
+        return 2;
+    }
+    let (anchor, rw_name) = match split_beneath(&project) {
+        Some(v) => v,
+        None => {
+            eprintln!("shrek session: project must be a named directory beneath a parent: {}", project.display());
+            return 2;
+        }
+    };
+    // Build area: a second grant beneath the same anchor (default <project>.build), created 0700.
+    let build_name = if no_build {
+        None
+    } else {
+        let build_path = match build {
+            Some(b) => absolutize(Path::new(&b)),
+            None => anchor.join(format!("{rw_name}.build")),
+        };
+        match split_beneath(&build_path) {
+            Some((b_anchor, b_name)) if b_anchor == anchor => {
+                if let Err(e) = ensure_dir_0700(&build_path) {
+                    eprintln!("shrek session: cannot prepare build area {}: {e}", build_path.display());
+                    return 2;
+                }
+                Some(b_name)
+            }
+            _ => {
+                eprintln!("shrek session: --build must be a valid path beneath the project's parent ({})", anchor.display());
+                return 2;
+            }
+        }
+    };
+    let id = id.unwrap_or_else(|| format!("shrek-{rw_name}"));
+    let subject = subject.unwrap_or_else(|| format!("agent:{id}"));
+
+    // cd into the project's in-guest path (same argv-preserving wrapper as `shrek run`).
+    let workload = if no_chdir {
+        workload
+    } else {
+        let guest_proj = format!("{}/{}", guest_prefix.trim_end_matches('/'), rw_name);
+        let mut w = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("cd {} || exit 40; exec \"$0\" \"$@\"", shquote(&guest_proj)),
+        ];
+        w.extend(workload);
+        w
+    };
+
+    // caps == C-net iff a named egress is attached (C-net ⊇ C-proj-rw keeps project RW), else C-proj-rw.
+    let caps = if egress.is_empty() { "C-proj-rw" } else { "C-net" };
+
+    // Compose the `agentd session` argv: decision inputs (trust/caps/profile/subject/live) + the
+    // gatekeeperd-sandbox passthrough (anchor + rw/build grants + egress names + ingest harness). agentd
+    // decides the tier, attaches the subject, and execs gatekeeperd. No `--tier` here — agentd owns it.
+    let agentd = std::env::var("SHREK_AGENTD").unwrap_or_else(|_| "agentd".to_string());
+    let mut a: Vec<String> = vec![
+        "session".into(),
+        "--trust".into(), trust,
+        "--caps".into(), caps.into(),
+        "--profile".into(), caps.into(),
+        "--subject".into(), subject,
+        "--id".into(), id,
+        "--anchor".into(), anchor.to_string_lossy().into_owned(),
+        "--guest-prefix".into(), guest_prefix,
+        "--rw-grant".into(), rw_name,
+    ];
+    if live {
+        a.push("--live".into());
+    }
+    if let Some(b) = build_name {
+        a.push("--build-grant".into());
+        a.push(b);
+    }
+    if ingest_harness {
+        a.push("--ingest-harness".into());
+    }
+    for name in egress {
+        a.push("--egress-profile".into());
+        a.push(name);
+    }
+    a.push("--".into());
+    a.extend(workload);
+
+    if dry_run {
+        let mut line = shquote(&agentd);
+        for arg in &a {
+            line.push(' ');
+            line.push_str(&shquote(arg));
+        }
+        println!("{line}");
+        return 0;
+    }
+    let err = Command::new(&agentd).args(&a).exec();
+    eprintln!("shrek session: cannot exec `{agentd}`: {err}");
+    eprintln!("               set SHREK_AGENTD or ensure agentd is on PATH.");
+    127
+}
+
+/// `shrek session status <id>` — READ-ONLY view of the gatekeeperd-authored effective-authority record
+/// `$SHREK_SESSION_DIR/<id>.json` (default `/run/shrek/session`). Fail-closed: a missing/malformed
+/// record renders "no such session". Prints a one-line summary + the raw structured record (the same
+/// `shrek-session/1` JSON the Quickshell Work drawer consumes). Reads only — mints no authority.
+fn session_status(args: &[String]) -> i32 {
+    let Some(id) = args.first() else {
+        eprintln!("usage: shrek session status <id>");
+        return 2;
+    };
+    // Guard the id as a single safe path component (never traverse out of the session dir).
+    if id.is_empty() || id == "." || id == ".." || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
+        eprintln!("shrek session status: invalid session id");
+        return 2;
+    }
+    let dir = std::env::var("SHREK_SESSION_DIR").unwrap_or_else(|_| "/run/shrek/session".to_string());
+    let path = Path::new(&dir).join(format!("{id}.json"));
+    let body = match std::fs::read_to_string(&path) {
+        Ok(b) if b.contains("\"shrek-session/1\"") => b,
+        _ => {
+            eprintln!("shrek session status: no such session `{id}` (fail-closed)");
+            return 4;
+        }
+    };
+    // Dep-free field pluck for the summary line (the record is gatekeeper-authored, single-line values).
+    let v = |k: &str| json_str_value(&body, k).unwrap_or_else(|| "-".into());
+    println!(
+        "SESSION {id}  state={}  subject={}  tier={}  trust={}  caps={}",
+        v("state"), v("subject"), v("tier"), v("trust"), v("caps")
+    );
+    println!(
+        "  egress={} -> {}   model={}/{}   semantic={}",
+        v("egress_profile"), v("egress_dst"), v("provider"), v("mode"),
+        if body.contains("\"available\": true") { "available" } else { "unavailable" }
+    );
+    print!("{body}");
+    0
+}
+
+/// Extract the string value of the FIRST `"key": "…"` in the record (dep-free). Substring-scans the
+/// whole body, so it also plucks values nested in a single-line object (e.g. `model.provider`). Keys
+/// used here are gatekeeper-authored and unambiguous; `tier` resolves to the effective tier (first).
+fn json_str_value(body: &str, key: &str) -> Option<String> {
+    let needle = format!("\"{key}\":");
+    let idx = body.find(&needle)?;
+    let rest = body[idx + needle.len()..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 /// Make a path absolute without resolving symlinks (gatekeeperd does its own TOCTOU-safe resolution
