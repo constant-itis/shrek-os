@@ -30,6 +30,7 @@
 # source is only the wrapper, sway.config, and layer marker.
 /layers/shrek-desktop/overlay/usr/share/shrek/ui/
 /layers/shrek-desktop/overlay/usr/bin/quickshell
+/layers/shrek-desktop/overlay/usr/bin/qs
 /layers/shrek-desktop/overlay/usr/lib/x86_64-linux-gnu/
 /layers/shrek-desktop/overlay/usr/lib/qt6/
 /layers/shrek-desktop/overlay/usr/share/qt6/

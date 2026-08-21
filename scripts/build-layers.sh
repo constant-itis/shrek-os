@@ -18,7 +18,13 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 MODE="${1:-good}"
-case "$MODE" in good|select|inject|unsigned|tamper) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper]" >&2; exit 1 ;; esac
+case "$MODE" in good|select|inject|unsigned|tamper|desktop) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop]" >&2; exit 1 ;; esac
+# Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (Quickshell from
+# source) produced by scripts/build-desktop-layer.sh; this script only ASSEMBLES it into the store, so
+# require the DDI to already exist rather than rebuilding it here.
+if [ "$MODE" = "desktop" ] && ! ls out/layers/shrek-desktop*.raw >/dev/null 2>&1; then
+  echo "MODE=desktop needs a built desktop DDI — run scripts/build-desktop-layer.sh first" >&2; exit 1
+fi
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
 
@@ -83,8 +89,13 @@ docker run --rm --privileged \
     if [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
       cp "$(ls out/layers/shrek-extra*.raw | head -1)" out/store-stage/extensions/shrek-extra.raw
     fi
-    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
+    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ] || [ "$MODE" = "inject" ] || [ "$MODE" = "desktop" ]; then
       cp "$(ls out/layers/shrek-conf*.raw | head -1)" out/store-stage/confexts/shrek-conf.raw
+    fi
+    # desktop: stage the pre-built signed shrek-desktop sysext (scripts/build-desktop-layer.sh) beside
+    # shrek-hello. onion-policy enables it → the broker merges it → shrek-desktop-gate.service proves it.
+    if [ "$MODE" = "desktop" ]; then
+      cp "$(ls out/layers/shrek-desktop*.raw | head -1)" out/store-stage/extensions/shrek-desktop.raw
     fi
     # inject: drop the compromised-brain marker oniond reads off the (untrusted) store. World-readable
     # so the unprivileged oniond can read it from the ro mount. The wall (gatekeeperd) must still refuse.
@@ -93,7 +104,11 @@ docker run --rm --privileged \
       chmod 0644 out/store-stage/oniond-inject
     fi
     rm -f out/layer-store.raw
-    mkfs.ext4 -q -L shrek-layers -d out/store-stage out/layer-store.raw 256M
+    # 256M fits the ~1MB marker layers; the desktop sysext (Qt6 + Sway + Mesa closure) is far bigger,
+    # so size the store from the staged bytes (2x + headroom) when it is present.
+    STORE_MB=256
+    if [ "$MODE" = "desktop" ]; then STORE_MB=$(( $(du -sm out/store-stage | cut -f1) * 2 + 128 )); fi
+    mkfs.ext4 -q -L shrek-layers -d out/store-stage out/layer-store.raw "${STORE_MB}M"
     chown -R "${HOST_UID}:${HOST_GID}" out
   '
 echo "=== layer store ready: out/layer-store.raw (label shrek-layers, mode=${MODE}) ==="

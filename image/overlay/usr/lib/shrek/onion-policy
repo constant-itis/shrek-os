@@ -9,3 +9,8 @@
 # Format: `enable <layer-name>` (the DDI's basename without .raw). `#` comments and blanks ignored.
 enable shrek-hello
 enable shrek-conf
+# Desktop Bootstrap-0: the Rung-2 Wayland desktop runtime (Sway + Qt6 QML + Quickshell), delivered as
+# the signed shrek-desktop sysext (scripts/build-desktop-layer.sh). Sealed-enabled here so oniond
+# proposes it and the gatekeeperd broker merges it onto /usr; the shrek-desktop-gate.service then
+# proves the shell surfaces instantiate headless in the sealed boot (Pn-desktop). docs/desktop-bootstrap-0.md.
+enable shrek-desktop
