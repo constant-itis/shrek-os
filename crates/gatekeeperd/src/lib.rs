@@ -8,6 +8,7 @@ pub mod authority_record;
 pub mod ingest_admit;
 pub mod linux_uapi;
 pub mod mount_plane;
+pub mod net_binding;
 pub mod net_plane;
 pub mod pin_manifest;
 pub mod proc_plane;

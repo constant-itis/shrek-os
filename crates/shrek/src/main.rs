@@ -50,7 +50,8 @@ fn usage() {
     eprintln!("    --project DIR        the project; realized WRITE-THROUGH + host-noexec (required)");
     eprintln!("    --build DIR          exec-capable build area (default: <project>.build, created)");
     eprintln!("    --no-build           omit the build area (project stays the only writable grant)");
-    eprintln!("    --egress NAME        attach a SEALED egress profile by name (else loopback-only)");
+    eprintln!("    --egress NAME        attach a SEALED egress profile by name (repeatable — e.g.");
+    eprintln!("                         --egress model-claude-cli --egress swamp-query; else loopback)");
     eprintln!("    --trust BAND         claimed trust band (default: T-hostile)");
     eprintln!("    --tier Tn            claimed tier the decision plane re-checks (default: T2)");
     eprintln!("    --no-ingest-harness  derive the band from the entrypoint arm, not the sealed harness");
@@ -78,7 +79,7 @@ struct Plan {
     anchor: PathBuf,
     rw_name: String,
     build_name: Option<String>,
-    egress: Option<String>,
+    egress: Vec<String>,
     trust: String,
     tier: String,
     ingest_harness: bool,
@@ -92,7 +93,7 @@ fn run(args: &[String]) -> i32 {
     let mut project: Option<String> = None;
     let mut build: Option<String> = None;
     let mut no_build = false;
-    let mut egress: Option<String> = None;
+    let mut egress: Vec<String> = Vec::new();
     let mut trust = String::from("T-hostile");
     let mut tier = String::from("T2");
     let mut ingest_harness = true;
@@ -108,7 +109,9 @@ fn run(args: &[String]) -> i32 {
             "--project" => { i += 1; project = args.get(i).cloned(); }
             "--build" => { i += 1; build = args.get(i).cloned(); }
             "--no-build" => no_build = true,
-            "--egress" => { i += 1; egress = args.get(i).cloned(); }
+            // Repeatable (Phase-6 Swamp slice-2): each `--egress NAME` attaches one sealed profile; a
+            // coding session can name its model broker AND swamp-query as two explicit grants.
+            "--egress" => { i += 1; if let Some(v) = args.get(i) { egress.push(v.clone()); } }
             "--trust" => { i += 1; if let Some(v) = args.get(i) { trust = v.clone(); } }
             "--tier" => { i += 1; if let Some(v) = args.get(i) { tier = v.clone(); } }
             "--no-ingest-harness" => ingest_harness = false,
@@ -210,11 +213,12 @@ fn run(args: &[String]) -> i32 {
     dispatch(plan)
 }
 
-/// Compose the `gatekeeperd sandbox` argv and exec it. `caps` is `C-net` iff a named egress profile
-/// is attached (the ordered lattice: C-net ⊇ C-proj-rw, so a netted coding cell keeps project RW),
-/// else `C-proj-rw`. `--profile` mirrors `--caps` (the declared profile the decision plane re-checks).
+/// Compose the `gatekeeperd sandbox` argv and exec it. `caps` is `C-net` iff at least one named egress
+/// profile is attached (the ordered lattice: C-net ⊇ C-proj-rw, so a netted coding cell keeps project
+/// RW), else `C-proj-rw`. `--profile` mirrors `--caps` (the declared profile the decision plane
+/// re-checks). Each `--egress` becomes one `--egress-profile` arg — gatekeeperd resolves and unions them.
 fn dispatch(p: Plan) -> i32 {
-    let caps = if p.egress.is_some() { "C-net" } else { "C-proj-rw" };
+    let caps = if p.egress.is_empty() { "C-proj-rw" } else { "C-net" };
 
     let gk = std::env::var("SHREK_GATEKEEPERD").unwrap_or_else(|_| "gatekeeperd".to_string());
     let mut a: Vec<String> = vec![
@@ -235,8 +239,9 @@ fn dispatch(p: Plan) -> i32 {
     if p.ingest_harness {
         a.push("--ingest-harness".into());
     }
-    if let Some(name) = p.egress {
-        // PG6: a NAME only. gatekeeperd resolves it against sealed profiles and fails closed if unknown.
+    for name in p.egress {
+        // PG6: NAMES only. gatekeeperd resolves each against sealed profiles independently, unions the
+        // resolved endpoints, and fails closed if ANY is unknown.
         a.push("--egress-profile".into());
         a.push(name);
     }

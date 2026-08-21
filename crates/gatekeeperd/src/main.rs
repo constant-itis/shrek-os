@@ -397,6 +397,12 @@ fn main() {
     if argv.first().map(String::as_str) == Some("authority-record") {
         std::process::exit(gatekeeperd::authority_record::cli(&argv[1..]));
     }
+    // `net-binding` (Phase-6 Swamp slice-2) writes/removes the root-owned cont_ip→session binding the
+    // swamp-broker consults. Production writes it inline in the T2 construct; this verb exists for the
+    // host-side broker oracle to stand up + revoke bindings through the same writer (format parity).
+    if argv.first().map(String::as_str) == Some("net-binding") {
+        std::process::exit(gatekeeperd::net_binding::cli(&argv[1..]));
+    }
     // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Compiled out of
     // production/default builds — this whole dispatch arm exists ONLY under `--features spike` (finding
     // F1). A default build has no `pin-verity` verb: the argument falls through to the broker path and

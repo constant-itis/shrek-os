@@ -29,6 +29,7 @@ use crate::mount_plane::{
     enter_private_mount_ns, open_anchor, pin_beneath, relocate_rw, relocate_rw_exec, stage_tmpfs,
 };
 use crate::net_plane;
+use crate::{authority_record, net_binding};
 use shrek_policy::egress::EgressProfile;
 use std::io::{self, Write};
 use std::os::fd::{FromRawFd, OwnedFd, RawFd};
@@ -270,13 +271,17 @@ pub struct T2Spec {
     pub platform: Platform,
     pub mem_max: u64,
     pub pids_max: u64,
-    /// Phase-6 slice-1b: the sealed egress profile for a `(T-untrust, C-net)` coding session, or
-    /// `None` for loopback-only (`--network=none`, the slice-1a/slice-6 posture). `Some(profile)` ⇒
-    /// gatekeeperd PRE-CREATES a per-sandbox netns (veth + addressing + the profile's nft allow-list),
-    /// hands runsc that netns via the OCI `network` namespace, and runs `--network=sandbox` so gVisor's
-    /// netstack egresses ONLY to the resolved endpoints. The name is sealed policy; destinations are
-    /// resolved to pinned IPv4 here and written into the sandbox `/etc/hosts` (no DNS egress).
-    pub egress: Option<&'static EgressProfile>,
+    /// Phase-6 slice-1b (repeatable in Swamp slice-2): the sealed egress profile(s) for a
+    /// `(T-untrust, C-net)` coding session, or EMPTY for loopback-only (`--network=none`, the
+    /// slice-1a/slice-6 posture). Non-empty ⇒ gatekeeperd PRE-CREATES a per-sandbox netns (veth +
+    /// addressing + an nft allow-list over the UNION of the profiles' resolved endpoints), hands runsc
+    /// that netns via the OCI `network` namespace, and runs `--network=sandbox` so gVisor's netstack
+    /// egresses ONLY to those endpoints. Each name is sealed policy; destinations are resolved to pinned
+    /// IPv4 here and written into the sandbox `/etc/hosts` (no DNS egress). Multiple profiles let one
+    /// coding session hold, e.g., its model broker AND `swamp-query`; a single-element vec is the exact
+    /// legacy single-`--egress` behavior. Per-destination identity (the swamp broker's no-SNAT carve-out)
+    /// survives the union because it is keyed on the sealed host name, not on being the sole profile.
+    pub egress: Vec<&'static EgressProfile>,
 }
 
 /// Proper JSON string escaping: backslash, double-quote, and control characters (a raw newline/tab in
@@ -302,14 +307,33 @@ fn json_escape(s: &str) -> String {
 /// grant bind-mounts (rbind,ro), and an empty-but-for-grants mount namespace. `netns_path` (slice-1b)
 /// adds a `network` namespace pointing at the gatekeeper-provisioned netns so runsc joins it and
 /// `--network=sandbox` programs netstack from its veth; `None` lists no network namespace (the
-/// `--network=none` loopback-only posture). Pure over the spec — unit-tested for shape.
-fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path, netns_path: Option<&str>) -> String {
+/// `--network=none` loopback-only posture).
+///
+/// `session` (Swamp slice-2) is the gatekeeper-minted opaque handle `H` for a swamp-capable session:
+/// when `Some(H)` the process env carries `SHREK_SESSION=H`, so the in-sandbox coder presents the SAME
+/// handle gatekeeperd bound `cont_ip→H` AND wrote the authority record under. `None` ⇒ no env is set
+/// and the coder self-mints its own handle (the backward-compatible model-only / no-swamp path). Pure
+/// over the spec — unit-tested for shape.
+fn build_config_json(
+    spec: &T2Spec,
+    grants: &[GrantMount],
+    rootfs: &Path,
+    netns_path: Option<&str>,
+    session: Option<&str>,
+) -> String {
     let args = spec
         .workload
         .iter()
         .map(|a| format!("\"{}\"", json_escape(a)))
         .collect::<Vec<_>>()
         .join(",");
+    // Swamp slice-2: inject SHREK_SESSION=H for a swamp-capable session; otherwise emit no env (the
+    // coder self-mints, preserving the model-only behavior). H is a bounded alnum handle, but escape
+    // defensively for the same reason workload argv is.
+    let env = match session {
+        Some(h) => format!("\"SHREK_SESSION={}\"", json_escape(h)),
+        None => String::new(),
+    };
     let mounts = grants
         .iter()
         .map(|g| {
@@ -332,12 +356,13 @@ fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path, netns_
     format!(
         concat!(
             "{{\"ociVersion\":\"1.0.2\",",
-            "\"process\":{{\"args\":[{args}],\"cwd\":\"/\",\"user\":{{\"uid\":0,\"gid\":0}},\"capabilities\":{{}}}},",
+            "\"process\":{{\"args\":[{args}],\"env\":[{env}],\"cwd\":\"/\",\"user\":{{\"uid\":0,\"gid\":0}},\"capabilities\":{{}}}},",
             "\"root\":{{\"path\":\"{rootfs}\",\"readonly\":true}},",
             "\"mounts\":[{mounts}],",
             "\"linux\":{{\"namespaces\":[{namespaces}]}}}}"
         ),
         args = args,
+        env = env,
         rootfs = json_escape(&rootfs.to_string_lossy()),
         mounts = mounts,
         namespaces = namespaces,
@@ -347,6 +372,41 @@ fn build_config_json(spec: &T2Spec, grants: &[GrantMount], rootfs: &Path, netns_
 // -------------------------------------------------------------------------------------------------
 // Construction
 // -------------------------------------------------------------------------------------------------
+
+/// Mint an opaque per-session handle `H` (16 bytes of `/dev/urandom`, hex-encoded → 32 alnum chars,
+/// always a valid session id). Swamp slice-2: gatekeeperd is the trust anchor for a swamp-capable
+/// session — it mints `H` HERE and, from one canonical construction state, writes the authority record
+/// + `cont_ip→H` binding under it and injects it as `SHREK_SESSION`, so the in-sandbox coder presents
+/// the SAME handle across both broker hops.
+///
+/// FAILS CLOSED on an entropy failure: if `/dev/urandom` cannot be read in full, this returns `Err`
+/// rather than a predictable (e.g. pid-derived) handle, and the construct aborts — no swamp session is
+/// ever bound to a low-entropy identity. With Mechanism A the handle need not be secret (the wire is
+/// the authenticator), but keeping it genuinely random means a future non-carve-out transport cannot
+/// silently regress to bearer semantics on a guessable handle.
+fn mint_session_handle() -> io::Result<String> {
+    use std::io::Read as _;
+    let mut b = [0u8; 16];
+    std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .map_err(|e| io::Error::new(e.kind(), format!("session handle entropy unavailable (fail-closed): {e}")))?;
+    let mut s = String::with_capacity(32);
+    for byte in b {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{byte:02x}");
+    }
+    Ok(s)
+}
+
+/// Swamp slice-2: is this a swamp-capable session? True IFF ONE of its sealed egress profiles GRANTS
+/// the swamp-query destination (`shrek_policy::egress::SWAMP_QUERY_HOST:PORT`) — an explicit capability
+/// check over the granted set, not a proxy for "some carve-out exists". A coding session typically holds
+/// its model broker AND `swamp-query` as two grants; only the presence of the swamp-query grant arms the
+/// session-identity transaction (mint `H` + authority record + `cont_ip→H` binding + `SHREK_SESSION`
+/// injection). A model-only egress mints nothing and the coder self-mints (model-only unchanged).
+fn is_swamp_capable(egress: &[&EgressProfile]) -> bool {
+    egress.iter().any(|p| p.grants_swamp_query())
+}
 
 /// Construct and run one T2 (gVisor) sandbox. Returns the workload's exit code. MUST be called as
 /// host root (rootless runsc cannot do the create/start lifecycle nor netstack). Fails closed on any
@@ -479,13 +539,14 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // written into the writable rootfs `/etc/hosts` so the workload resolves through it — NO DNS
     // egress. `None` ⇒ loopback-only. The netns itself is brought UP later, as the last step before
     // spawn, so almost no fallible work follows it (tight fail-closed teardown).
-    let net = spec.egress.map(|_| net_plane::SandboxNet::for_id(&spec.id));
-    let resolved = match spec.egress {
-        Some(profile) => Some(
-            net_plane::resolve_profile_v4(profile)
+    let net = if spec.egress.is_empty() { None } else { Some(net_plane::SandboxNet::for_id(&spec.id)) };
+    let resolved = if spec.egress.is_empty() {
+        None
+    } else {
+        Some(
+            net_plane::resolve_profiles_v4(&spec.egress)
                 .map_err(|e| io::Error::new(e.kind(), format!("egress profile resolve: {e}")))?,
-        ),
-        None => None,
+        )
     };
     if let Some(r) = &resolved {
         let etc = run_rootfs.join("etc");
@@ -497,9 +558,21 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     }
     let netns_path = net.as_ref().map(|n| n.ns_path());
 
+    // Swamp slice-2 — the session identity transaction (owner Design 1). A session is SWAMP-CAPABLE iff
+    // its sealed egress profile GRANTS the swamp-query destination (`is_swamp_capable`, an explicit
+    // capability check). For such a session gatekeeperd MINTS the opaque handle `H` here (fail-closed on
+    // an entropy failure), then commits three operations as ONE fail-closed transaction: (1) inject
+    // `SHREK_SESSION=H` into the config below, (2) write the authority record under `H`, (3) write the
+    // `cont_ip→H` net-binding. (2)+(3) are done AFTER the netns is up (cont_ip live) and BEFORE spawn,
+    // and all three are revoked together on every teardown path. A non-swamp session mints nothing — the
+    // coder self-mints its own handle, so model-only behavior is byte-for-byte unchanged. (The masquerade
+    // carve-out that makes cont_ip survive to the broker is installed from the same sealed swamp-query
+    // host during create_and_inject, so capability and carve-out share one source of truth.)
+    let session = if is_swamp_capable(&spec.egress) { Some(mint_session_handle()?) } else { None };
+
     std::fs::write(
         bundle.join("config.json"),
-        build_config_json(spec, &grants, &run_rootfs, netns_path.as_deref()),
+        build_config_json(spec, &grants, &run_rootfs, netns_path.as_deref(), session.as_deref()),
     )
     .map_err(|e| io::Error::new(e.kind(), format!("config.json write ({}): {e}", bundle.join("config.json").display())))?;
 
@@ -528,15 +601,51 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     // NEVER a fall-open network. An idempotent stale-clear precedes it (residue from a crashed run).
     if let (Some(n), Some(r)) = (net.as_ref(), resolved.as_ref()) {
         n.teardown();
-        if let Err(e) = n.create_and_inject(&r.endpoints) {
+        if let Err(e) = n.create_and_inject(&r.endpoints, &r.no_masquerade_ips()) {
             n.teardown();
             cg.destroy();
             let _ = std::fs::remove_dir_all(&work);
             return Err(io::Error::new(e.kind(), format!("egress plane setup failed (fail-closed, no network): {e}")));
         }
         eprintln!(
-            "gatekeeperd/t2_plane: egress plane up profile={} ns={} cip={} dsts={} (netstack --network=sandbox)",
-            spec.egress.map(|p| p.name).unwrap_or("none"), n.ns, n.cont_ip, r.endpoints.len()
+            "gatekeeperd/t2_plane: egress plane up profiles={} ns={} cip={} dsts={} (netstack --network=sandbox)",
+            spec.egress.iter().map(|p| p.name).collect::<Vec<_>>().join("+"), n.ns, n.cont_ip, r.endpoints.len()
+        );
+    }
+
+    // Swamp slice-2 — COMMIT the session identity transaction now: the netns is up (cont_ip is live)
+    // and nothing has spawned, so the records land BEFORE the sandbox can emit a query and any failure
+    // aborts the construct fail-closed (no sandbox ever runs with a partial identity). Authority record
+    // FIRST (the semantic authority swampd resolves) then the cont_ip→H binding (the transport identity
+    // the broker consults); if the binding fails we roll the authority record back so no half-committed
+    // identity survives. Both are revoked together on every teardown path below. Grants ≡ the realized
+    // mounts (rw + build + ro grants, canonical host paths) so semantic authority ≤ data authority holds
+    // by construction. cont_ip is unforgeable (per-veth anti-spoof + the /30 routes only itself).
+    if let Some(h) = session.as_deref() {
+        let cont_ip = net.as_ref().expect("swamp-capable session always has an egress netns").cont_ip;
+        let grant_paths: Vec<PathBuf> = spec
+            .rw_grant
+            .iter()
+            .chain(spec.build_grant.iter())
+            .chain(spec.grants.iter())
+            .map(|name| spec.anchor.join(name))
+            .collect();
+        let commit = authority_record::write_record(&authority_record::authority_dir(), h, &grant_paths)
+            .and_then(|_| net_binding::write_binding(&net_binding::binding_dir(), cont_ip, h).map(|_| ()));
+        if let Err(e) = commit {
+            // Roll back a possibly-written authority record, tear the netns + cgroup + work tree down,
+            // and abort — the sandbox never runs unbound (identical fail-closed shape to the netns path).
+            let _ = authority_record::remove_record(&authority_record::authority_dir(), h);
+            if let Some(n) = net.as_ref() {
+                n.teardown();
+            }
+            cg.destroy();
+            let _ = std::fs::remove_dir_all(&work);
+            return Err(io::Error::new(e.kind(), format!("swamp session identity commit failed (fail-closed): {e}")));
+        }
+        eprintln!(
+            "gatekeeperd/t2_plane: swamp session identity committed cip={cont_ip} grants={} (authority record + cont_ip→H binding written, SHREK_SESSION injected)",
+            grant_paths.len()
         );
     }
 
@@ -584,6 +693,16 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
     let _ = umount2(&std::ffi::CString::new(run_rootfs.to_string_lossy().as_bytes()).unwrap_or_default(), MNT_DETACH);
     let _ = std::fs::remove_dir_all(&work);
     cg.destroy();
+    // Swamp slice-2: revoke the session identity records on EVERY teardown path (mirrors the netns
+    // teardown, and pairs with the construction-time commit above). Binding FIRST so the broker stops
+    // forwarding for this cont_ip, then the authority record; both idempotent. A reused cont_ip is
+    // re-bound atomically at the next construct, so a torn-down session can never authorize a successor.
+    if let Some(h) = session.as_deref() {
+        if let Some(n) = net.as_ref() {
+            let _ = net_binding::remove_binding(&net_binding::binding_dir(), n.cont_ip);
+        }
+        let _ = authority_record::remove_record(&authority_record::authority_dir(), h);
+    }
     // Slice-1b: tear the egress netns down (deletes the nft table + veth + netns). Leaves NO residual
     // plumbing — the fail-closed default is "no network".
     if let Some(n) = &net {
@@ -648,10 +767,10 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
-            egress: None,
+            egress: vec![],
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
-        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None, None);
         assert!(j.contains("\"readonly\":true"));
         assert!(j.contains("\"destination\":\"/srv/project\""));
         assert!(j.contains("\"source\":\"/srv/project\""));
@@ -663,6 +782,54 @@ mod tests {
         // --network=none (loopback-only). pid/mount/ipc/uts are always present.
         assert!(!j.contains("\"type\":\"network\""), "no-egress config must omit the network ns: {j}");
         assert!(j.contains("\"type\":\"pid\"") && j.contains("\"type\":\"uts\""));
+        // Swamp slice-2: a non-swamp (session=None) config emits an EMPTY env and never SHREK_SESSION —
+        // the coder self-mints, so model-only behavior is unchanged.
+        assert!(j.contains("\"env\":[]"), "no-session config must emit an empty env: {j}");
+        assert!(!j.contains("SHREK_SESSION"), "no-session config must not set SHREK_SESSION: {j}");
+    }
+
+    #[test]
+    fn config_json_swamp_session_injects_shrek_session_env() {
+        // Swamp slice-2: a swamp-capable session carries the gatekeeper-minted handle H in the process
+        // env as SHREK_SESSION=H, so the in-sandbox coder presents the SAME handle gatekeeperd bound
+        // cont_ip→H and wrote the authority record under. The handle is JSON-escaped defensively.
+        let spec = T2Spec {
+            id: "coder".into(),
+            anchor: PathBuf::from("/srv"),
+            grants: vec!["project".into()],
+            rw_grant: None,
+            build_grant: None,
+            workload: vec!["/usr/bin/coder".into()],
+            rootfs: PathBuf::from("/usr/lib/shrek/t2-rootfs"),
+            runsc: PathBuf::from("/usr/lib/shrek/runsc"),
+            platform: Platform::Systrap,
+            mem_max: DEFAULT_MEM_MAX,
+            pids_max: DEFAULT_PIDS_MAX,
+            egress: vec![],
+        };
+        let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
+        let h = mint_session_handle().expect("urandom available in test env");
+        assert_eq!(h.len(), 32, "handle is 16 bytes hex-encoded");
+        assert!(h.bytes().all(|b| b.is_ascii_hexdigit()), "handle is pure hex");
+        assert!(crate::authority_record::valid_session_id(&h), "minted handle must be a valid session id");
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None, Some(&h));
+        assert!(j.contains(&format!("\"env\":[\"SHREK_SESSION={h}\"]")), "swamp config must inject SHREK_SESSION=H: {j}");
+    }
+
+    #[test]
+    fn swamp_capability_gate_keys_on_the_swamp_query_grant() {
+        // The gate that drives the whole session-identity transaction is EXPLICIT to the swamp-query
+        // capability: a session is swamp-capable iff ONE of its granted profiles grants the swamp-query
+        // dst. A model-only egress, the empty profile, and no-egress all mint nothing (coder self-mints).
+        use shrek_policy::egress::resolve;
+        let model = resolve("model-claude-cli").unwrap();
+        let swamp = resolve("swamp-query").unwrap();
+        assert!(is_swamp_capable(&[swamp]), "swamp-query grant is swamp-capable");
+        assert!(is_swamp_capable(&[model, swamp]), "model + swamp union is swamp-capable");
+        assert!(!is_swamp_capable(&[model]), "model-only egress is not swamp-capable");
+        assert!(!is_swamp_capable(&[resolve("model-anthropic").unwrap()]), "model-only egress is not swamp-capable");
+        assert!(!is_swamp_capable(&[resolve("none").unwrap()]), "the empty profile is not swamp-capable");
+        assert!(!is_swamp_capable(&[]), "a no-egress (loopback-only) session is not swamp-capable");
     }
 
     #[test]
@@ -682,11 +849,11 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
-            egress: None, // config shape is driven by netns_path, not this field
+            egress: vec![], // config shape is driven by netns_path, not this field
         };
         let grants = vec![GrantMount { name: "project".into(), source: PathBuf::from("/srv/project"), rw: false }];
         let ns_path = net_plane::SandboxNet::for_id("coder").ns_path();
-        let j = build_config_json(&spec, &grants, &spec.rootfs, Some(&ns_path));
+        let j = build_config_json(&spec, &grants, &spec.rootfs, Some(&ns_path), None);
         assert!(
             j.contains(&format!("{{\"type\":\"network\",\"path\":\"{ns_path}\"}}")),
             "egress config must join the provisioned netns: {j}"
@@ -710,13 +877,13 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
-            egress: None,
+            egress: vec![],
         };
         let grants = vec![
             GrantMount { name: "deps".into(), source: PathBuf::from("/srv/deps"), rw: false },
             GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
         ];
-        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None, None);
         assert!(j.contains("\"destination\":\"/srv/project\""));
         assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/project\""));
         assert!(j.contains("\"rbind\",\"rw\""), "project grant must be rbind,rw: {j}");
@@ -741,13 +908,13 @@ mod tests {
             platform: Platform::Systrap,
             mem_max: DEFAULT_MEM_MAX,
             pids_max: DEFAULT_PIDS_MAX,
-            egress: None,
+            egress: vec![],
         };
         let grants = vec![
             GrantMount { name: "project".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/project"), rw: true },
             GrantMount { name: "build".into(), source: PathBuf::from("/run/shrek-t2/t/rwgrants/build"), rw: true },
         ];
-        let j = build_config_json(&spec, &grants, &spec.rootfs, None);
+        let j = build_config_json(&spec, &grants, &spec.rootfs, None, None);
         assert!(j.contains("\"destination\":\"/srv/build\""));
         assert!(j.contains("\"source\":\"/run/shrek-t2/t/rwgrants/build\""));
         // Both writable grants are rbind,rw; neither the project nor build source is read-only.

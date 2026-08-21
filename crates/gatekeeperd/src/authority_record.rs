@@ -37,7 +37,7 @@ pub fn valid_session_id(id: &str) -> bool {
 
 /// Resolve `swamp` uid/gid from /etc/passwd,/etc/group so the record is owned `root:swamp`. Returns
 /// `None` if the user/group is absent (the caller then falls back to a root-only-readable record).
-fn swamp_ids() -> Option<(u32, u32)> {
+pub(crate) fn swamp_ids() -> Option<(u32, u32)> {
     let passwd = fs::read_to_string("/etc/passwd").ok()?;
     let uid = passwd.lines().find_map(|l| {
         let f: Vec<&str> = l.split(':').collect();

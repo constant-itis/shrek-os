@@ -171,14 +171,27 @@ fn usage() {
 /// The agent loop. Returns the process exit code: 0 = done ok, 1 = done not-ok, 3 = step cap
 /// (fail-closed), 4 = model/transport/parse failure (fail-closed).
 fn run_loop(provider: Provider, task: &str, model_url: &str, model: &str, max_steps: u32) -> i32 {
+    // Swamp slice-2: this session can query the swamp IFF gatekeeperd injected `SHREK_SESSION` — which it
+    // does ONLY for a swamp-capable construct (one whose sealed egress grants `swamp-query`). That same
+    // env is also the handle the broker will match against its `cont_ip→session` binding, so its presence
+    // is the exact, single signal to arm the `swamp_find` tool. A model-only session lacks it → the tool
+    // is neither advertised nor accepted, and the system prompt is byte-for-byte the pre-swamp prompt.
+    let swamp_enabled = std::env::var("SHREK_SESSION").ok().filter(|v| !v.is_empty()).is_some();
+    let swamp_url = std::env::var("SHREK_SWAMP_URL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| "http://shrek-swamp-broker:8400/".to_string());
+
     let mut messages: Vec<(String, String)> = vec![
-        ("system".into(), system_prompt()),
+        ("system".into(), system_prompt(swamp_enabled)),
         ("user".into(), initial_user_message(task)),
     ];
 
     // One opaque session handle per coder run (slice-7). The broker maps it to a real native CLI session
     // and forwards only the new tail turn each step; we keep sending the full transcript (stateless
-    // client), and the broker collapses it. The handle is opaque and carries no authority.
+    // client), and the broker collapses it. The handle is opaque and carries no authority. For a
+    // swamp-capable session this resolves to the gatekeeper-injected `SHREK_SESSION` (== the bound
+    // handle), so `swamp_find` presents to the swamp broker the SAME identity gatekeeperd bound.
     let session = mint_session_handle();
 
     for step in 1..=max_steps {
@@ -245,10 +258,32 @@ fn run_loop(provider: Provider, task: &str, model_url: &str, model: &str, max_st
                 emit_result(&result);
                 messages.push(("user".into(), tool_result(&result)));
             }
+            // Swamp slice-2: search the project's swamp through the broker-routed sealed `swamp-query`
+            // egress, carrying this session's handle. gatekeeperd bound `cont_ip→handle` and wrote the
+            // handle-keyed authority record, so the broker returns EXACTLY this session's authorized
+            // projection — never a wall hole, never wider than the session's filesystem grants.
+            "swamp_find" if swamp_enabled => {
+                let q = call.arg_str("q").unwrap_or_default();
+                let result = if q.trim().is_empty() {
+                    "ERROR swamp_find requires a non-empty \"q\" (search terms).".to_string()
+                } else {
+                    let body = build_swamp_body(&q, call.arg_str("intent").as_deref(), call.arg_str("scope").as_deref(), call.arg_u64("limit"));
+                    match http_post_json(&swamp_url, &body, &session) {
+                        Ok(raw) => format_swamp_result(&raw),
+                        Err(e) => format!("ERROR swamp_find transport: {e}"),
+                    }
+                };
+                println!("CODER-TOOL swamp_find q={q:?}");
+                emit_result(&result);
+                messages.push(("user".into(), tool_result(&result)));
+            }
             other => {
-                let result = format!(
-                    "ERROR unknown tool {other:?}; valid tools: read_file, write_file, run, done"
-                );
+                let valid = if swamp_enabled {
+                    "read_file, write_file, run, swamp_find, done"
+                } else {
+                    "read_file, write_file, run, done"
+                };
+                let result = format!("ERROR unknown tool {other:?}; valid tools: {valid}");
                 println!("CODER-TOOL unknown={other:?}");
                 emit_result(&result);
                 messages.push(("user".into(), tool_result(&result)));
@@ -262,19 +297,80 @@ fn run_loop(provider: Provider, task: &str, model_url: &str, model: &str, max_st
 
 // ---- the model protocol ------------------------------------------------------------------------
 
-fn system_prompt() -> String {
-    // The whole tool surface. The model must reply with exactly ONE JSON object and nothing else.
-    "You are a coding agent running inside a locked sandbox. You can only touch the current project \
-     directory and a build area at /srv/build. Work on ONE task, then finish.\n\n\
-     Reply with EXACTLY ONE JSON object and no other text. Shape:\n\
-       {\"tool\":\"read_file\",\"args\":{\"path\":\"buggy.c\"}}\n\
-       {\"tool\":\"write_file\",\"args\":{\"path\":\"buggy.c\",\"content\":\"...full new file...\"}}\n\
-       {\"tool\":\"run\",\"args\":{\"cmd\":\"tcc -nostdlib -static -o /srv/build/prog buggy.c && /srv/build/prog; echo exit=$?\"}}\n\
-       {\"tool\":\"done\",\"args\":{\"ok\":true,\"summary\":\"what you changed and the test result\"}}\n\n\
-     Rules: write_file replaces the whole file. Compile into /srv/build (the only place a binary can \
-     run); the project dir is non-executable. Verify by running the program before you call done. \
-     Call done with ok:true only once the task's success condition is observed."
-        .into()
+fn system_prompt(swamp_enabled: bool) -> String {
+    // The whole tool surface. The model must reply with exactly ONE JSON object and nothing else. The
+    // `swamp_find` line is present ONLY for a swamp-capable session, so a model-only session's prompt is
+    // byte-for-byte the pre-swamp prompt.
+    let swamp_shape = if swamp_enabled {
+        "       {\"tool\":\"swamp_find\",\"args\":{\"q\":\"error handling in the parser\",\"limit\":20}}\n"
+    } else {
+        ""
+    };
+    let swamp_rule = if swamp_enabled {
+        " Use swamp_find to search the project's indexed \
+         knowledge for relevant code/notes by meaning (args: q required; optional intent search|discover, \
+         scope, limit) — it returns only files within this session's authority."
+    } else {
+        ""
+    };
+    format!(
+        "You are a coding agent running inside a locked sandbox. You can only touch the current project \
+         directory and a build area at /srv/build. Work on ONE task, then finish.\n\n\
+         Reply with EXACTLY ONE JSON object and no other text. Shape:\n\
+           {{\"tool\":\"read_file\",\"args\":{{\"path\":\"buggy.c\"}}}}\n\
+           {{\"tool\":\"write_file\",\"args\":{{\"path\":\"buggy.c\",\"content\":\"...full new file...\"}}}}\n\
+           {{\"tool\":\"run\",\"args\":{{\"cmd\":\"tcc -nostdlib -static -o /srv/build/prog buggy.c && /srv/build/prog; echo exit=$?\"}}}}\n\
+        {swamp_shape}\
+           {{\"tool\":\"done\",\"args\":{{\"ok\":true,\"summary\":\"what you changed and the test result\"}}}}\n\n\
+         Rules: write_file replaces the whole file. Compile into /srv/build (the only place a binary can \
+         run); the project dir is non-executable. Verify by running the program before you call done. \
+         Call done with ok:true only once the task's success condition is observed.{swamp_rule}"
+    )
+}
+
+/// Build the swamp-broker request body (line-text, the swampd wire idiom). `q` is REQUIRED; `intent`,
+/// `scope`, `limit` are optional (the broker defaults them: search / whole-authority / 50). The `q`
+/// free-text is flattened to a single line — any control byte would corrupt the broker's line wire, so
+/// it is replaced with a space (the model's search terms never legitimately contain control chars).
+fn build_swamp_body(q: &str, intent: Option<&str>, scope: Option<&str>, limit: Option<u64>) -> String {
+    let mut b = String::new();
+    if let Some(i) = intent {
+        b.push_str(&format!("intent {i}\n"));
+    }
+    if let Some(s) = scope {
+        b.push_str(&format!("scope {s}\n"));
+    }
+    if let Some(n) = limit {
+        b.push_str(&format!("limit {n}\n"));
+    }
+    let q1: String = q.chars().map(|c| if (c as u32) < 0x20 { ' ' } else { c }).collect();
+    b.push_str(&format!("q {}\n", q1.trim()));
+    b
+}
+
+/// Render the swamp broker's `RESULT n / hit path\tsnippet / END` wire into a compact, model-readable
+/// tool result. A missing/garbled `RESULT` header is surfaced as an error; a fail-closed empty (`RESULT
+/// 0`) reads as an honest "nothing matched" (indistinguishable from a denied query, by design).
+fn format_swamp_result(raw: &str) -> String {
+    let mut lines = raw.lines();
+    let n = lines.next().and_then(|l| l.strip_prefix("RESULT ")).and_then(|s| s.trim().parse::<usize>().ok());
+    match n {
+        None => format!("ERROR swamp_find: malformed or failed result:\n{}", cap(raw)),
+        Some(0) => "OK swamp_find: 0 hits (nothing in this session's authority matched).".to_string(),
+        Some(count) => {
+            let mut out = format!("OK swamp_find: {count} hit(s):\n");
+            for line in lines {
+                if line == "END" {
+                    break;
+                }
+                if let Some(rest) = line.strip_prefix("hit ") {
+                    let (path, snippet) = rest.split_once('\t').unwrap_or((rest, ""));
+                    out.push_str(&format!("- {path}: {snippet}\n"));
+                }
+            }
+            out
+        }
+    }
 }
 
 fn initial_user_message(task: &str) -> String {
@@ -468,6 +564,16 @@ impl ToolCall {
     }
     fn arg_bool(&self, k: &str) -> Option<bool> {
         self.args.get(k)?.get::<bool>().copied()
+    }
+    /// A non-negative integer arg. tinyjson numbers are `f64`; also accept a stringified number so a
+    /// model that emits `"limit":"20"` still works. `None` if absent, negative, or unparsable.
+    fn arg_u64(&self, k: &str) -> Option<u64> {
+        if let Some(n) = self.args.get(k).and_then(|v| v.get::<f64>()) {
+            if *n >= 0.0 && n.is_finite() {
+                return Some(*n as u64);
+            }
+        }
+        self.arg_str(k).and_then(|s| s.trim().parse::<u64>().ok())
     }
 }
 
@@ -791,5 +897,47 @@ mod tests {
         assert!(capped.contains("truncated"));
         // Small stays intact.
         assert_eq!(cap("small"), "small");
+    }
+
+    #[test]
+    fn swamp_body_q_only_defaults_the_rest() {
+        // q alone: no intent/scope/limit lines (the broker defaults them), q last.
+        assert_eq!(build_swamp_body("parser errors", None, None, None), "q parser errors\n");
+    }
+
+    #[test]
+    fn swamp_body_emits_all_fields_and_flattens_control_chars() {
+        let b = build_swamp_body("foo\nbar\tbaz", Some("discover"), Some("/srv/project"), Some(20));
+        assert_eq!(b, "intent discover\nscope /srv/project\nlimit 20\nq foo bar baz\n");
+        // The q line is single: exactly one `q ` and no stray newlines that could inject a wire line.
+        assert_eq!(b.matches("\nq ").count() + b.starts_with("q ") as usize, 1);
+    }
+
+    #[test]
+    fn swamp_result_formats_hits_zero_and_malformed() {
+        let hits = "RESULT 2\nhit /srv/project/a.c\tint main()\nhit /srv/project/b.c\treturn 0\nEND\n";
+        let f = format_swamp_result(hits);
+        assert!(f.contains("2 hit(s)") && f.contains("- /srv/project/a.c: int main()") && f.contains("- /srv/project/b.c: return 0"));
+        assert!(format_swamp_result("RESULT 0\nEND\n").contains("0 hits"));
+        // A denied/empty query is indistinguishable from a legitimate no-match (both RESULT 0).
+        assert!(format_swamp_result("garbage").starts_with("ERROR swamp_find"));
+    }
+
+    #[test]
+    fn arg_u64_reads_number_or_stringified_number() {
+        let c = parse_tool_call(r#"{"tool":"swamp_find","args":{"q":"x","limit":20}}"#).unwrap();
+        assert_eq!(c.arg_u64("limit"), Some(20));
+        let c2 = parse_tool_call(r#"{"tool":"swamp_find","args":{"q":"x","limit":"35"}}"#).unwrap();
+        assert_eq!(c2.arg_u64("limit"), Some(35));
+        assert_eq!(c2.arg_u64("absent"), None);
+    }
+
+    #[test]
+    fn system_prompt_advertises_swamp_find_only_when_enabled() {
+        // Swamp-capable session: swamp_find is in the tool surface.
+        assert!(system_prompt(true).contains("swamp_find"));
+        // Model-only session: the prompt is byte-for-byte the pre-swamp prompt (no swamp mention).
+        let off = system_prompt(false);
+        assert!(!off.contains("swamp_find") && !off.to_lowercase().contains("swamp"));
     }
 }

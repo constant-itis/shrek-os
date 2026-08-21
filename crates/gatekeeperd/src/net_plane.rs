@@ -91,7 +91,7 @@ impl SandboxNet {
     /// the table is default-deny for THIS sandbox without touching the host's global forward hook
     /// (a `policy drop` base chain would). Return replies match neither allow nor the scoped drop
     /// (their saddr is the remote), so `policy accept` + conntrack un-NAT delivers them.
-    fn ruleset(&self, endpoints: &[Endpoint]) -> String {
+    fn ruleset(&self, endpoints: &[Endpoint], no_masq: &[Ipv4Addr]) -> String {
         let mut allows = String::new();
         for e in endpoints {
             allows.push_str(&format!(
@@ -99,8 +99,33 @@ impl SandboxNet {
                 self.cont_ip, e.ip, e.proto.label(), e.port
             ));
         }
+        // Swamp slice-2, amendment 2 — HOST-ENFORCED source anti-spoof. A compromised sandbox controls
+        // its own packet crafting and could forge another sandbox's `cont_ip` as source; if that reached
+        // the swamp broker, the `cont_ip→session` transport binding would be defeated. So the host drops,
+        // at ingress on THIS sandbox's veth, any frame whose source is not this sandbox's own `cont_ip` —
+        // before routing. Applied to every sandbox (a veth may only ever source its own address): it is a
+        // no-op for correct traffic and cannot fall open. Priority -300 runs ahead of conntrack/nat.
+        let antispoof = format!(
+            "\x20 chain prerouting {{\n\
+             \x20   type filter hook prerouting priority -300; policy accept;\n\
+             \x20   iif \"{h}\" ip saddr != {c} drop\n\
+             \x20 }}\n",
+            h = self.host_if,
+            c = self.cont_ip,
+        );
+        // Swamp slice-2, amendment / Mechanism A — masquerade CARVE-OUT. A broker in a server netns is
+        // reached via host FORWARD + srcnat masquerade, so by default it sees the masqueraded host IP,
+        // not `cont_ip`. For each identity-preserving destination (the swamp broker), `return` from the
+        // nat chain BEFORE the masquerade rule so the sandbox's (anti-spoof-verified) `cont_ip` survives
+        // to the broker — the only way the broker can bind a query to its session by transport. Every
+        // other destination is still masqueraded unchanged.
+        let mut carveouts = String::new();
+        for ip in no_masq {
+            carveouts.push_str(&format!("    ip saddr {c} ip daddr {ip} return\n", c = self.cont_ip));
+        }
         format!(
             "table ip {t} {{\n\
+             {antispoof}\
              \x20 chain forward {{\n\
              \x20   type filter hook forward priority 0; policy accept;\n\
              {allows}\
@@ -108,6 +133,7 @@ impl SandboxNet {
              \x20 }}\n\
              \x20 chain postrouting {{\n\
              \x20   type nat hook postrouting priority srcnat; policy accept;\n\
+             {carveouts}\
              \x20   ip saddr {c} masquerade\n\
              \x20 }}\n\
              }}\n",
@@ -120,7 +146,7 @@ impl SandboxNet {
     /// then install the sealed nft rules. Every step is fail-closed: the first error propagates and
     /// the caller tears everything down. Ordered rules-before-usable — the nft table (default-deny)
     /// is applied LAST here but still BEFORE the barrier is released by the caller.
-    pub fn inject(&self, leader: u32, endpoints: &[Endpoint]) -> io::Result<()> {
+    pub fn inject(&self, leader: u32, endpoints: &[Endpoint], no_masq: &[Ipv4Addr]) -> io::Result<()> {
         ip(&["netns", "attach", &self.ns, &leader.to_string()])?;
         ip(&["link", "add", &self.host_if, "type", "veth", "peer", "name", &self.cont_if])?;
         ip(&["link", "set", &self.cont_if, "netns", &self.ns])?;
@@ -132,7 +158,10 @@ impl SandboxNet {
         ip(&["-n", &self.ns, "route", "add", "default", "via", &self.host_ip.to_string()])?;
         // Host must forward for masquerade to work. Best-effort write (already-1 on most hosts).
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1");
-        nft_apply(&self.ruleset(endpoints))
+        // Per-interface reverse-path hardening (amendment 2, defence-in-depth alongside the nft
+        // anti-spoof): the host veth may only accept a source it has a route back to on that iface.
+        let _ = std::fs::write(format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.host_if), b"1");
+        nft_apply(&self.ruleset(endpoints, no_masq))
     }
 
     /// The filesystem path `ip netns add` binds this netns at — the value a T2/runsc OCI `network`
@@ -153,7 +182,7 @@ impl SandboxNet {
     /// after `netns add` mirrors [`inject`](Self::inject) exactly — same veth, same addressing, same
     /// `ruleset` — so the egress BOUNDARY (host-side veth peer + per-sandbox nft) is identical to T1
     /// and independent of the guest's internal stack (netstack vs a kernel stack).
-    pub fn create_and_inject(&self, endpoints: &[Endpoint]) -> io::Result<()> {
+    pub fn create_and_inject(&self, endpoints: &[Endpoint], no_masq: &[Ipv4Addr]) -> io::Result<()> {
         ip(&["netns", "add", &self.ns])?;
         ip(&["link", "add", &self.host_if, "type", "veth", "peer", "name", &self.cont_if])?;
         ip(&["link", "set", &self.cont_if, "netns", &self.ns])?;
@@ -165,7 +194,9 @@ impl SandboxNet {
         ip(&["-n", &self.ns, "route", "add", "default", "via", &self.host_ip.to_string()])?;
         // Host must forward for masquerade to work. Best-effort write (already-1 on most hosts).
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", b"1");
-        nft_apply(&self.ruleset(endpoints))
+        // Per-interface reverse-path hardening (amendment 2, defence-in-depth with the nft anti-spoof).
+        let _ = std::fs::write(format!("/proc/sys/net/ipv4/conf/{}/rp_filter", self.host_if), b"1");
+        nft_apply(&self.ruleset(endpoints, no_masq))
     }
 
     /// Best-effort, idempotent teardown — remove the nft table, the veth pair (deleting the host end
@@ -186,36 +217,76 @@ pub struct Resolved {
     pub hosts: Vec<(&'static str, Ipv4Addr)>,
 }
 
+/// Sealed destination NAMES whose caller identity must survive to the broker — i.e. that must NOT be
+/// masqueraded (Mechanism A). Today: exactly the swamp query broker, whose `cont_ip→session` binding
+/// is what authorizes forwarding a query (docs/phase6-swamp-slice2-broker-routed-find.md). A NAME, not
+/// an IP: the IP is a runtime pin, the identity requirement is sealed policy. Sourced from the sealed
+/// `shrek_policy::egress` swamp-query constant so the carve-out and the swamp-capability gate can never
+/// drift apart on the broker's identity.
+pub const IDENTITY_PRESERVING_HOSTS: &[&str] = &[shrek_policy::egress::SWAMP_QUERY_HOST];
+
+impl Resolved {
+    /// The pinned IPs of this profile's identity-preserving destinations (the swamp broker) — the
+    /// `no_masq` set handed to the nft ruleset so their source is not rewritten. Empty for every
+    /// profile that names no such host, so ordinary egress is untouched.
+    pub fn no_masquerade_ips(&self) -> Vec<Ipv4Addr> {
+        self.hosts
+            .iter()
+            .filter(|(h, _)| IDENTITY_PRESERVING_HOSTS.contains(h))
+            .map(|(_, ip)| *ip)
+            .collect()
+    }
+}
+
 /// Resolve a sealed profile's `host:proto:port` rules to PINNED IPv4. Fail-closed: a rule whose host
 /// yields NO A-record (AAAA-only, NXDOMAIN, resolver error) aborts the whole construct — egress is
 /// IPv4-only and we never silently drop a destination the policy intended to allow.
 pub fn resolve_profile_v4(profile: &EgressProfile) -> io::Result<Resolved> {
+    resolve_profiles_v4(std::slice::from_ref(&profile))
+}
+
+/// Resolve the UNION of several sealed profiles to PINNED IPv4 (Phase-6 Swamp slice-2 — repeatable
+/// `--egress`). Each profile is resolved through the SAME per-rule path as the single-profile case, and
+/// their results are unioned into one `Resolved`: endpoints are deduped by `(ip, proto, port)` and the
+/// `/etc/hosts` map by NAME (first pinned IP wins for a name that appears twice). Fail-closed and
+/// order-independent: any rule with no A-record aborts the whole construct, exactly as the single case.
+/// A single-element slice is byte-for-byte the legacy result, so existing `--egress NAME` is unchanged;
+/// per-destination identity (e.g. the swamp broker for the no-SNAT carve-out) survives the union because
+/// its host name is preserved in `hosts` and recognized by [`Resolved::no_masquerade_ips`].
+pub fn resolve_profiles_v4(profiles: &[&EgressProfile]) -> io::Result<Resolved> {
     let mut endpoints: Vec<Endpoint> = Vec::new();
     let mut hosts: Vec<(&'static str, Ipv4Addr)> = Vec::new();
-    for r in profile.rules {
-        let mut first: Option<Ipv4Addr> = None;
-        // getaddrinfo via std; the `:port` makes it a SocketAddr iterator.
-        for sa in (r.host, r.port).to_socket_addrs()? {
-            if let std::net::SocketAddr::V4(v4) = sa {
-                let ip = *v4.ip();
-                first.get_or_insert(ip);
-                let dup = endpoints.iter().any(|o| {
-                    o.ip == ip && o.port == r.port
-                        && matches!((o.proto, r.proto), (Proto::Tcp, Proto::Tcp) | (Proto::Udp, Proto::Udp))
-                });
-                if !dup {
-                    endpoints.push(Endpoint { ip, proto: r.proto, port: r.port });
+    for profile in profiles {
+        for r in profile.rules {
+            let mut first: Option<Ipv4Addr> = None;
+            // getaddrinfo via std; the `:port` makes it a SocketAddr iterator.
+            for sa in (r.host, r.port).to_socket_addrs()? {
+                if let std::net::SocketAddr::V4(v4) = sa {
+                    let ip = *v4.ip();
+                    first.get_or_insert(ip);
+                    let dup = endpoints.iter().any(|o| {
+                        o.ip == ip && o.port == r.port
+                            && matches!((o.proto, r.proto), (Proto::Tcp, Proto::Tcp) | (Proto::Udp, Proto::Udp))
+                    });
+                    if !dup {
+                        endpoints.push(Endpoint { ip, proto: r.proto, port: r.port });
+                    }
                 }
             }
-        }
-        match first {
-            // One pinned IP per name for /etc/hosts (nft still allows every resolved A-record).
-            Some(ip) => hosts.push((r.host, ip)),
-            None => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("egress host {:?} has no IPv4 (A) record — fail closed (IPv4-only)", r.host),
-                ))
+            match first {
+                // One pinned IP per name for /etc/hosts (nft still allows every resolved A-record).
+                // Dedupe by name so two profiles naming the same host yield a single hosts line.
+                Some(ip) => {
+                    if !hosts.iter().any(|(h, _)| *h == r.host) {
+                        hosts.push((r.host, ip));
+                    }
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("egress host {:?} has no IPv4 (A) record — fail closed (IPv4-only)", r.host),
+                    ))
+                }
             }
         }
     }
@@ -363,7 +434,7 @@ mod tests {
             Endpoint { ip: Ipv4Addr::new(140, 82, 112, 3), proto: Proto::Tcp, port: 443 },
             Endpoint { ip: Ipv4Addr::new(140, 82, 113, 3), proto: Proto::Tcp, port: 443 },
         ];
-        let rs = net.ruleset(&eps);
+        let rs = net.ruleset(&eps, &[]);
         let cip = net.cont_ip.to_string();
         // an allow line per endpoint, each scoped to the container source ip
         assert_eq!(rs.matches(" accept\n").count(), 2);
@@ -374,6 +445,55 @@ mod tests {
         // policy is ACCEPT (does not hijack the host's global forward hook)
         assert!(rs.contains("policy accept"));
         assert!(!rs.contains("policy drop"));
+    }
+
+    #[test]
+    fn ruleset_always_installs_host_enforced_source_antispoof() {
+        // amendment 2: every sandbox's veth may source ONLY its own cont_ip; the host drops spoofed
+        // sources at ingress, before routing, so a cont_ip transport binding cannot be impersonated.
+        let net = SandboxNet::for_id("as1");
+        let rs = net.ruleset(&[], &[]);
+        assert!(rs.contains("hook prerouting"));
+        assert!(rs.contains(&format!("iif \"{}\" ip saddr != {} drop", net.host_if, net.cont_ip)));
+    }
+
+    #[test]
+    fn masquerade_carveout_only_for_no_masq_dsts_and_before_masquerade() {
+        // Mechanism A: the swamp-broker dst is `return`ed from the nat chain BEFORE the masquerade rule
+        // so cont_ip survives to the broker; every other dst is still masqueraded.
+        let net = SandboxNet::for_id("cv1");
+        let broker = Ipv4Addr::new(10, 20, 0, 2);
+        let cip = net.cont_ip.to_string();
+        // No carve-out when none requested: only the plain masquerade line exists.
+        let plain = net.ruleset(&[], &[]);
+        assert!(!plain.contains("return"));
+        // With a no_masq dst: a `return` for exactly that dst, positioned before `masquerade`.
+        let rs = net.ruleset(&[], &[broker]);
+        let ret = format!("ip saddr {cip} ip daddr {broker} return");
+        assert!(rs.contains(&ret), "carve-out return missing");
+        let ret_pos = rs.find(&ret).unwrap();
+        let masq_pos = rs.find(&format!("ip saddr {cip} masquerade")).unwrap();
+        assert!(ret_pos < masq_pos, "carve-out must precede masquerade (else it never matches)");
+        // A different dst is NOT carved out.
+        assert!(!rs.contains(&format!("ip daddr 10.20.0.9 return")));
+    }
+
+    #[test]
+    fn no_masquerade_ips_selects_only_identity_preserving_hosts() {
+        // A model+swamp UNION (Swamp slice-2): the no-SNAT carve-out must apply to the swamp broker ONLY,
+        // never to the model broker (whose source may safely masquerade). This locks "the transport-
+        // identity rule applies only to the swamp-query destination" across a multi-profile egress.
+        let model = Ipv4Addr::new(10, 20, 0, 9);
+        let swamp = Ipv4Addr::new(10, 20, 0, 2);
+        let r = Resolved {
+            endpoints: vec![],
+            hosts: vec![
+                ("shrek-model-proxy", model),
+                ("shrek-swamp-broker", swamp),
+            ],
+        };
+        assert_eq!(r.no_masquerade_ips(), vec![swamp], "only the swamp broker is un-masqueraded");
+        assert!(!r.no_masquerade_ips().contains(&model), "the model broker still masquerades");
     }
 
     #[test]

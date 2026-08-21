@@ -72,6 +72,15 @@ impl EgressProfile {
     pub fn is_empty(&self) -> bool {
         self.rules.is_empty()
     }
+
+    /// Swamp slice-2: does this profile grant the in-sandbox swamp-query destination
+    /// (`SWAMP_QUERY_HOST:SWAMP_QUERY_PORT`)? This is THE swamp-capability predicate — gatekeeperd gates
+    /// the session-identity transaction on it, so a model-only or non-swamp egress mints nothing (the
+    /// coder self-mints). Deliberately an exact destination check, not "reaches any identity-preserving
+    /// host", so a future identity-preserving dst that is NOT the swamp broker can never trip it.
+    pub fn grants_swamp_query(&self) -> bool {
+        self.allows(SWAMP_QUERY_HOST, Proto::Tcp, SWAMP_QUERY_PORT)
+    }
 }
 
 // ---- the sealed profiles ------------------------------------------------------------------------
@@ -140,6 +149,28 @@ const MODEL_CODEX_CLI: &[EgressRule] = &[
     EgressRule { host: "shrek-codex-cli", proto: Proto::Tcp, port: 8301 },
 ];
 
+// The IN-SANDBOX SWAMP QUERY endpoint (Phase-6 Swamp slice-2, docs/phase6-swamp-slice2-broker-routed-
+// find.md). Same one-destination shape as the model brokers, but this broker (`crates/swamp-broker`,
+// `shrek-swamp-broker`) does NOT reach the network — it bridges an in-sandbox `swamp_find` to the
+// host-side `swampd` unix socket, letting a T2 coding session query the semantic index WITHOUT a hole
+// in its wall. A FOURTH distinct name (not any `model-*`): selecting swamp query is an explicit sealed
+// choice, and the broker's `cont_ip→session` binding is what authorizes forwarding — the box's egress
+// authority (this profile) is orthogonal to its query authority (the sealed authority record swampd
+// resolves). Plaintext tcp:8400 (distinct from model 8200/8300/8301); the caller's `cont_ip` must NOT
+// be masqueraded to this dst (net_plane Mechanism A) so the broker can bind the session by transport.
+/// The sealed swamp-query destination — the in-sandbox `swamp_find` broker (`crates/swamp-broker`).
+/// Exposed as named constants so a session's swamp-query CAPABILITY is recognized by an EXPLICIT check
+/// against this exact `(host, port)` — never a proxy (e.g. "some carve-out exists"). gatekeeperd gates
+/// the whole session-identity transaction (mint H + authority record + `cont_ip→H` binding +
+/// `SHREK_SESSION` injection) on [`EgressProfile::grants_swamp_query`], and `net_plane`'s masquerade
+/// carve-out reads the same host, so there is one source of truth for the swamp broker's identity.
+pub const SWAMP_QUERY_HOST: &str = "shrek-swamp-broker";
+pub const SWAMP_QUERY_PORT: u16 = 8400;
+
+const SWAMP_QUERY: &[EgressRule] = &[
+    EgressRule { host: SWAMP_QUERY_HOST, proto: Proto::Tcp, port: SWAMP_QUERY_PORT },
+];
+
 /// THE sealed egress table — the single, compiled-in source of egress policy. gatekeeperd resolves
 /// names against this; there is no runtime or writable source. Deny-by-default: a name absent here
 /// resolves to `None` and gatekeeperd fails the C-net construct closed.
@@ -152,6 +183,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
     EgressProfile { name: "model-claude-cli", rules: MODEL_CLAUDE_CLI },
     EgressProfile { name: "model-codex-cli", rules: MODEL_CODEX_CLI },
+    EgressProfile { name: "swamp-query", rules: SWAMP_QUERY },
 ];
 
 /// Resolve a profile NAME to its sealed destination set. STRICT + FAIL-CLOSED, mirroring
@@ -258,6 +290,40 @@ mod tests {
         assert!(!codex.allows("shrek-claude-cli", Proto::Tcp, 8300));
         assert!(!claude.allows("shrek-codex-cli", Proto::Tcp, 8301));
         assert!(!api.allows("shrek-codex-cli", Proto::Tcp, 8301));
+    }
+
+    #[test]
+    fn swamp_query_reaches_only_the_swamp_broker() {
+        // The in-sandbox swamp-query profile reaches exactly ONE dst — the swamp broker — on its own
+        // distinct port (8400), overlapping NONE of the model brokers. Selecting swamp query is an
+        // explicit sealed choice, orthogonal to any model egress a session may also hold.
+        let s = resolve("swamp-query").unwrap();
+        assert_eq!(s.rules.len(), 1, "swamp-query must reach exactly one destination (the swamp broker)");
+        assert!(s.allows("shrek-swamp-broker", Proto::Tcp, 8400));
+        // Not any model broker/proxy, not the local model, not a wildcard port on its own host.
+        assert!(!s.allows("shrek-model-proxy", Proto::Tcp, 8200));
+        assert!(!s.allows("shrek-claude-cli", Proto::Tcp, 8300));
+        assert!(!s.allows("shrek-codex-cli", Proto::Tcp, 8301));
+        assert!(!s.allows("shrek-model", Proto::Tcp, 8100));
+        assert!(!s.allows("shrek-swamp-broker", Proto::Tcp, 443));
+        // And no model profile can reach the swamp broker.
+        assert!(!resolve("model-anthropic").unwrap().allows("shrek-swamp-broker", Proto::Tcp, 8400));
+        assert!(!resolve("model-codex-cli").unwrap().allows("shrek-swamp-broker", Proto::Tcp, 8400));
+    }
+
+    #[test]
+    fn swamp_capability_predicate_is_explicit_to_the_swamp_query_destination() {
+        // The swamp-capability gate keys on the EXACT swamp-query dst, nothing weaker. Only a profile
+        // that grants `SWAMP_QUERY_HOST:SWAMP_QUERY_PORT` is swamp-capable; every model-only profile and
+        // the empty profile are not. This is the single predicate gatekeeperd gates the session-identity
+        // transaction on, so it must never be true for a session lacking the swamp-query grant.
+        assert!(resolve("swamp-query").unwrap().grants_swamp_query());
+        for name in ["none", "model-local", "model-anthropic", "model-claude-cli", "model-codex-cli", "github-https"] {
+            assert!(!resolve(name).unwrap().grants_swamp_query(), "{name} must NOT be swamp-capable");
+        }
+        // The predicate is bound to the sealed constants, not a magic string.
+        assert_eq!(SWAMP_QUERY_HOST, "shrek-swamp-broker");
+        assert_eq!(SWAMP_QUERY_PORT, 8400);
     }
 
     #[test]

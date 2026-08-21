@@ -55,12 +55,17 @@ fn closure_to_spec(c: Closure) -> ClosureSpec {
 }
 
 /// Egress decision for a constructed sandbox. `None` = loopback-only (`--private-network`, no
-/// injection) — every no-net cell, and the slice-1 mount-plane path. `Profile` = a ≤T1 C-net cell
-/// whose SEALED egress profile gatekeeperd resolved; the net plane injects a veth + nft allow-list.
-#[derive(Clone, Copy)]
+/// injection) — every no-net cell, and the slice-1 mount-plane path. `Profiles` = a ≤T1 C-net cell whose
+/// SEALED egress profile(s) gatekeeperd resolved INDEPENDENTLY; the net plane injects a veth + nft
+/// allow-list over their UNIONED endpoints. Phase-6 Swamp slice-2 makes `--egress` repeatable, so a
+/// coding session can hold, e.g., its model broker AND `swamp-query` as two explicit sealed grants; a
+/// single-profile request is exactly the legacy behavior. The vector is NON-EMPTY (an empty egress is
+/// `None`), and each entry is a distinct sealed profile (deduped at parse), so per-destination identity
+/// (the swamp broker's no-SNAT carve-out) is preserved across the union.
+#[derive(Clone)]
 pub enum Egress {
     None,
-    Profile(&'static EgressProfile),
+    Profiles(Vec<&'static EgressProfile>),
 }
 
 pub struct SandboxSpec {
@@ -150,10 +155,14 @@ pub fn construct(spec: &SandboxSpec) -> io::Result<i32> {
     }
 
     // Resolve egress destinations BEFORE spawning: an unresolvable/AAAA-only host must fail closed
-    // with NO sandbox at all. An empty profile is treated as no-net (reaches nothing either way).
-    let resolved = match spec.egress {
-        Egress::Profile(p) if !p.rules.is_empty() => Some(net_plane::resolve_profile_v4(p)?),
-        _ => None,
+    // with NO sandbox at all. Profiles that reach nothing (all-empty rules, e.g. `none`) union to an
+    // empty endpoint set and are treated as no-net (reaches nothing either way).
+    let resolved = match &spec.egress {
+        Egress::Profiles(ps) => {
+            let res = net_plane::resolve_profiles_v4(ps)?;
+            if res.endpoints.is_empty() { None } else { Some(res) }
+        }
+        Egress::None => None,
     };
 
     match resolved {
@@ -214,7 +223,10 @@ fn run_egress(
 
     let setup = (|| -> io::Result<()> {
         let leader = net_plane::discover_leader(nspawn_pid, Duration::from_secs(8))?;
-        net.inject(leader, endpoints)?;
+        // T1 (nspawn) does not carry the swamp-query profile in this slice, so no masquerade carve-out
+        // is needed here; an out-of-scope swamp query from a T1 cell would fail closed at the broker
+        // (masqueraded source ⇒ no binding match), never fall open.
+        net.inject(leader, endpoints, &[])?;
         barrier.go() // rules-before-usable: release the workload ONLY after inject succeeds
     })();
 
@@ -254,7 +266,7 @@ fn recheck(
     trust: TrustBand,
     caps: CapsProfile,
     profile: CapsProfile,
-    egress_name: Option<&str>,
+    egress_names: &[String],
 ) -> Decision {
     // (a) Downgrade/floor. Refuse anything below max(matrix, floor); a requested tier ABOVE the
     // bound is a legal upward escalation and is honored. This is the downward-forbidden invariant.
@@ -292,13 +304,28 @@ fn recheck(
             code: 13,
             reason: "no-plane-for-C-broad (unrestricted egress)".into(),
         },
-        CapsProfile::Net => match egress_name {
-            None => Decision::Refuse { code: 13, reason: "C-net-requires-egress-profile".into() },
-            Some(name) => match shrek_policy::egress::resolve(name) {
-                Some(p) => Decision::Construct { effective, egress: Egress::Profile(p) },
-                None => Decision::Refuse { code: 13, reason: format!("unknown-egress-profile={name}") },
-            },
-        },
+        // A C-net cell names ONE OR MORE sealed egress profiles (repeatable `--egress`). Each name is
+        // resolved INDEPENDENTLY through the sealed table; construction later unions only the resolved
+        // sealed endpoints. Fail closed: zero names, or ANY unknown name, refuses — gatekeeperd never
+        // fabricates a destination and never silently drops a requested-but-unknown profile. Duplicate
+        // names collapse (a profile is granted at most once); order is irrelevant to the union.
+        CapsProfile::Net => {
+            if egress_names.is_empty() {
+                return Decision::Refuse { code: 13, reason: "C-net-requires-egress-profile".into() };
+            }
+            let mut profiles: Vec<&'static EgressProfile> = Vec::new();
+            for name in egress_names {
+                match shrek_policy::egress::resolve(name) {
+                    Some(p) => {
+                        if !profiles.iter().any(|q| q.name == p.name) {
+                            profiles.push(p);
+                        }
+                    }
+                    None => return Decision::Refuse { code: 13, reason: format!("unknown-egress-profile={name}") },
+                }
+            }
+            Decision::Construct { effective, egress: Egress::Profiles(profiles) }
+        }
         // effective ∈ {T0, T1}, caps ∈ {C-ro-nosec, C-proj-rw}: build at T1, loopback-only. A T0
         // result at T1 is a legal upward escalation until the real T0 (Landlock) constructor lands.
         CapsProfile::RoNosec | CapsProfile::ProjRw => {
@@ -323,7 +350,7 @@ pub fn cli(args: &[String]) -> i32 {
     let mut trust_s: Option<String> = None;
     let mut caps_s: Option<String> = None;
     let mut profile_s: Option<String> = None;
-    let mut egress_s: Option<String> = None;
+    let mut egress_names: Vec<String> = Vec::new();
     let mut rw_grant: Option<String> = None;
     let mut build_grant: Option<String> = None;
     let mut ingest_harness = false;
@@ -346,7 +373,9 @@ pub fn cli(args: &[String]) -> i32 {
             "--trust" => { i += 1; trust_s = args.get(i).cloned(); }
             "--caps" => { i += 1; caps_s = args.get(i).cloned(); }
             "--profile" => { i += 1; profile_s = args.get(i).cloned(); }
-            "--egress-profile" => { i += 1; egress_s = args.get(i).cloned(); }
+            // Repeatable (Phase-6 Swamp slice-2): each `--egress-profile NAME` adds one sealed profile;
+            // the decision plane resolves each independently and unions the resolved endpoints.
+            "--egress-profile" => { i += 1; if let Some(v) = args.get(i) { egress_names.push(v.clone()); } }
             "--" => { workload = args[i + 1..].to_vec(); break; }
             other => { eprintln!("gatekeeperd/sandbox: unknown arg {other}"); return 2; }
         }
@@ -368,7 +397,6 @@ pub fn cli(args: &[String]) -> i32 {
         // Fail-high on the caps axis; a missing profile defaults to the requested caps.
         let caps = CapsProfile::parse(caps_s.as_deref().unwrap_or(""));
         let profile = profile_s.as_deref().map(CapsProfile::parse).unwrap_or(caps);
-        let egress_name = egress_s.as_deref();
         // Slice-7 (B1): the trust band is DERIVED from a measurement of the workload entrypoint, never
         // taken from the caller. `--trust` is demoted to a NON-AUTHORITATIVE proposal — recorded for
         // audit + mismatch detection ONLY, and it NEVER influences the effective band. gatekeeperd's
@@ -409,11 +437,12 @@ pub fn cli(args: &[String]) -> i32 {
             );
             (d.band, Some(d))
         };
-        match recheck(requested, trust, caps, profile, egress_name) {
+        let egress_audit = if egress_names.is_empty() { "-".to_string() } else { egress_names.join(",") };
+        match recheck(requested, trust, caps, profile, &egress_names) {
             Decision::Refuse { code, reason } => {
                 eprintln!(
-                    "SANDBOX-DECISION refused reason={reason} requested={} trust={} caps={} profile={} egress={}",
-                    requested.label(), trust.label(), caps.label(), profile.label(), egress_name.unwrap_or("-")
+                    "SANDBOX-DECISION refused reason={reason} requested={} trust={} caps={} profile={} egress={egress_audit}",
+                    requested.label(), trust.label(), caps.label(), profile.label()
                 );
                 return code;
             }
@@ -467,17 +496,25 @@ pub fn cli(args: &[String]) -> i32 {
                     );
                     return 15;
                 }
-                egress = e;
-                let egr = match e { Egress::Profile(p) => p.name, Egress::None => "none" };
+                // Audit label for the egress: the unioned profile names (joined) or "none". Computed by
+                // borrow so `e` can be consumed into the T1 SandboxSpec only on the fall-through path.
+                let egr = match &e {
+                    Egress::Profiles(ps) => ps.iter().map(|p| p.name).collect::<Vec<_>>().join("+"),
+                    Egress::None => "none".to_string(),
+                };
                 // Slice-6: an effective==T2 cell builds at genuine T2 via gVisor/runsc. No fall-DOWN:
                 // T2 is the floor for T-untrust/T-hostile, so a construction failure fails CLOSED and
                 // never degrades to T1. Platform (systrap/kvm) is chosen once here (both genuine T2).
                 if effective == Tier::T2 {
                     let choice = t2_plane::select_platform();
-                    // Slice-1b: thread the resolved sealed egress profile (if any) into the T2 spec —
-                    // a C-net cell now carries `Some(profile)` (netstack egress), every other cell
-                    // `None` (loopback-only). The egress name is audited in the decision line.
-                    let t2_egress = match e { Egress::Profile(p) => Some(p), Egress::None => None };
+                    // Slice-1b (extended by Swamp slice-2): thread the resolved sealed egress profiles
+                    // into the T2 spec — a C-net cell now carries one OR MORE (netstack egress over their
+                    // union, e.g. a model broker + swamp-query), every other cell an empty vec
+                    // (loopback-only). The unioned egress names are audited in the decision line.
+                    let t2_egress: Vec<&'static EgressProfile> = match &e {
+                        Egress::Profiles(ps) => ps.clone(),
+                        Egress::None => Vec::new(),
+                    };
                     eprintln!(
                         "SANDBOX-DECISION cleared construct-at=T2 effective=T2 platform={} why=\"{}\" requested={} trust={} caps={} profile={} egress={egr}",
                         choice.platform.flag(), choice.why, requested.label(), trust.label(), caps.label(), profile.label()
@@ -548,6 +585,9 @@ pub fn cli(args: &[String]) -> i32 {
                         effective.label(), requested.label(), trust.label(), caps.label(), profile.label()
                     );
                 }
+                // Only the T1 fall-through reaches here (T2/T0 returned above): consume the decided
+                // egress into the SandboxSpec built below.
+                egress = e;
                 // fall through to T1 construction (effective==T1, or a T0 cell that fell up)
             }
         }
@@ -584,7 +624,7 @@ mod tests {
     #[test]
     fn forged_downgrade_below_floor_is_refused() {
         // T-hostile/C-net floors at T3; a request for T0 is a forbidden downgrade (code 10).
-        let (code, reason) = refusal(recheck(Tier::T0, Hostile, Net, Net, None));
+        let (code, reason) = refusal(recheck(Tier::T0, Hostile, Net, Net, &[]));
         assert_eq!(code, 10);
         assert!(reason.contains("downgrade-below-floor") && reason.contains("T3"));
     }
@@ -592,7 +632,7 @@ mod tests {
     #[test]
     fn caps_exceed_profile_is_refused() {
         // caps C-net ⊄ profile C-proj-rw (code 11), re-checked independently of the resolver.
-        let (code, _) = refusal(recheck(Tier::T1, First, Net, ProjRw, None));
+        let (code, _) = refusal(recheck(Tier::T1, First, Net, ProjRw, &[]));
         assert_eq!(code, 11);
     }
 
@@ -601,10 +641,11 @@ mod tests {
         // Slice-1b: T-untrust/C-net resolves to T2 and now CONSTRUCTS with the gVisor egress plane,
         // given a sealed profile that resolves — the effective wall is T2 and the resolved profile is
         // threaded through (netstack egress), not the T1 plane.
-        match recheck(Tier::T2, Untrust, Net, Net, Some("rust-crates")) {
-            Decision::Construct { effective, egress: Egress::Profile(p) } => {
+        match recheck(Tier::T2, Untrust, Net, Net, &["rust-crates".to_string()]) {
+            Decision::Construct { effective, egress: Egress::Profiles(ps) } => {
                 assert_eq!(effective, Tier::T2);
-                assert_eq!(p.name, "rust-crates");
+                assert_eq!(ps.len(), 1, "single --egress resolves to exactly one profile");
+                assert_eq!(ps[0].name, "rust-crates");
             }
             Decision::Construct { egress: Egress::None, .. } => panic!("T2 C-net must carry the resolved profile, got loopback-only"),
             Decision::Refuse { code, reason } => panic!("expected T2 construct, got refuse {code}: {reason}"),
@@ -612,20 +653,45 @@ mod tests {
     }
 
     #[test]
+    fn multi_egress_unions_resolved_profiles_and_fails_closed_on_any_unknown() {
+        // Swamp slice-2: repeatable --egress resolves EACH name independently and unions them; a coding
+        // session can hold its model broker AND swamp-query as two explicit grants.
+        match recheck(Tier::T2, Untrust, Net, Net, &["model-claude-cli".to_string(), "swamp-query".to_string()]) {
+            Decision::Construct { effective, egress: Egress::Profiles(ps) } => {
+                assert_eq!(effective, Tier::T2);
+                let names: Vec<&str> = ps.iter().map(|p| p.name).collect();
+                assert!(names.contains(&"model-claude-cli") && names.contains(&"swamp-query"), "union holds both: {names:?}");
+            }
+            Decision::Construct { egress: Egress::None, .. } => panic!("expected a 2-profile construct, got loopback-only"),
+            Decision::Refuse { code, reason } => panic!("expected a 2-profile construct, got refuse {code}: {reason}"),
+        }
+        // Duplicate names collapse to a single grant (a profile is granted at most once).
+        match recheck(Tier::T2, Untrust, Net, Net, &["swamp-query".to_string(), "swamp-query".to_string()]) {
+            Decision::Construct { egress: Egress::Profiles(ps), .. } => assert_eq!(ps.len(), 1, "duplicates dedupe"),
+            Decision::Construct { egress: Egress::None, .. } => panic!("expected a deduped construct, got loopback-only"),
+            Decision::Refuse { code, reason } => panic!("expected a deduped construct, got refuse {code}: {reason}"),
+        }
+        // Fail closed if ANY requested profile is unknown — even alongside a valid one.
+        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, &["swamp-query".to_string(), "nope".to_string()]));
+        assert_eq!(code, 13);
+        assert!(reason.contains("unknown-egress-profile=nope"), "names the offending profile: {reason}");
+    }
+
+    #[test]
     fn t2_c_net_without_profile_still_fails_closed() {
         // A named egress is mandatory: T-untrust/C-net at T2 with no profile fails closed (code 13),
         // exactly as the T1 C-net path does. C-broad and an unknown profile likewise refuse.
-        assert_eq!(refusal(recheck(Tier::T2, Untrust, Net, Net, None)).0, 13);
-        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, Some("nope")));
+        assert_eq!(refusal(recheck(Tier::T2, Untrust, Net, Net, &[])).0, 13);
+        let (code, reason) = refusal(recheck(Tier::T2, Untrust, Net, Net, &["nope".to_string()]));
         assert_eq!(code, 13);
         assert!(reason.contains("unknown-egress-profile"));
         // C-broad at T-untrust floors to T3 (no constructor) — refused regardless of any profile name.
-        assert_eq!(refusal(recheck(Tier::T3, Untrust, Broad, Broad, Some("rust-crates"))).0, 12);
+        assert_eq!(refusal(recheck(Tier::T3, Untrust, Broad, Broad, &["rust-crates".to_string()])).0, 12);
     }
 
     #[test]
     fn t3_has_no_constructor() {
-        let (code, reason) = refusal(recheck(Tier::T3, Hostile, ProjRw, ProjRw, None));
+        let (code, reason) = refusal(recheck(Tier::T3, Hostile, ProjRw, ProjRw, &[]));
         assert_eq!(code, 12);
         assert!(reason.contains("no-constructor-T3"));
     }
@@ -633,13 +699,13 @@ mod tests {
     #[test]
     fn c_net_below_t2_requires_an_egress_profile() {
         // T-first/C-net = T1; C-net with no named egress profile fails closed (code 13).
-        let (code, _) = refusal(recheck(Tier::T1, First, Net, Net, None));
+        let (code, _) = refusal(recheck(Tier::T1, First, Net, Net, &[]));
         assert_eq!(code, 13);
     }
 
     #[test]
     fn c_broad_has_no_plane() {
-        let (code, reason) = refusal(recheck(Tier::T1, First, Broad, Broad, None));
+        let (code, reason) = refusal(recheck(Tier::T1, First, Broad, Broad, &[]));
         assert_eq!(code, 13);
         assert!(reason.contains("C-broad"));
     }
@@ -648,7 +714,7 @@ mod tests {
     fn upward_escalation_is_honored_not_a_downgrade() {
         // T-first/C-ro-nosec floors at T0; a request for the STRONGER T2 wall is a legal upward
         // escalation and constructs at T2 (no min anywhere).
-        match recheck(Tier::T2, First, RoNosec, RoNosec, None) {
+        match recheck(Tier::T2, First, RoNosec, RoNosec, &[]) {
             Decision::Construct { effective, .. } => assert_eq!(effective, Tier::T2),
             Decision::Refuse { code, reason } => panic!("unexpected refusal {code}: {reason}"),
         }
@@ -657,7 +723,7 @@ mod tests {
     #[test]
     fn cleared_t1_constructs_loopback() {
         // The nominal cleared path: T-pinned/C-proj-rw = T1, loopback-only.
-        match recheck(Tier::T1, Pinned, ProjRw, ProjRw, None) {
+        match recheck(Tier::T1, Pinned, ProjRw, ProjRw, &[]) {
             Decision::Construct { effective, egress } => {
                 assert_eq!(effective, Tier::T1);
                 assert!(matches!(egress, Egress::None));
