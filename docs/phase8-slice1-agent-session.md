@@ -276,5 +276,9 @@ Landed owner-split atop the Desktop Bootstrap-0 close-out:
 
 **Note:** the sealed image ships `agentd`/`gatekeeperd` (the TCB) but not the `shrek` host composer;
 `shrek session`/`shrek session status` are host CLIs driving the sealed wall (as `shrek run`/`find` are).
-Acceptance target for the next slice (§Data-model note): a real `SessionProvider` reads this exact
-`shrek-session/1` record into the Quickshell Work drawer, deleting `MockSessionProvider`.
+Acceptance target for the next slice (§Data-model note) — **LANDED**: a real `SessionProvider`
+(`ui/providers/SessionProvider.qml`) reads this exact `shrek-session/1` record read-only into the
+Quickshell Work drawer, and `MockSessionProvider` is deleted. Proven end-to-end by
+`scripts/desktop-session-proof.sh` (real `gatekeeperd session-view` writes the record; the real
+provider parses it under headless Sway + Quickshell): DS-read (record renders), DS-surfaces (no
+regression), DS-empty (no record ⇒ no row, fail-closed). One schema, writer and reader identical.

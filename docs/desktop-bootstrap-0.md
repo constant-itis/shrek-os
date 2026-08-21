@@ -104,7 +104,7 @@ ui/
   shell.qml    config-root entry (loads shell/Shell.qml) — see §Session
   shell/       Shell.qml  Bar.qml  Launcher.qml  WorkDrawer.qml
   components/  (empty — future shared widgets)
-  providers/   SessionProvider.qml  MockSessionProvider.qml
+  providers/   SessionProvider.qml   (MockSessionProvider.qml removed in Phase-8 Slice-1)
   mocks/       (empty — future mock fixtures)
   themes/      Tokens.qml  qmldir (Tokens singleton)
 ```
@@ -114,10 +114,12 @@ intentionally boring: a bar (workspace indicators left, system status right), a 
 **placeholder**, and a Work-drawer host that reads the `MockSessionProvider` and shows *"Nothing
 running."* No authority, no badges.
 
-**The provider seam:** `WorkDrawer` binds to a `SessionProvider` interface; Bootstrap 0 wires
-`MockSessionProvider` (returns an empty session list). The final data contract — the versioned read
-model that will mirror the Phase-8 Slice-1 session-view record — is **intentionally not defined here**.
-Swapping the mock for a real provider is a one-line change at the `WorkDrawer` binding site.
+**The provider seam:** `WorkDrawer` binds to a `SessionProvider`; Bootstrap 0 wired an empty
+`MockSessionProvider`. **Later filled (Phase-8 Slice-1):** `SessionProvider.qml` is now the real
+read-only provider — it reads gatekeeperd-authored `shrek-session/1` records from `$SHREK_SESSION_DIR`
+(default `/run/shrek/session`) and projects each into an opaque Work-drawer row; `MockSessionProvider`
+was deleted (the swap was the one-line change at the `WorkDrawer` binding site in `Shell.qml`). See
+`docs/phase8-slice1-agent-session.md` and `scripts/desktop-session-proof.sh`.
 
 ## Smoke — `scripts/desktop-smoke.sh`
 Runs the desktop layer's actual stack headless in an ephemeral `--privileged debian:trixie` container
