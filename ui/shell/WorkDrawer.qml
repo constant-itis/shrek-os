@@ -3,11 +3,10 @@ import Quickshell.Wayland
 import QtQuick
 import "../themes"
 
-// WorkDrawer.qml — the future Work drawer HOST. Bootstrap-0: empty-state only,
-// driven by an injected `provider`. It renders `provider.sessions` GENERICALLY;
-// under MockSessionProvider that list is empty, so it shows "Nothing running".
-// NO fake session, NO authority badges, NO T2 tags — the product contract is
-// deliberately undefined here.
+// WorkDrawer.qml — the Work drawer HOST. Driven by an injected read-only `provider`.
+// It renders `provider.sessions` GENERICALLY: an empty list (no live sessions) shows
+// "Nothing running"; otherwise one opaque row per gatekeeperd-authored shrek-session/1
+// record. Strictly DISPLAY — NO authority badges, NO grant/stop actions, NO mutation.
 PanelWindow {
     id: drawer
     property var provider

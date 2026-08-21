@@ -11,8 +11,8 @@ import "../providers"
 ShellRoot {
     id: shell
 
-    // THE swap point: replace MockSessionProvider with a real provider later.
-    MockSessionProvider { id: sessionProvider }
+    // Real read-only session view: reads gatekeeperd-authored shrek-session/1 records.
+    SessionProvider { id: sessionProvider }
 
     Bar {}
     Launcher {}
