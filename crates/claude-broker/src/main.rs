@@ -42,12 +42,14 @@
 //! fails closed on the true error (#1567: cached state lies). Its `reason` is a FIXED enum — never raw
 //! CLI output — so the breadcrumb can never become an accidental credential/logging surface.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinyjson::JsonValue;
@@ -57,6 +59,134 @@ const DEFAULT_CLAUDE_BIN: &str = "claude";
 const DEFAULT_MODEL: &str = "sonnet";
 /// Guard: refuse to read an absurdly large request so a broken peer cannot OOM the broker.
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// The one request header that carries the coder's opaque per-session handle (Phase-6 slice-7).
+const SESSION_HEADER: &str = "x-shrek-session";
+/// Upper bound on the untrusted handle length (defense for the map key; the handle NEVER reaches a
+/// path or argv regardless — the broker-owned `internal_id` does, see [`Registry`]).
+const MAX_HANDLE_LEN: usize = 128;
+
+// ---- session registry (Phase-6 slice-7, docs/phase6-slice7-cross-provider-session.md) --------------
+//
+// The coder attaches an opaque `X-Shrek-Session` handle per session. This registry maps that handle to a
+// broker-owned session slot so the broker can drive a REAL `claude` session (`--session-id` then
+// `--resume`) and forward only the new tail turn each step, instead of re-flattening the whole transcript.
+//
+// INVARIANTS (owner-locked): (1) session identity is the handle, NEVER derived from transcript bytes, and
+// carries no filesystem/network authority; (2) the raw handle NEVER reaches a path or argv — a
+// broker-minted `internal_id` (which is also the `--session-id`) does; (3) requests bearing the SAME
+// handle serialize on a per-session lock, different handles run concurrently; (4) if native resume ever
+// fails, the caller falls back to the stateless full-transcript flatten, which is always correct.
+
+/// A single broker-owned session slot. Its `state` mutex is the per-session serialization lock.
+struct Session {
+    state: Mutex<SessionState>,
+}
+
+struct SessionState {
+    /// Broker-minted, opaque, and ALSO the `claude --session-id` value. Never the caller's handle.
+    internal_id: String,
+    /// How many transcript messages have already been forwarded into the native session.
+    msgs_forwarded: usize,
+}
+
+/// Handle → session slot. The outer mutex guards only the map; the actual CLI call is serialized by the
+/// per-slot `state` lock so a slow turn never blocks unrelated sessions.
+struct Registry {
+    map: Mutex<HashMap<String, Arc<Session>>>,
+}
+
+impl Registry {
+    fn new() -> Self {
+        Registry { map: Mutex::new(HashMap::new()) }
+    }
+
+    /// Get-or-create the slot for `handle`, minting a fresh broker-owned `internal_id` on first sighting.
+    fn slot(&self, handle: &str) -> Arc<Session> {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        m.entry(handle.to_string())
+            .or_insert_with(|| {
+                Arc::new(Session {
+                    state: Mutex::new(SessionState { internal_id: mint_internal_id(), msgs_forwarded: 0 }),
+                })
+            })
+            .clone()
+    }
+
+    /// Forget a handle so the next request with it re-establishes a fresh native session (used on any
+    /// divergence/resume-failure → the caller takes the flatten fallback for the current call).
+    fn forget(&self, handle: &str) {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(handle);
+    }
+}
+
+/// Validate the untrusted `X-Shrek-Session` handle: bounded length, safe charset. `None` ⇒ treat the
+/// request as stateless (the slice-4 path). This is defense for the map key + logs; the handle is never
+/// placed in a path/argv regardless.
+fn valid_handle(h: &str) -> Option<String> {
+    let h = h.trim();
+    if h.is_empty() || h.len() > MAX_HANDLE_LEN {
+        return None;
+    }
+    if h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        Some(h.to_string())
+    } else {
+        None
+    }
+}
+
+/// Mint a broker-owned opaque id (UUIDv4 shape) from `/dev/urandom`. Used as BOTH the internal session id
+/// and the `claude --session-id` value — a valid UUID the CLI accepts, never the caller's handle.
+fn mint_internal_id() -> String {
+    let mut b = [0u8; 16];
+    fill_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+/// Fill `buf` with random bytes from `/dev/urandom`; on the (Linux-broker-unreachable) failure path,
+/// derive a non-repeating fallback from the clock so an id is still produced.
+fn fill_random(buf: &mut [u8]) {
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        if f.read_exact(buf).is_ok() {
+            return;
+        }
+    }
+    let t = now_epoch();
+    for (i, x) in buf.iter_mut().enumerate() {
+        *x = (t >> ((i % 8) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
+    }
+}
+
+/// Render a slice of `(role, content)` messages to the role-labelled transcript a single `claude -p`
+/// call reproduces. The stateless path flattens ALL messages; a sessioned continuation flattens only the
+/// new tail `messages[msgs_forwarded..]`.
+fn flatten(messages: &[(String, String)]) -> String {
+    let mut prompt = String::new();
+    for (role, content) in messages {
+        let label = if role == "assistant" { "Assistant" } else { "User" };
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(label);
+        prompt.push_str(": ");
+        prompt.push_str(content);
+    }
+    prompt
+}
+
+/// How the native session id is threaded onto a `claude -p` call.
+enum Sess<'a> {
+    /// Stateless single-shot (slice-4): no session id; system prompt sent inline.
+    None,
+    /// First turn of a session: `--session-id <internal_id>` + the system prompt.
+    Create(&'a str),
+    /// Continuation: `--resume <internal_id>`; the session already holds the system prompt.
+    Resume(&'a str),
+}
 
 fn main() {
     std::process::exit(dispatch());
@@ -88,12 +218,18 @@ fn serve(claude_bin: &str, default_model: &'static str) -> i32 {
     };
     println!("CLAUDE-BROKER-LISTEN {listen} claude_bin={claude_bin} default_model={default_model}");
 
+    // One registry for the process lifetime: handle → broker-owned session slot (slice-7). In-memory by
+    // design (owner-accepted v1); a broker restart drops the map and the next request re-establishes via
+    // the stateless flatten fallback.
+    let registry = Arc::new(Registry::new());
+
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
                 let (bin, dm) = (claude_bin.to_string(), default_model);
+                let reg = Arc::clone(&registry);
                 std::thread::spawn(move || {
-                    if let Err(e) = handle(stream, &bin, dm) {
+                    if let Err(e) = handle(stream, &bin, dm, &reg) {
                         eprintln!("CLAUDE-BROKER-ERROR conn: {e}");
                     }
                 });
@@ -108,8 +244,13 @@ fn serve(claude_bin: &str, default_model: &'static str) -> i32 {
 /// to a `claude -p` invocation broker-side, and writes the messages-API-shaped reply back plaintext. On
 /// ANY failure — malformed request, CLI non-zero exit, CLI-reported error, unparseable output — fails
 /// CLOSED with a 502 to the box (never a fabricated success). No credential is ever read or logged.
-fn handle(mut box_stream: TcpStream, claude_bin: &str, default_model: &'static str) -> std::io::Result<()> {
-    let (method, path, body) = match read_http_request(&mut box_stream) {
+fn handle(
+    mut box_stream: TcpStream,
+    claude_bin: &str,
+    default_model: &'static str,
+    registry: &Registry,
+) -> std::io::Result<()> {
+    let (method, path, session, body) = match read_http_request(&mut box_stream) {
         Ok(v) => v,
         Err(e) => {
             write_plain(&mut box_stream, 400, "bad request from box")?;
@@ -126,13 +267,24 @@ fn handle(mut box_stream: TcpStream, claude_bin: &str, default_model: &'static s
         }
     };
     let model = map_model(req.model.as_deref(), default_model);
-    println!(
-        "CLAUDE-BROKER-FWD {method} {path} model_req={:?} -> claude --model {model} (prompt={}B system={}B)",
-        req.model, req.prompt.len(), req.system.len()
-    );
+
+    // Route: a valid session handle drives a REAL native session (forward only the tail turn); otherwise,
+    // or on any resume failure, fall back to the proven stateless flatten. `run_turn` returns the CLI
+    // result either way, so the reply/fail-closed tail below is identical.
+    let handle_ok = session.as_deref().and_then(valid_handle);
+    let result = match &handle_ok {
+        Some(h) => run_session_turn(claude_bin, model, &req, h, registry, &method, &path),
+        None => {
+            println!(
+                "CLAUDE-BROKER-FWD {method} {path} stateless model_req={:?} -> claude --model {model} (msgs={} system={}B)",
+                req.model, req.messages.len(), req.system.len()
+            );
+            invoke_claude(claude_bin, model, &req.system, &flatten(&req.messages), Sess::None)
+        }
+    };
 
     // Invoke the LOGGED-IN CLI broker-side. This is the ONLY authority on token health: a real round-trip.
-    let result = match invoke_claude(claude_bin, model, &req.system, &req.prompt) {
+    let result = match result {
         Ok(text) => text,
         Err(e) => {
             // Surface a likely-auth failure distinctly so a revoked/expired login is diagnosable and not
@@ -160,24 +312,87 @@ fn handle(mut box_stream: TcpStream, claude_bin: &str, default_model: &'static s
     Ok(())
 }
 
-/// The messages-API request fields the broker cares about, already flattened for a single-shot CLI call.
+/// Drive one turn of a REAL native `claude` session for `handle`, forwarding only the new tail turn.
+/// Holds the per-session lock for the whole turn (owner requirement: same-handle requests serialize;
+/// different handles run concurrently). Returns the CLI result, transparently falling back to a stateless
+/// full-transcript flatten on ANY divergence or resume failure — so the caller's reply path is identical.
+fn run_session_turn(
+    bin: &str,
+    model: &'static str,
+    req: &ParsedRequest,
+    handle: &str,
+    registry: &Registry,
+    method: &str,
+    path: &str,
+) -> Result<String, String> {
+    let slot = registry.slot(handle);
+    let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+    let n = req.messages.len();
+    let m = st.msgs_forwarded;
+    let internal = st.internal_id.clone();
+    let mut invalidate = false;
+
+    let result = if m == 0 {
+        // First turn: create the native session pinned to the broker-owned id, seed with the full
+        // transcript so far.
+        println!("CLAUDE-BROKER-FWD {method} {path} session=NEW model={model} msgs={n} -> --session-id (create)");
+        let r = invoke_claude(bin, model, &req.system, &flatten(&req.messages), Sess::Create(&internal));
+        if r.is_ok() {
+            // +1: the CLI produces one assistant reply that the coder appends to its transcript; that reply
+            // already lives in the native session, so the next delta must start AFTER it (never re-send it).
+            st.msgs_forwarded = n + 1;
+        } else {
+            invalidate = true;
+        }
+        r
+    } else if n > m {
+        // Continuation: forward ONLY the new tail turn(s) via resume; the session retains prior context.
+        println!(
+            "CLAUDE-BROKER-FWD {method} {path} session=RESUME model={model} forwarding tail {m}..{n} of {n}"
+        );
+        match invoke_claude(bin, model, "", &flatten(&req.messages[m..n]), Sess::Resume(&internal)) {
+            Ok(text) => {
+                st.msgs_forwarded = n + 1; // account for the assistant reply the coder will append
+                Ok(text)
+            }
+            Err(e) => {
+                // Native resume failed → fall back to a full stateless flatten for THIS call, then forget
+                // the handle so the next request re-establishes cleanly. Always correct, just not cheap.
+                eprintln!("CLAUDE-BROKER-SESSION-FALLBACK resume failed ({e}); flattening full transcript");
+                invalidate = true;
+                invoke_claude(bin, model, &req.system, &flatten(&req.messages), Sess::None)
+            }
+        }
+    } else {
+        // Divergence: the transcript does not extend what we forwarded (coder reset / retry). Fall back.
+        eprintln!("CLAUDE-BROKER-SESSION-FALLBACK divergent transcript (msgs={n} <= forwarded={m}); flattening");
+        invalidate = true;
+        invoke_claude(bin, model, &req.system, &flatten(&req.messages), Sess::None)
+    };
+
+    drop(st);
+    if invalidate {
+        registry.forget(handle);
+    }
+    result
+}
+
+/// The messages-API request fields the broker cares about. The `messages` array is kept STRUCTURED as
+/// `(role, content)` so a sessioned continuation can forward only the new tail turn (slice-7); the
+/// stateless path flattens the whole vector via [`flatten`].
 struct ParsedRequest {
     /// The top-level `system` field, concatenated (empty string if absent).
     system: String,
-    /// The `messages` array rendered to a single prompt string (role-labelled transcript).
-    prompt: String,
+    /// The `messages` array as ordered `(role, content)` pairs.
+    messages: Vec<(String, String)>,
     /// The requested `model` id, if present — mapped through the allowlist before use.
     model: Option<String>,
 }
 
 /// Parse the coder's Anthropic messages-API body into the pieces a `claude -p` call needs. `system` is
-/// lifted verbatim; the `messages` array is flattened into a role-labelled transcript so a stateless
-/// single-shot CLI call reproduces the conversation. Returns `None` on any shape mismatch (→ fail closed).
-///
-/// v1 renders the transcript as text (`User:`/`Assistant:` turns). A stateful `--resume` session that
-/// preserves structured turns is a tracked follow (docs §6), not needed for the bounded coder loop.
+/// lifted verbatim; the `messages` array is preserved as ordered `(role, content)` pairs. Returns `None`
+/// on any shape mismatch (→ fail closed).
 fn parse_messages_request(body: &[u8]) -> Option<ParsedRequest> {
-    use std::collections::HashMap;
     let s = std::str::from_utf8(body).ok()?;
     let v: JsonValue = s.parse().ok()?;
     let obj = v.get::<HashMap<String, JsonValue>>()?;
@@ -191,26 +406,17 @@ fn parse_messages_request(body: &[u8]) -> Option<ParsedRequest> {
     let model = obj.get("model").and_then(|m| m.get::<String>()).cloned();
 
     let msgs = obj.get("messages")?.get::<Vec<JsonValue>>()?;
-    let mut prompt = String::new();
+    let mut messages = Vec::with_capacity(msgs.len());
     for m in msgs {
         let mo = m.get::<HashMap<String, JsonValue>>()?;
-        let role = mo.get("role").and_then(|r| r.get::<String>()).map(String::as_str).unwrap_or("user");
+        let role = mo.get("role").and_then(|r| r.get::<String>()).cloned().unwrap_or_else(|| "user".into());
         let content = mo.get("content").and_then(|c| c.get::<String>()).cloned().unwrap_or_default();
-        let label = match role {
-            "assistant" => "Assistant",
-            _ => "User",
-        };
-        if !prompt.is_empty() {
-            prompt.push_str("\n\n");
-        }
-        prompt.push_str(label);
-        prompt.push_str(": ");
-        prompt.push_str(&content);
+        messages.push((role, content));
     }
-    if prompt.is_empty() {
+    if messages.is_empty() {
         return None;
     }
-    Some(ParsedRequest { system, prompt, model })
+    Some(ParsedRequest { system, messages, model })
 }
 
 /// Map a requested model id to a SAFE, fixed `--model` value. The return is always a `&'static str` from
@@ -231,15 +437,33 @@ fn map_model(requested: Option<&str>, default: &'static str) -> &'static str {
 /// (no shell): the prompt and system are single data arguments, `model` is an allowlist `&'static str`.
 /// A non-zero exit, or an `is_error` result, is an `Err` (fails closed upstream). The subscription
 /// credential is entirely the CLI's; this process reads none of it.
-fn invoke_claude(bin: &str, model: &'static str, system: &str, prompt: &str) -> Result<String, String> {
+fn invoke_claude(bin: &str, model: &'static str, system: &str, prompt: &str, sess: Sess) -> Result<String, String> {
     let mut cmd = Command::new(bin);
     cmd.arg("-p").arg(prompt)
         .arg("--output-format").arg("json")
         .arg("--model").arg(model);
-    if !system.is_empty() {
-        // Replace the default system prompt with the coder's protocol (the proven CLAUDE-SUB-AS-LLM
-        // pattern, #1788): the CLI acts as a raw protocol-following LLM, not Claude-Code-the-agent.
-        cmd.arg("--system-prompt").arg(system);
+    match sess {
+        // Continuation: the native session already holds the system prompt and prior turns; resume it by
+        // the broker-owned id and send ONLY the new tail turn as the prompt.
+        Sess::Resume(id) => {
+            cmd.arg("--resume").arg(id);
+        }
+        // First turn of a session: pin the broker-minted id so later `--resume <id>` targets it, and set
+        // the system prompt once.
+        Sess::Create(id) => {
+            cmd.arg("--session-id").arg(id);
+            if !system.is_empty() {
+                cmd.arg("--system-prompt").arg(system);
+            }
+        }
+        // Stateless single-shot (slice-4): the whole transcript is the prompt; system sent inline.
+        Sess::None => {
+            if !system.is_empty() {
+                // Replace the default system prompt with the coder's protocol (the proven
+                // CLAUDE-SUB-AS-LLM pattern, #1788): the CLI acts as a raw protocol-following LLM.
+                cmd.arg("--system-prompt").arg(system);
+            }
+        }
     }
     let out = cmd.output().map_err(|e| format!("spawn {bin}: {e}"))?;
     if !out.status.success() {
@@ -293,7 +517,7 @@ fn cap(s: &str, n: usize) -> String {
 // ---- minimal HTTP/1.1 request reader (box→broker is a controlled, single-request path) -------------
 // Mirrors crates/model-proxy's proven reader: request line + headers + exactly Content-Length body.
 
-fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String, Vec<u8>)> {
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String, Option<String>, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let head_end = loop {
@@ -320,10 +544,15 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String,
         return Err(ioerr("malformed request line"));
     }
     let mut content_length = 0usize;
+    let mut session: Option<String> = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("content-length") {
                 content_length = v.trim().parse().map_err(|_| ioerr("bad content-length"))?;
+            } else if k.eq_ignore_ascii_case(SESSION_HEADER) {
+                // Captured verbatim here; validated by valid_handle() before any use.
+                session = Some(v.trim().to_string());
             }
         }
     }
@@ -340,7 +569,7 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String,
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Ok((method, path, body))
+    Ok((method, path, session, body))
 }
 
 fn write_plain(stream: &mut TcpStream, code: u16, msg: &str) -> std::io::Result<()> {
@@ -487,7 +716,7 @@ fn record(available: bool, reason: Reason) {
 /// deliberately DROPPED here, never returned or stored. This is the only authority on login health;
 /// `claude auth status` is never consulted (#1567).
 fn probe(bin: &str, model: &'static str) -> Result<(), Reason> {
-    match invoke_claude(bin, model, "", PROBE_PROMPT) {
+    match invoke_claude(bin, model, "", PROBE_PROMPT, Sess::None) {
         Ok(_) => Ok(()),
         Err(e) if looks_like_auth_failure(&e) => Err(Reason::AuthFailed),
         Err(_) => Err(Reason::ProbeFailed),
@@ -590,7 +819,13 @@ mod tests {
         let r = parse_messages_request(body).expect("parses");
         assert_eq!(r.system, "be terse");
         assert_eq!(r.model.as_deref(), Some("claude-sonnet-5"));
-        assert_eq!(r.prompt, "User: fix the bug\n\nAssistant: {\"tool\":\"read_file\"}\n\nUser: OK contents");
+        assert_eq!(r.messages.len(), 3);
+        assert_eq!(
+            flatten(&r.messages),
+            "User: fix the bug\n\nAssistant: {\"tool\":\"read_file\"}\n\nUser: OK contents"
+        );
+        // A sessioned continuation flattens ONLY the tail, never re-sending the prefix.
+        assert_eq!(flatten(&r.messages[2..]), "User: OK contents");
     }
 
     #[test]
@@ -598,7 +833,7 @@ mod tests {
         let body = br#"{"messages":[{"role":"user","content":"hi"}]}"#;
         let r = parse_messages_request(body).expect("parses");
         assert_eq!(r.system, "");
-        assert_eq!(r.prompt, "User: hi");
+        assert_eq!(flatten(&r.messages), "User: hi");
         assert!(r.model.is_none());
     }
 
@@ -607,6 +842,51 @@ mod tests {
         assert!(parse_messages_request(b"not json").is_none());
         assert!(parse_messages_request(b"{\"messages\":[]}").is_none()); // empty prompt → None
         assert!(parse_messages_request(b"{\"no_messages\":true}").is_none());
+    }
+
+    // ---- slice-7: session registry / handle hygiene ----
+
+    #[test]
+    fn valid_handle_bounds_charset_and_length() {
+        assert_eq!(valid_handle("aZ09-_").as_deref(), Some("aZ09-_"));
+        assert_eq!(valid_handle("  trim-me  ").as_deref(), Some("trim-me"));
+        assert!(valid_handle("").is_none());
+        // Path-traversal / argv-injection shapes are rejected outright.
+        assert!(valid_handle("../etc").is_none());
+        assert!(valid_handle("a/b").is_none());
+        assert!(valid_handle("a b").is_none());
+        assert!(valid_handle("a;rm").is_none());
+        assert!(valid_handle(&"x".repeat(MAX_HANDLE_LEN + 1)).is_none());
+    }
+
+    #[test]
+    fn internal_id_is_uuid_shaped_and_unique_never_the_handle() {
+        let a = mint_internal_id();
+        let b = mint_internal_id();
+        assert_ne!(a, b, "ids must be unique");
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.as_bytes()[14], b'4', "version 4 nibble");
+        let dashes: Vec<usize> = a.match_indices('-').map(|(i, _)| i).collect();
+        assert_eq!(dashes, vec![8, 13, 18, 23], "8-4-4-4-12 layout");
+        assert!(a.bytes().all(|c| c.is_ascii_hexdigit() || c == b'-'));
+    }
+
+    #[test]
+    fn registry_reuses_slot_for_same_handle_and_forget_resets_identity() {
+        let reg = Registry::new();
+        let s1 = reg.slot("sess-A");
+        let id1 = s1.state.lock().unwrap().internal_id.clone();
+        // Same handle → same slot, same broker-owned id (identity is stable within a session).
+        let s2 = reg.slot("sess-A");
+        assert_eq!(s2.state.lock().unwrap().internal_id, id1);
+        assert!(Arc::ptr_eq(&s1, &s2));
+        // A different handle → a different slot/id (never a collision).
+        let other = reg.slot("sess-B");
+        assert_ne!(other.state.lock().unwrap().internal_id, id1);
+        // Forget → the next sighting mints a FRESH id (fallback re-establishment).
+        reg.forget("sess-A");
+        let s3 = reg.slot("sess-A");
+        assert_ne!(s3.state.lock().unwrap().internal_id, id1);
     }
 
     #[test]

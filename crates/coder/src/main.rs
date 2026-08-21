@@ -176,11 +176,16 @@ fn run_loop(provider: Provider, task: &str, model_url: &str, model: &str, max_st
         ("user".into(), initial_user_message(task)),
     ];
 
+    // One opaque session handle per coder run (slice-7). The broker maps it to a real native CLI session
+    // and forwards only the new tail turn each step; we keep sending the full transcript (stateless
+    // client), and the broker collapses it. The handle is opaque and carries no authority.
+    let session = mint_session_handle();
+
     for step in 1..=max_steps {
         println!("CODER-STEP {step}");
 
         let request = build_request(provider, model, &messages);
-        let reply_body = match http_post_json(model_url, &request) {
+        let reply_body = match http_post_json(model_url, &request, &session) {
             Ok(b) => b,
             Err(e) => { eprintln!("CODER-ERROR transport: {e}"); return 4; }
         };
@@ -518,12 +523,47 @@ fn extract_json_object(s: &str) -> Option<&str> {
     None
 }
 
+/// Mint an opaque per-session handle: `SHREK_SESSION` (validated) if the launcher set one, else 16 bytes
+/// of `/dev/urandom` hex-encoded. Opaque, unique, no authority — the broker uses it ONLY to bind
+/// conversational state. Falls back to a pid-derived value if urandom is unreadable (still opaque).
+fn mint_session_handle() -> String {
+    if let Ok(s) = std::env::var("SHREK_SESSION") {
+        let s = s.trim();
+        let ok = !s.is_empty()
+            && s.len() <= 128
+            && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+        if ok {
+            return s.to_string();
+        }
+    }
+    let mut b = [0u8; 16];
+    let filled = std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut b))
+        .is_ok();
+    if !filled {
+        let pid = std::process::id();
+        for (i, x) in b.iter_mut().enumerate() {
+            *x = (pid >> ((i % 4) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
+        }
+    }
+    let mut s = String::with_capacity(32);
+    for byte in b {
+        use std::fmt::Write as _;
+        let _ = write!(s, "{byte:02x}");
+    }
+    s
+}
+
 // ---- HTTP/1.1 POST over plain TCP (v1 endpoint is plaintext) ------------------------------------
 
 /// POST a JSON body to `url` and return the response body. Plain HTTP only (no TLS) — the v1 model
 /// endpoint is a LAN plaintext service reached over the sealed egress. Resolution of the host goes
 /// through the system resolver, which reads the `/etc/hosts` gatekeeperd pinned at construction.
-fn http_post_json(url: &str, body: &str) -> Result<String, String> {
+///
+/// `session` is the opaque per-session handle sent as `X-Shrek-Session` (Phase-6 slice-7): it lets the
+/// broker bind this call to a REAL native CLI session and forward only the new tail turn. It is opaque
+/// and carries no authority; an empty string omits the header (stateless, slice-6 behavior).
+fn http_post_json(url: &str, body: &str, session: &str) -> Result<String, String> {
     let (host, port, path) = parse_url(url)?;
     let addr = format!("{host}:{port}");
     let mut stream = TcpStream::connect(&addr).map_err(|e| format!("connect {addr}: {e}"))?;
@@ -534,10 +574,16 @@ fn http_post_json(url: &str, body: &str) -> Result<String, String> {
         .set_write_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| format!("set timeout: {e}"))?;
 
+    let session_header = if session.is_empty() {
+        String::new()
+    } else {
+        format!("X-Shrek-Session: {session}\r\n")
+    };
     let req = format!(
         "POST {path} HTTP/1.1\r\n\
          Host: {host}\r\n\
          Content-Type: application/json\r\n\
+         {session_header}\
          Content-Length: {}\r\n\
          Connection: close\r\n\
          \r\n\

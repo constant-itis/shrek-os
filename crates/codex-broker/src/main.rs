@@ -56,6 +56,7 @@
 //!                    AUDIT-ONLY availability breadcrumb. No token is ever read, parsed, or stored.
 //!   health           run just the `codex exec` round-trip probe and update the breadcrumb.
 
+use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{IsTerminal, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -63,6 +64,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use tinyjson::JsonValue;
@@ -73,12 +75,199 @@ const DEFAULT_BWRAP_BIN: &str = "bwrap";
 const DEFAULT_MODEL: &str = "gpt-5.5";
 /// Guard: refuse to read an absurdly large request so a broken peer cannot OOM the broker.
 const MAX_BODY: usize = 16 * 1024 * 1024;
+/// The one request header carrying the coder's opaque per-session handle (Phase-6 slice-7).
+const SESSION_HEADER: &str = "x-shrek-session";
+/// Upper bound on the untrusted handle length (defense for the map key; the handle NEVER reaches a path
+/// or argv — the broker-owned `internal_id` names the on-disk session dir instead).
+const MAX_HANDLE_LEN: usize = 128;
 
 // Fixed paths INSIDE the sterile view. The host binds map onto these; the sandbox never sees host paths.
 const SANDBOX_CODEX_HOME: &str = "/codexhome";
 const SANDBOX_AUTH: &str = "/codexhome/auth.json";
+/// Sessioned calls bind a broker-owned per-session dir here so codex's rollout persists across turns.
+const SANDBOX_SESSIONS: &str = "/codexhome/sessions";
 const SANDBOX_WORK: &str = "/work";
 const SANDBOX_OUT: &str = "/work/last.txt";
+
+// ---- session registry (Phase-6 slice-7, docs/phase6-slice7-cross-provider-session.md) --------------
+//
+// Same contract as claude-broker, but the codex CLI is agentic and confined by a per-call bwrap sterile
+// view, so the native session state cannot live in an ephemeral sandbox home. Sessioned calls bind a
+// BROKER-OWNED per-session directory (named by the broker-minted `internal_id`, never the caller handle)
+// rw into the view as `$CODEX_HOME/sessions`, drop `--ephemeral`, and the broker captures codex's OWN
+// session id from the rollout so later turns `codex exec resume <id>`. All slice-6 confinement + the
+// reader-disable flags are preserved; `auth.json` stays RO-bound.
+
+/// A single broker-owned session slot; its `state` mutex is the per-session serialization lock.
+struct Session {
+    state: Mutex<SessionState>,
+}
+
+struct SessionState {
+    /// Broker-minted, opaque; names the on-disk per-session dir. Never the caller's handle.
+    internal_id: String,
+    /// Codex's OWN session id, captured from the rollout after the create turn (`None` until then).
+    native_id: Option<String>,
+    /// How many transcript messages have already been forwarded into the native session.
+    msgs_forwarded: usize,
+}
+
+/// Handle → session slot. Outer mutex guards the map; the per-slot `state` lock serializes same-handle
+/// requests (a native codex session is single-threaded) while different handles run concurrently.
+struct Registry {
+    map: Mutex<HashMap<String, Arc<Session>>>,
+}
+
+impl Registry {
+    fn new() -> Self {
+        Registry { map: Mutex::new(HashMap::new()) }
+    }
+
+    fn slot(&self, handle: &str) -> Arc<Session> {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        m.entry(handle.to_string())
+            .or_insert_with(|| {
+                Arc::new(Session {
+                    state: Mutex::new(SessionState {
+                        internal_id: mint_internal_id(),
+                        native_id: None,
+                        msgs_forwarded: 0,
+                    }),
+                })
+            })
+            .clone()
+    }
+
+    fn forget(&self, handle: &str) {
+        self.map.lock().unwrap_or_else(|e| e.into_inner()).remove(handle);
+    }
+}
+
+/// Validate the untrusted `X-Shrek-Session` handle: bounded length, safe charset. `None` ⇒ stateless
+/// (slice-6 path). The handle is never placed in a path/argv regardless; this guards the map key + logs.
+fn valid_handle(h: &str) -> Option<String> {
+    let h = h.trim();
+    if h.is_empty() || h.len() > MAX_HANDLE_LEN {
+        return None;
+    }
+    if h.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        Some(h.to_string())
+    } else {
+        None
+    }
+}
+
+/// Mint a broker-owned opaque id (UUIDv4 shape) from `/dev/urandom`. Names the per-session dir; never the
+/// caller's handle. (Codex mints its OWN session id; this is only the broker's internal key.)
+fn mint_internal_id() -> String {
+    let mut b = [0u8; 16];
+    fill_random(&mut b);
+    b[6] = (b[6] & 0x0f) | 0x40; // version 4
+    b[8] = (b[8] & 0x3f) | 0x80; // variant 1
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]
+    )
+}
+
+fn fill_random(buf: &mut [u8]) {
+    if let Ok(mut f) = File::open("/dev/urandom") {
+        if f.read_exact(buf).is_ok() {
+            return;
+        }
+    }
+    let t = now_epoch();
+    for (i, x) in buf.iter_mut().enumerate() {
+        *x = (t >> ((i % 8) * 8)) as u8 ^ (i as u8).wrapping_mul(31);
+    }
+}
+
+/// Render a slice of `(role, content)` messages to the role-labelled transcript a single `codex exec`
+/// reproduces. Stateless flattens ALL; a sessioned continuation flattens only the new tail.
+fn flatten(messages: &[(String, String)]) -> String {
+    let mut prompt = String::new();
+    for (role, content) in messages {
+        let label = if role == "assistant" { "Assistant" } else { "User" };
+        if !prompt.is_empty() {
+            prompt.push_str("\n\n");
+        }
+        prompt.push_str(label);
+        prompt.push_str(": ");
+        prompt.push_str(content);
+    }
+    prompt
+}
+
+/// How a `codex exec` invocation is threaded onto the native session (drives the argv + the sessions bind).
+enum CodexSess<'a> {
+    /// Stateless single-shot (slice-6): `--ephemeral`, no sessions bind, `-s read-only`.
+    None,
+    /// First turn: bind `dir` as the sessions store, drop `--ephemeral`, fresh `codex exec`.
+    Create { dir: &'a str },
+    /// Continuation: bind `dir`, drop `--ephemeral`, `codex exec resume <id>`.
+    Resume { dir: &'a str, id: &'a str },
+}
+
+/// Base dir (broker-side) under which per-session codex state dirs live; each session gets `base/<internal>`.
+fn session_base_dir() -> PathBuf {
+    std::env::var("SHREK_CODEX_SESSION_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join("shrek-codex-sessions"))
+}
+
+/// The rollout-holding directory codex writes/reads under `$CODEX_HOME/sessions`. Created 0700, owner-only.
+fn ensure_session_dir(internal_id: &str) -> Result<PathBuf, String> {
+    let dir = session_base_dir().join(internal_id);
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| format!("session dir {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Capture codex's OWN session id after a create turn by reading the newest rollout in the per-session
+/// dir and lifting `session_meta.payload.id` (falling back to `session_id`). `None` ⇒ resume unavailable
+/// for this session → the caller stays on the create/flatten path (still correct, just not cheap).
+fn capture_session_id(dir: &Path) -> Option<String> {
+    let file = newest_rollout(dir)?;
+    let content = fs::read_to_string(&file).ok()?;
+    let first = content.lines().next()?;
+    let v: JsonValue = first.parse().ok()?;
+    let obj = v.get::<HashMap<String, JsonValue>>()?;
+    let payload = obj.get("payload")?.get::<HashMap<String, JsonValue>>()?;
+    payload
+        .get("id")
+        .and_then(|x| x.get::<String>())
+        .cloned()
+        .or_else(|| payload.get("session_id").and_then(|x| x.get::<String>()).cloned())
+}
+
+/// Newest `rollout-*.jsonl` under `dir` (codex partitions by YYYY/MM/DD, so walk recursively). Dep-free.
+fn newest_rollout(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(SystemTime, PathBuf)> = None;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let Ok(rd) = fs::read_dir(&d) else { continue };
+        for entry in rd.flatten() {
+            let p = entry.path();
+            let Ok(ft) = entry.file_type() else { continue };
+            if ft.is_dir() {
+                stack.push(p);
+            } else if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("rollout-") && name.ends_with(".jsonl") {
+                    let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(UNIX_EPOCH);
+                    if best.as_ref().map(|(t, _)| mtime >= *t).unwrap_or(true) {
+                        best = Some((mtime, p));
+                    }
+                }
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
 
 fn main() {
     std::process::exit(dispatch());
@@ -182,13 +371,18 @@ fn serve(cfg: &Confine, default_model: &'static str) -> i32 {
         cfg.runtime_dir.display()
     );
 
+    // One registry for the process lifetime (slice-7). In-memory by design (owner-accepted v1); a broker
+    // restart drops the map and the next request re-establishes via the stateless flatten fallback.
+    let registry = Arc::new(Registry::new());
+
     for conn in listener.incoming() {
         match conn {
             Ok(stream) => {
                 // Confine is cheap to clone-by-value for the thread (a handful of owned strings).
                 let cfg = cfg.clone_for_thread();
+                let reg = Arc::clone(&registry);
                 std::thread::spawn(move || {
-                    if let Err(e) = handle(stream, &cfg, default_model) {
+                    if let Err(e) = handle(stream, &cfg, default_model, &reg) {
                         eprintln!("CODEX-BROKER-ERROR conn: {e}");
                     }
                 });
@@ -216,8 +410,13 @@ impl Confine {
 /// confined `codex exec` invocation, and writes the messages-API-shaped reply back plaintext. On ANY
 /// failure — malformed request, CLI non-zero exit, empty output — fails CLOSED with a 502 to the box
 /// (never a fabricated success). No credential is ever read or logged.
-fn handle(mut box_stream: TcpStream, cfg: &Confine, default_model: &'static str) -> std::io::Result<()> {
-    let (method, path, body) = match read_http_request(&mut box_stream) {
+fn handle(
+    mut box_stream: TcpStream,
+    cfg: &Confine,
+    default_model: &'static str,
+    registry: &Registry,
+) -> std::io::Result<()> {
+    let (method, path, session, body) = match read_http_request(&mut box_stream) {
         Ok(v) => v,
         Err(e) => {
             write_plain(&mut box_stream, 400, "bad request from box")?;
@@ -234,16 +433,25 @@ fn handle(mut box_stream: TcpStream, cfg: &Confine, default_model: &'static str)
         }
     };
     let model = map_model(req.model.as_deref(), default_model);
-    println!(
-        "CODEX-BROKER-FWD {method} {path} model_req={:?} -> codex exec --model {model} (prompt={}B system={}B)",
-        req.model,
-        req.prompt.len(),
-        req.system.len()
-    );
+
+    // Route: a valid session handle drives a REAL native codex session (bwrap sessions-dir bind +
+    // `codex exec resume`, forwarding only the tail turn); otherwise, or on any resume failure, fall back
+    // to the proven stateless flatten. Either way `result` is the CLI text and the tail below is identical.
+    let handle_ok = session.as_deref().and_then(valid_handle);
+    let result = match &handle_ok {
+        Some(h) => run_session_turn(cfg, model, &req, h, registry, &method, &path),
+        None => {
+            println!(
+                "CODEX-BROKER-FWD {method} {path} stateless model_req={:?} -> codex exec --model {model} (msgs={} system={}B)",
+                req.model, req.messages.len(), req.system.len()
+            );
+            invoke_codex(cfg, model, &req.system, &flatten(&req.messages), CodexSess::None)
+        }
+    };
 
     // Invoke the LOGGED-IN CLI broker-side under confinement. The ONLY authority on token health: a real
     // round-trip.
-    let result = match invoke_codex(cfg, model, &req.system, &req.prompt) {
+    let result = match result {
         Ok(text) => text,
         Err(e) => {
             if looks_like_auth_failure(&e) {
@@ -267,18 +475,99 @@ fn handle(mut box_stream: TcpStream, cfg: &Confine, default_model: &'static str)
     Ok(())
 }
 
-/// The messages-API request fields the broker cares about, already flattened for a single-shot CLI call.
+/// Drive one turn of a REAL native `codex` session for `handle`, forwarding only the new tail turn. Holds
+/// the per-session lock for the whole turn (owner requirement: same-handle serializes, different handles
+/// run concurrently). The per-session broker-owned dir (named by the internal id, never the handle) is
+/// bound rw as `$CODEX_HOME/sessions` so the rollout persists; codex's own session id is captured after
+/// the create turn. Falls back to a stateless full-transcript flatten on ANY divergence/resume failure.
+fn run_session_turn(
+    cfg: &Confine,
+    model: &'static str,
+    req: &ParsedRequest,
+    handle: &str,
+    registry: &Registry,
+    method: &str,
+    path: &str,
+) -> Result<String, String> {
+    let slot = registry.slot(handle);
+    let mut st = slot.state.lock().unwrap_or_else(|e| e.into_inner());
+    let n = req.messages.len();
+    let m = st.msgs_forwarded;
+    let internal = st.internal_id.clone();
+    let mut invalidate = false;
+
+    // The per-session state dir must exist before bwrap binds it. A failure here just means we take the
+    // stateless path for this call (still correct).
+    let dir = match ensure_session_dir(&internal) {
+        Ok(d) => d.to_string_lossy().into_owned(),
+        Err(e) => {
+            eprintln!("CODEX-BROKER-SESSION-FALLBACK session dir unavailable ({e}); flattening");
+            drop(st);
+            return invoke_codex(cfg, model, &req.system, &flatten(&req.messages), CodexSess::None);
+        }
+    };
+
+    let result = if m == 0 || st.native_id.is_none() {
+        // First turn (or a session whose id was never captured): create/re-seed under the sessions bind,
+        // then capture codex's own session id for later resume.
+        println!("CODEX-BROKER-FWD {method} {path} session=NEW model={model} msgs={n} -> codex exec (create)");
+        let r = invoke_codex(cfg, model, &req.system, &flatten(&req.messages), CodexSess::Create { dir: &dir });
+        if r.is_ok() {
+            st.native_id = capture_session_id(Path::new(&dir));
+            // +1: the CLI produces one assistant reply the coder appends; it already lives in the native
+            // session, so the next delta must start AFTER it (never re-send the CLI's own output).
+            st.msgs_forwarded = n + 1;
+            if st.native_id.is_none() {
+                eprintln!("CODEX-BROKER-SESSION-WARN could not capture codex session id; next turn re-seeds");
+            }
+        } else {
+            invalidate = true;
+        }
+        r
+    } else if n > m {
+        // Continuation: resume codex's native session by the captured id, forwarding ONLY the tail turn.
+        let id = st.native_id.clone().expect("native_id present in this branch");
+        println!("CODEX-BROKER-FWD {method} {path} session=RESUME model={model} forwarding tail {m}..{n} of {n}");
+        match invoke_codex(cfg, model, "", &flatten(&req.messages[m..n]), CodexSess::Resume { dir: &dir, id: &id }) {
+            Ok(text) => {
+                st.msgs_forwarded = n + 1; // account for the assistant reply the coder will append
+                Ok(text)
+            }
+            Err(e) => {
+                eprintln!("CODEX-BROKER-SESSION-FALLBACK resume failed ({e}); flattening full transcript");
+                invalidate = true;
+                invoke_codex(cfg, model, &req.system, &flatten(&req.messages), CodexSess::None)
+            }
+        }
+    } else {
+        // Divergence: transcript does not extend what we forwarded (coder reset/retry). Fall back.
+        eprintln!("CODEX-BROKER-SESSION-FALLBACK divergent transcript (msgs={n} <= forwarded={m}); flattening");
+        invalidate = true;
+        invoke_codex(cfg, model, &req.system, &flatten(&req.messages), CodexSess::None)
+    };
+
+    drop(st);
+    if invalidate {
+        registry.forget(handle);
+        // Best-effort: the session transcript is sensitive; drop the broker-owned dir when we abandon it.
+        let _ = fs::remove_dir_all(session_base_dir().join(&internal));
+    }
+    result
+}
+
+/// The messages-API request fields the broker cares about. The `messages` array is kept STRUCTURED as
+/// `(role, content)` so a sessioned continuation forwards only the new tail turn (slice-7); the stateless
+/// path flattens the whole vector via [`flatten`].
 struct ParsedRequest {
     system: String,
-    prompt: String,
+    messages: Vec<(String, String)>,
     model: Option<String>,
 }
 
 /// Parse the coder's Anthropic messages-API body into the pieces a `codex exec` call needs. `system` is
-/// lifted verbatim; the `messages` array is flattened into a role-labelled transcript. Returns `None` on
-/// any shape mismatch (→ fail closed). Identical wire shape to the claude broker (the coder is unchanged).
+/// lifted verbatim; the `messages` array is preserved as ordered `(role, content)` pairs. Returns `None`
+/// on any shape mismatch (→ fail closed). Identical wire shape to the claude broker.
 fn parse_messages_request(body: &[u8]) -> Option<ParsedRequest> {
-    use std::collections::HashMap;
     let s = std::str::from_utf8(body).ok()?;
     let v: JsonValue = s.parse().ok()?;
     let obj = v.get::<HashMap<String, JsonValue>>()?;
@@ -292,34 +581,17 @@ fn parse_messages_request(body: &[u8]) -> Option<ParsedRequest> {
     let model = obj.get("model").and_then(|m| m.get::<String>()).cloned();
 
     let msgs = obj.get("messages")?.get::<Vec<JsonValue>>()?;
-    let mut prompt = String::new();
+    let mut messages = Vec::with_capacity(msgs.len());
     for m in msgs {
         let mo = m.get::<HashMap<String, JsonValue>>()?;
-        let role = mo
-            .get("role")
-            .and_then(|r| r.get::<String>())
-            .map(String::as_str)
-            .unwrap_or("user");
-        let content = mo
-            .get("content")
-            .and_then(|c| c.get::<String>())
-            .cloned()
-            .unwrap_or_default();
-        let label = match role {
-            "assistant" => "Assistant",
-            _ => "User",
-        };
-        if !prompt.is_empty() {
-            prompt.push_str("\n\n");
-        }
-        prompt.push_str(label);
-        prompt.push_str(": ");
-        prompt.push_str(&content);
+        let role = mo.get("role").and_then(|r| r.get::<String>()).cloned().unwrap_or_else(|| "user".into());
+        let content = mo.get("content").and_then(|c| c.get::<String>()).cloned().unwrap_or_default();
+        messages.push((role, content));
     }
-    if prompt.is_empty() {
+    if messages.is_empty() {
         return None;
     }
-    Some(ParsedRequest { system, prompt, model })
+    Some(ParsedRequest { system, messages, model })
 }
 
 /// Map a requested model id to a SAFE, fixed `--model` value. The return is always a `&'static str` from
@@ -346,10 +618,19 @@ fn map_model(requested: Option<&str>, default: &'static str) -> &'static str {
 /// Invariants the tests assert: the spawned `codex` sees NO project/$HOME/vault (only the runtime ro +
 /// `auth.json` ro + the one rw scratch); the model is offered NO tools (empty `[tools]` allowlist +
 /// `--disable` of the exec/read tools); env is cleared; the session is fresh.
-fn build_confined_argv(cfg: &Confine, host_out: &str, model: &'static str, prompt: &str) -> Vec<String> {
+fn build_confined_argv(cfg: &Confine, host_out: &str, model: &'static str, prompt: &str, sess: CodexSess) -> Vec<String> {
     let runtime = cfg.runtime_dir.to_string_lossy().into_owned();
     let auth_src = cfg.real_codex_home.join("auth.json").to_string_lossy().into_owned();
     let path_env = format!("{}/bin:/usr/bin:/bin", runtime);
+
+    // slice-7: a sessioned call binds a broker-owned per-session dir as the codex sessions store and
+    // resumes by codex's captured id. `session_dir`/`resume_id` are `None` on the stateless path.
+    let (session_dir, resume_id) = match &sess {
+        CodexSess::None => (None, None),
+        CodexSess::Create { dir } => (Some(*dir), None),
+        CodexSess::Resume { dir, id } => (Some(*dir), Some(*id)),
+    };
+    let sessioned = session_dir.is_some();
 
     let mut a: Vec<String> = Vec::new();
     let mut push = |s: &str| a.push(s.to_string());
@@ -428,6 +709,15 @@ fn build_confined_argv(cfg: &Confine, host_out: &str, model: &'static str, promp
     push(&auth_src);
     push(SANDBOX_AUTH);
 
+    // slice-7: the ONLY new rw surface for a sessioned call — a broker-owned per-session dir bound as the
+    // codex sessions store so the rollout persists across turns. Named by the broker-minted internal id
+    // (never the caller handle); holds session transcript material only; distinct from the RO auth.json.
+    if let Some(dir) = session_dir {
+        push("--bind");
+        push(dir);
+        push(SANDBOX_SESSIONS);
+    }
+
     // Writable scratch: tmpfs /tmp + /work, and the SOLE writable HOST path — the one -o scratch file.
     push("--tmpfs");
     push("/tmp");
@@ -449,11 +739,21 @@ fn build_confined_argv(cfg: &Confine, host_out: &str, model: &'static str, promp
     push("--");
     push(&cfg.codex_bin);
     push("exec");
-    push(prompt); // single data argument (the flattened transcript, system prepended by invoke_codex)
+    // slice-7 continuation: `codex exec resume <id>` targets the persisted native session; the prompt is
+    // ONLY the new tail turn. A create/stateless call is a plain `codex exec <prompt>`.
+    if let Some(id) = resume_id {
+        push("resume");
+        push(id);
+    }
+    push(prompt); // single data argument (tail turn on resume; full flatten otherwise)
     push("--model");
     push(model);
     push("--skip-git-repo-check");
-    push("--ephemeral"); // no session files persisted
+    // Persist session files ONLY for a sessioned call (so the rollout survives in the bound dir). The
+    // stateless path keeps `--ephemeral` — no session state on disk, exactly as slice-6.
+    if !sessioned {
+        push("--ephemeral");
+    }
     push("--ignore-user-config"); // drops ~/.codex/config.toml (its MCP servers, project trust)
     push("--ignore-rules"); // no user/project execpolicy .rules
 
@@ -479,8 +779,14 @@ fn build_confined_argv(cfg: &Confine, host_out: &str, model: &'static str, promp
 
     // Defense-in-depth (host confinement is authoritative): read-only sandbox neuters apply_patch's
     // writes. `codex exec` is non-interactive by construction, so it never prompts — no `-a` flag here.
-    push("-s");
-    push("read-only");
+    // The `resume` subcommand does NOT accept `-s`, so it is applied only on create/stateless calls; on
+    // resume the AUTHORITATIVE bwrap sterile view (every host path ro/absent, one rw scratch, one rw
+    // per-session dir) plus the reader-disable flags carry the guarantee, so no host-sensitive write and
+    // no reader tool remain regardless.
+    if resume_id.is_none() {
+        push("-s");
+        push("read-only");
+    }
 
     // Final message text goes to the rw scratch the broker reads back.
     push("-o");
@@ -501,9 +807,10 @@ fn unique_scratch_path() -> PathBuf {
 /// fresh 0600 scratch file (the rw bind target must exist), runs `bwrap … -- codex exec …`, then reads
 /// the final message back. A non-zero exit or empty output ⇒ `Err` (fails closed upstream). The
 /// subscription credential is entirely the CLI's; this process reads none of it.
-fn invoke_codex(cfg: &Confine, model: &'static str, system: &str, prompt: &str) -> Result<String, String> {
+fn invoke_codex(cfg: &Confine, model: &'static str, system: &str, prompt: &str, sess: CodexSess) -> Result<String, String> {
     // Codex `exec` has no `--system-prompt`; fold the coder's protocol (its `system`) into the prompt as
-    // a leading block. With tools disabled the model simply FOLLOWS it and replies with text.
+    // a leading block. With tools disabled the model simply FOLLOWS it and replies with text. On a resume
+    // turn `system` is empty (the native session already holds it) so only the tail turn is sent.
     let full_prompt = if system.is_empty() {
         prompt.to_string()
     } else {
@@ -523,7 +830,7 @@ fn invoke_codex(cfg: &Confine, model: &'static str, system: &str, prompt: &str) 
             .map_err(|e| format!("scratch create: {e}"))?;
     }
 
-    let argv = build_confined_argv(cfg, &out_str, model, &full_prompt);
+    let argv = build_confined_argv(cfg, &out_str, model, &full_prompt, sess);
     let run = Command::new(&argv[0]).args(&argv[1..]).output();
 
     let result = (|| {
@@ -609,7 +916,7 @@ fn which(name: &str) -> Option<PathBuf> {
 // ---- minimal HTTP/1.1 request reader (box→broker is a controlled, single-request path) -------------
 // Mirrors crates/claude-broker: request line + headers + exactly Content-Length body.
 
-fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String, Vec<u8>)> {
+fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String, Option<String>, Vec<u8>)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let head_end = loop {
@@ -636,10 +943,14 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String,
         return Err(ioerr("malformed request line"));
     }
     let mut content_length = 0usize;
+    let mut session: Option<String> = None;
     for line in lines {
         if let Some((k, v)) = line.split_once(':') {
-            if k.trim().eq_ignore_ascii_case("content-length") {
+            let k = k.trim();
+            if k.eq_ignore_ascii_case("content-length") {
                 content_length = v.trim().parse().map_err(|_| ioerr("bad content-length"))?;
+            } else if k.eq_ignore_ascii_case(SESSION_HEADER) {
+                session = Some(v.trim().to_string());
             }
         }
     }
@@ -656,7 +967,7 @@ fn read_http_request(stream: &mut TcpStream) -> std::io::Result<(String, String,
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Ok((method, path, body))
+    Ok((method, path, session, body))
 }
 
 fn write_plain(stream: &mut TcpStream, code: u16, msg: &str) -> std::io::Result<()> {
@@ -788,7 +1099,7 @@ fn record(available: bool, reason: Reason) {
 /// failure returns a FIXED `Reason` from the error CLASSIFIER — the raw error text is DROPPED here, never
 /// returned or stored. The only authority on login health; `codex login status` is never consulted (#1567).
 fn probe(cfg: &Confine, model: &'static str) -> Result<(), Reason> {
-    match invoke_codex(cfg, model, "", PROBE_PROMPT) {
+    match invoke_codex(cfg, model, "", PROBE_PROMPT, CodexSess::None) {
         Ok(_) => Ok(()),
         Err(e) if looks_like_auth_failure(&e) => Err(Reason::AuthFailed),
         Err(_) => Err(Reason::ProbeFailed),
@@ -916,7 +1227,13 @@ mod tests {
         let r = parse_messages_request(body).expect("parses");
         assert_eq!(r.system, "be terse");
         assert_eq!(r.model.as_deref(), Some("gpt-5.5"));
-        assert_eq!(r.prompt, "User: fix the bug\n\nAssistant: {\"tool\":\"read_file\"}\n\nUser: OK contents");
+        assert_eq!(r.messages.len(), 3);
+        assert_eq!(
+            flatten(&r.messages),
+            "User: fix the bug\n\nAssistant: {\"tool\":\"read_file\"}\n\nUser: OK contents"
+        );
+        // A sessioned continuation flattens ONLY the tail, never re-sending the prefix.
+        assert_eq!(flatten(&r.messages[2..]), "User: OK contents");
     }
 
     #[test]
@@ -932,7 +1249,7 @@ mod tests {
         // ro-bound auth.json and exfil it through the reply. The SUPPORTED mechanism in codex 0.148.0 is
         // the feature flags (the `[tools]` allowlist is not honored via -c). `shell_tool` removes the
         // exec_command/write_stdin shell tools; `view_image` removes the image reader.
-        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi");
+        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
         let joined = argv.join(" ");
         assert!(argv.windows(2).any(|w| w[0] == "--disable" && w[1] == "shell_tool"));
         assert!(argv.windows(2).any(|w| w[0] == "--disable" && w[1] == "unified_exec"));
@@ -948,13 +1265,116 @@ mod tests {
         assert!(!joined.contains("--dangerously-bypass"));
     }
 
+    // ---- slice-7: sessioned argv shape + the credential guard holds on resume ----
+
+    fn has_pair(argv: &[String], a: &str, b: &str) -> bool {
+        argv.windows(2).any(|w| w[0] == a && w[1] == b)
+    }
+
+    #[test]
+    fn create_argv_binds_sessions_dir_and_persists_no_ephemeral() {
+        let argv = build_confined_argv(
+            &test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::Create { dir: "/broker/sess/ID" },
+        );
+        // The per-session dir is bound rw onto the fixed sandbox sessions path.
+        assert!(has_pair(&argv, "--bind", "/broker/sess/ID"));
+        let bind_i = argv.iter().position(|a| a == "/broker/sess/ID").unwrap();
+        assert_eq!(argv[bind_i + 1], SANDBOX_SESSIONS);
+        // A sessioned call must NOT be ephemeral (the rollout has to survive in the bound dir).
+        assert!(!argv.contains(&"--ephemeral".to_string()));
+        // Create is a plain `codex exec` (no `resume`), and keeps `-s read-only`.
+        assert!(!argv.contains(&"resume".to_string()));
+        assert!(has_pair(&argv, "-s", "read-only"));
+        // THE credential guard still holds.
+        assert!(has_pair(&argv, "--disable", "shell_tool"));
+        assert!(has_pair(&argv, "--disable", "unified_exec"));
+        assert!(has_pair(&argv, "--disable", "view_image"));
+    }
+
+    #[test]
+    fn resume_argv_threads_id_keeps_reader_disable_and_binds_sessions() {
+        let argv = build_confined_argv(
+            &test_cfg(), "/tmp/out.txt", "gpt-5.5", "tail turn",
+            CodexSess::Resume { dir: "/broker/sess/ID", id: "cx-native-uuid" },
+        );
+        // `codex exec resume <id> <prompt>` — id immediately follows `resume`, prompt follows the id.
+        let ei = argv.iter().position(|a| a == "exec").unwrap();
+        assert_eq!(argv[ei + 1], "resume");
+        assert_eq!(argv[ei + 2], "cx-native-uuid");
+        assert_eq!(argv[ei + 3], "tail turn");
+        // Sessions dir bound; not ephemeral.
+        assert!(has_pair(&argv, "--bind", "/broker/sess/ID"));
+        assert!(!argv.contains(&"--ephemeral".to_string()));
+        // `resume` does not accept `-s`, so it is absent — but the AUTHORITATIVE guard, the reader-disable,
+        // is STILL present on resume (the model can never read the ro-bound auth.json on ANY turn).
+        assert!(!argv.contains(&"-s".to_string()));
+        assert!(has_pair(&argv, "--disable", "shell_tool"));
+        assert!(has_pair(&argv, "--disable", "unified_exec"));
+        assert!(has_pair(&argv, "--disable", "view_image"));
+        // Only TWO rw host binds on a sessioned call: the scratch file + the per-session dir. auth.json
+        // remains ro (never appears as a --bind target).
+        let rw = all_vals_after(&argv, "--bind");
+        assert_eq!(rw.len(), 2);
+        assert!(rw.contains(&"/tmp/out.txt".to_string()));
+        assert!(rw.contains(&"/broker/sess/ID".to_string()));
+        assert!(!rw.iter().any(|p| p.contains("auth.json")));
+    }
+
+    #[test]
+    fn valid_handle_bounds_charset_and_length() {
+        assert_eq!(valid_handle("aZ09-_").as_deref(), Some("aZ09-_"));
+        assert!(valid_handle("").is_none());
+        assert!(valid_handle("../etc").is_none());
+        assert!(valid_handle("a/b").is_none());
+        assert!(valid_handle("a;rm").is_none());
+        assert!(valid_handle(&"x".repeat(MAX_HANDLE_LEN + 1)).is_none());
+    }
+
+    #[test]
+    fn registry_reuses_slot_for_same_handle_and_forget_resets_identity() {
+        let reg = Registry::new();
+        let s1 = reg.slot("sess-A");
+        let id1 = s1.state.lock().unwrap().internal_id.clone();
+        assert!(s1.state.lock().unwrap().native_id.is_none(), "native id captured only after create");
+        let s2 = reg.slot("sess-A");
+        assert_eq!(s2.state.lock().unwrap().internal_id, id1);
+        assert!(Arc::ptr_eq(&s1, &s2));
+        assert_ne!(reg.slot("sess-B").state.lock().unwrap().internal_id, id1);
+        reg.forget("sess-A");
+        assert_ne!(reg.slot("sess-A").state.lock().unwrap().internal_id, id1);
+    }
+
+    #[test]
+    fn internal_id_is_uuid_shaped_and_unique() {
+        let (a, b) = (mint_internal_id(), mint_internal_id());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(a.as_bytes()[14], b'4');
+    }
+
+    #[test]
+    fn capture_session_id_lifts_id_from_rollout() {
+        // Build a throwaway per-session dir with a codex-shaped rollout and confirm we lift payload.id.
+        let dir = std::env::temp_dir().join(format!("shrek-cap-test-{}", std::process::id()));
+        let day = dir.join("2026/08/20");
+        fs::create_dir_all(&day).unwrap();
+        let roll = day.join("rollout-2026-08-20T00-00-00-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee.jsonl");
+        fs::write(
+            &roll,
+            "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"parent\",\"id\":\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\"}}\n{\"type\":\"event_msg\"}\n",
+        )
+        .unwrap();
+        assert_eq!(capture_session_id(&dir).as_deref(), Some("aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn extra_args_precede_the_reader_disables_and_cannot_override_them() {
         // Oracle passthrough args are inserted BEFORE the reader-disable + read-only, so even a
         // hostile passthrough cannot re-enable a reader (the fixed disables always come last).
         let mut cfg = test_cfg();
         cfg.extra_args = vec!["-c".to_string(), "model_provider=fake".to_string()];
-        let argv = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi");
+        let argv = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
         let extra_pos = argv.iter().position(|a| a == "model_provider=fake").expect("extra arg present");
         let first_disable = argv.iter().position(|a| a == "--disable").expect("a --disable present");
         let readonly = argv.windows(2).position(|w| w[0] == "-s" && w[1] == "read-only").expect("read-only");
@@ -965,7 +1385,7 @@ mod tests {
     #[test]
     fn confined_argv_sterile_view_hides_home_and_has_one_writable_host_path() {
         let cfg = test_cfg();
-        let argv = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi");
+        let argv = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
 
         // The ONLY writable HOST bind (`--bind`) is the single -o scratch file → /work/last.txt.
         let rw = all_vals_after(&argv, "--bind");
@@ -995,7 +1415,7 @@ mod tests {
 
     #[test]
     fn confined_argv_clears_env_and_isolates_namespaces() {
-        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi");
+        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
         assert!(argv.contains(&"--clearenv".to_string()), "env must be cleared");
         assert!(argv.contains(&"--new-session".to_string()), "fresh session (no TIOCSTI)");
         assert!(argv.contains(&"--die-with-parent".to_string()));
@@ -1013,7 +1433,7 @@ mod tests {
 
     #[test]
     fn confined_argv_is_bwrap_then_codex_exec_with_prompt_as_single_arg() {
-        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "a whole\nmulti-line prompt");
+        let argv = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "a whole\nmulti-line prompt", CodexSess::None);
         assert_eq!(argv[0], "bwrap");
         // The separator, then the confined program.
         let sep = argv.iter().position(|a| a == "--").expect("has -- separator");
@@ -1029,7 +1449,7 @@ mod tests {
     #[test]
     fn oracle_passthrough_forwards_endpoint_into_the_view_only_when_present() {
         // Production: no OPENAI_* → nothing forwarded (subscription auth via the ro-bound auth.json).
-        let prod = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi");
+        let prod = build_confined_argv(&test_cfg(), "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
         assert!(!prod.join(" ").contains("OPENAI_BASE_URL"));
         // Oracle: a local endpoint + stub key are forwarded so the request can be captured WITHOUT the
         // real credential.
@@ -1038,7 +1458,7 @@ mod tests {
             ("OPENAI_BASE_URL".to_string(), "http://127.0.0.1:9".to_string()),
             ("OPENAI_API_KEY".to_string(), "sk-STUB-not-real".to_string()),
         ];
-        let orc = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi");
+        let orc = build_confined_argv(&cfg, "/tmp/out.txt", "gpt-5.5", "hi", CodexSess::None);
         let j = orc.join(" ");
         assert!(j.contains("--setenv OPENAI_BASE_URL http://127.0.0.1:9"));
         assert!(j.contains("--setenv OPENAI_API_KEY sk-STUB-not-real"));
