@@ -1,0 +1,28 @@
+[package]
+name = "swamp-broker"
+version.workspace = true
+edition.workspace = true
+
+# The in-sandbox SWAMP-QUERY broker (Phase-6 Swamp slice-2, docs/phase6-swamp-slice2-broker-routed-
+# find.md). It is NOT a control plane and is NOT sealed into the appliance image. It runs BROKER-SIDE,
+# outside the T2 sandbox, as a uid in swampd's query allow-set.
+#
+# A T2 coding session cannot open a hole in its wall to swampd's unix socket, so its `swamp_find` tool
+# instead POSTs a plaintext query over the sealed one-destination `swamp-query` egress (tcp:8400) to
+# THIS broker. The broker authenticates the caller by TRANSPORT — `getpeername()` yields the sandbox's
+# un-masqueraded `/30` `cont_ip` (net_plane Mechanism-A carve-out), which it matches against gatekeeperd's
+# root-owned `cont_ip→session` binding. Only if the caller's `X-Shrek-Session` handle equals that bound
+# session does it forward the query to swampd's `/run/swamp/query.sock` (as an allowed uid), rebuilding
+# the swampd wire from scratch with the AUTHENTICATED session — a client-supplied session is never
+# echoed. Authority stays handle-keyed on swampd's root-owned record; routing changes reachability, not
+# authority. Fail-closed: any mismatch/absent binding/bad transport returns an empty result,
+# indistinguishable from a query that matched nothing.
+#
+# Dep policy (minimal-deps): ZERO third-party dependencies — std-only line-text wire, like swampd. The
+# single in-tree dep is `gatekeeperd` (path), used ONLY to reuse the binding reader + handle-charset
+# validator so the broker parses `cont_ip→session` records EXACTLY as gatekeeperd writes them (format
+# parity is a security property — a divergent parser would be an auth defect). Excluded from the sealed
+# image's default build (workspace default-members) — see the root Cargo.toml. Build/test explicitly
+# with `-p swamp-broker`.
+[dependencies]
+gatekeeperd = { path = "../gatekeeperd" }
