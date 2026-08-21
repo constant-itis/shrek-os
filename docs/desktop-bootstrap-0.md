@@ -86,8 +86,13 @@ the runtime, not the login stack):
 - `/usr/bin/shrek-desktop` — a wrapper that sets the minimum Wayland env and execs
   `sway -c /usr/share/shrek/desktop/sway.config`.
 - `sway.config` — a minimal config that sets the environment for a **software/headless** path and
-  `exec`s `quickshell -p /usr/share/shrek/ui/shell/Shell.qml`. No keybinds beyond a logout binding and
-  a terminal spawn; no bars from Sway itself (Quickshell owns all surfaces).
+  `exec`s `quickshell -p /usr/share/shrek/ui/shell.qml`. No keybinds beyond a logout binding and a
+  terminal spawn; no bars from Sway itself (Quickshell owns all surfaces).
+- **Config-root entry (`ui/shell.qml`):** Quickshell uses the entry file's directory as its "config
+  folder" and forbids QML imports that escape it. So the entry is a thin `ui/shell.qml` (loads
+  `shell/Shell.qml`) at the `ui/` root — that makes `ui/` the config folder, so the shell's sibling
+  imports (`providers/`, `themes/`) resolve legally. Loading `shell/Shell.qml` directly would reject
+  `import "../providers"`.
 - Env for the deterministic/headless path (also what the smoke test uses):
   `WLR_BACKENDS=headless`, `WLR_RENDERER=pixman` (Sway needs no GPU), `WLR_LIBINPUT_NO_DEVICES=1`,
   `QT_QUICK_BACKEND=software` (Qt Quick renders QML with no GPU/EGL). Together these give a fully
@@ -96,11 +101,12 @@ the runtime, not the login stack):
 ## UI skeleton (`ui/` — canonical source; staged into the layer overlay at build)
 ```
 ui/
+  shell.qml    config-root entry (loads shell/Shell.qml) — see §Session
   shell/       Shell.qml  Bar.qml  Launcher.qml  WorkDrawer.qml
   components/  (empty — future shared widgets)
   providers/   SessionProvider.qml  MockSessionProvider.qml
   mocks/       (empty — future mock fixtures)
-  themes/      Tokens.qml
+  themes/      Tokens.qml  qmldir (Tokens singleton)
 ```
 `ui/` is the source of record ("where shell code lives"); `scripts/build-desktop-layer.sh` copies it
 to the layer overlay at `/usr/share/shrek/ui/` (binaries-staged pattern). Rendered result is
@@ -126,6 +132,23 @@ PASS/FAIL lines:
 
 Sealed-VM boot integration of the desktop layer (merging `shrek-desktop` in the KVM gate) is the
 **next** execution step after the container smoke is green; tracked, not done in this slab.
+
+### Bring-up result — VERIFIED GREEN (2026-08-21)
+`scripts/desktop-smoke.sh` → **`PASS=4 FAIL=0`**: `DB0-sway` (Sway starts headless) · `DB0-qs-load`
+(Quickshell loads the config, no QML error) · `DB0-surfaces` (shell surfaces instantiate — the
+`SHREK-DESKTOP shell surfaces instantiated` marker fires) · `DB0-logout` (clean teardown). The
+acceptance line is met. What the bring-up nailed down (the whole point of the slab):
+- **Quickshell** resolves to **v0.3.1**; source-built with the feature set in
+  `scripts/build-desktop-layer.sh` (WAYLAND + WLR layer-shell ON; X11/services/etc OFF).
+- **Verified build deps** (trixie): `qt6-base-dev qt6-base-private-dev qt6-declarative-dev
+  qt6-declarative-private-dev qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev
+  libwayland-dev libwayland-bin wayland-protocols libcli11-dev libdrm-dev` + cmake/ninja/build-essential.
+- **wayland-protocols gap**: trixie lacks the `ext-background-effect` staging protocol Quickshell
+  references unconditionally → the build overlays newer XMLs (tag 1.49) into pkgdatadir. Recorded in
+  `image/supply/desktop.pins`.
+- **Headless/software path proven**: Sway `WLR_BACKENDS=headless WLR_RENDERER=pixman` + Quickshell as
+  a Wayland client (`QT_QPA_PLATFORM=wayland`, `QT_QUICK_BACKEND=software`) → GPU-free, deterministic.
+- **Config-folder rule**: the `ui/shell.qml` root entry is required (see §Session).
 
 ## Build plan (owner-split commits; no Co-Authored-By)
 1. **feat(ui)** — `ui/` QML skeleton + provider seam + tokens.

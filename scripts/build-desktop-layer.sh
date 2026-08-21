@@ -36,7 +36,9 @@ docker run --rm --privileged \
       ca-certificates openssl \
       mkosi systemd-ukify erofs-utils squashfs-tools dosfstools e2fsprogs systemd fdisk \
       git cmake ninja-build build-essential pkg-config \
-      qt6-base-dev qt6-declarative-dev qt6-declarative-private-dev qt6-wayland-dev libwayland-dev >/dev/null
+      qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
+      qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev \
+      libwayland-dev libwayland-bin wayland-protocols libcli11-dev libdrm-dev >/dev/null
 
     # (1) stage the QML source tree
     rm -rf "/work/$OVL/usr/share/shrek/ui"
@@ -46,12 +48,26 @@ docker run --rm --privileged \
     # (2) build + stage Quickshell (unpackaged in Debian). Staged into the overlay so mkosi copies it
     #     into the sysext /usr; its Qt6 runtime is satisfied by the layer packages.  # VERIFY: the exact
     #     install prefix + QML plugin dir land under /usr (DESTDIR stage below), matching the runtime.
+    # Overlay newer wayland-protocols XMLs: quickshell references ext-background-effect staging, newer
+    # than trixie ships; only the XML files are needed (the >=1.41 pkg-config check passes on trixie).
+    git clone --quiet https://gitlab.freedesktop.org/wayland/wayland-protocols /tmp/wp
+    WP_TAG="$(cd /tmp/wp && git tag --sort=-v:refname | head -1)"; echo "SHREK-WP-TAG $WP_TAG"
+    ( cd /tmp/wp && git checkout --quiet "$WP_TAG" )
+    WP_DATADIR="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || echo /usr/share/wayland-protocols)"
+    cp -r /tmp/wp/staging /tmp/wp/stable /tmp/wp/unstable "$WP_DATADIR/" 2>/dev/null || true
+
     git clone --quiet "$QS_REPO" /tmp/qs; cd /tmp/qs
     [ "$QS_TAG" = "AUTO-FIRST-BUILD" ] && QS_TAG="$(git tag --sort=-v:refname | head -1)" && \
       echo "SHREK-QS-RESOLVED-TAG $QS_TAG (record into image/supply/desktop.pins)"
     git checkout --quiet "$QS_TAG" || true
+    # Feature set verified green by scripts/desktop-smoke.sh: keep WAYLAND + WLR layer-shell (the
+    # PanelWindow surfaces); disable the rest to shrink the dep closure.
     cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-      -DHYPRLAND=OFF -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DCRASH_REPORTER=OFF
+      -DHYPRLAND=OFF -DX11=OFF -DI3=OFF -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=OFF \
+      -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
+      -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
+      -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF
     ninja -C build
     DESTDIR="/work/$OVL" ninja -C build install
     cd /work

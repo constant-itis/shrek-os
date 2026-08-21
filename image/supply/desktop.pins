@@ -12,10 +12,22 @@ release      = "trixie"
 # Qt-runtime-coupled → must be compiled against the same Qt6 it will load (staged-binary delivery,
 # NOT a portable supply-pin). See docs/desktop-bootstrap-0.md §Delivery.
 repo           = "https://github.com/quickshell-mirror/quickshell"
-quickshell_tag = "AUTO-FIRST-BUILD"   # bring-up: script resolves newest tag + logs it to record here
+quickshell_tag = "v0.3.1"             # bring-up resolved 2026-08-21 (was AUTO-FIRST-BUILD); newest tag at first smoke
 
 [uwsm]
 # trixie-backports only (shell-architecture.md caveat); NOT a stable-suite guarantee.
 # Not wired in Bootstrap 0 (no session/login stack yet) — pinned here for the next slice.
 uwsm_suite   = "trixie-backports"
 uwsm_version = "0.26.4"                # VERIFY at build
+
+[wayland-protocols]
+# quickshell v0.3.1 references the ext-background-effect STAGING protocol unconditionally
+# (src/wayland/CMakeLists.txt:123), newer than the trixie wayland-protocols package ships. The build
+# overlays newer XMLs into pkgdatadir before compiling quickshell (build-desktop-layer.sh); only the
+# XML files are needed — trixie already satisfies the >=1.41 pkg-config version check.
+source      = "https://gitlab.freedesktop.org/wayland/wayland-protocols"
+overlay_tag = "1.49"                   # bring-up resolved 2026-08-21 (newest tag at first green smoke)
+
+# Verified build deps (trixie, discovered by the green smoke run): qt6-base-private-dev,
+# qt6-wayland-private-dev, qt6-shadertools-dev, libwayland-bin, libcli11-dev, libdrm-dev — on top of
+# qt6-{base,declarative,wayland}-dev + qt6-declarative-private-dev + libwayland-dev.

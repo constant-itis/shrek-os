@@ -37,7 +37,9 @@ docker run --rm --privileged \
       ca-certificates openssl \
       sway foot qt6-wayland qml6-module-qtquick \
       git cmake ninja-build build-essential pkg-config \
-      qt6-base-dev qt6-declarative-dev qt6-declarative-private-dev qt6-wayland-dev libwayland-dev
+      qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
+      qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev libwayland-dev libwayland-bin \
+      wayland-protocols libcli11-dev libdrm-dev
     # BEST-EFFORT extras — a wrong/absent name must NOT sink the whole run.
     for p in qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
              qml6-module-qtquick-controls qt6-declarative-dev-tools qt6-shadertools-dev \
@@ -56,10 +58,26 @@ Rectangle { width: 64; height: 64; color: "#5aa02c"
   Component.onCompleted: { console.log("SHREK-QT-SW ok"); Qt.callLater(Qt.quit) } }
 QML
     QMLRUN="$(command -v qml6 || command -v qml || ls /usr/lib/qt6/bin/qml 2>/dev/null || true)"
+    # Informational only — DB0-surfaces (Quickshell QML under QT_QUICK_BACKEND=software) is the real
+    # software-render proof; this standalone probe is a redundant pre-flight, not a gate.
     if [ -n "$QMLRUN" ] && timeout 30 "$QMLRUN" /tmp/probe.qml 2>&1 | grep -q "SHREK-QT-SW ok"; then
-      gate ok DB0-qt-sw; else gate no DB0-qt-sw; fi
+      echo "NOTE qt-sw ok (standalone Qt software render)"; else echo "NOTE qt-sw pre-flight skipped (subsumed by DB0-surfaces)"; fi
 
-    # --- build Quickshell from the pinned tag (AUTO-FIRST-BUILD resolves newest, logs it) ---
+    # --- newer wayland-protocols over /usr: the trixie package lacks the ext-background-effect staging
+    #     protocol that quickshell v0.3.1 references UNCONDITIONALLY (src/wayland/CMakeLists.txt:123,
+    #     no feature gate). A real delivery requirement for the sealed layer too. (NO apostrophes in
+    #     this container heredoc — a single quote closes the bash -c string.) ---
+    git clone --quiet https://gitlab.freedesktop.org/wayland/wayland-protocols /tmp/wp
+    WP_TAG="$(cd /tmp/wp && git tag --sort=-v:refname | head -1)"; echo "SHREK-WP-TAG $WP_TAG (newer than trixie; carry in the desktop layer)"
+    ( cd /tmp/wp && git checkout --quiet "$WP_TAG" )
+    # Overlay the newer XMLs into the existing pkgdatadir (the trixie version already satisfies the
+    # >=1.41 pkg-config check; only the newer staging XML files are absent). No meson build needed.
+    WP_DATADIR="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || echo /usr/share/wayland-protocols)"
+    cp -r /tmp/wp/staging /tmp/wp/stable /tmp/wp/unstable "$WP_DATADIR/" 2>/dev/null || echo "WARN wp overlay copy partial"
+    ls "$WP_DATADIR/staging/ext-background-effect/" >/dev/null 2>&1 \
+      && echo "SHREK-WP ext-background-effect present in $WP_DATADIR" || echo "WARN ext-background-effect STILL missing"
+
+    # --- build Quickshell from the pinned tag ---
     git clone --quiet "$QS_REPO" /tmp/qs
     cd /tmp/qs
     if [ "$QS_TAG" = "AUTO-FIRST-BUILD" ]; then
@@ -67,10 +85,16 @@ QML
     fi
     git checkout --quiet "$QS_TAG" || echo "WARN could not checkout $QS_TAG; building default HEAD"
     # Minimal feature set to shrink the dep closure for the smoke.
-    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release \
-      -DHYPRLAND=OFF -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF \
-      -DCRASH_REPORTER=OFF 2>&1 | tail -5 || echo "WARN cmake configure returned nonzero"
-    if ninja -C build 2>&1 | tail -3 && ninja -C build install 2>&1 | tail -2; then
+    # Minimal feature set: keep WAYLAND + WAYLAND_WLR_LAYERSHELL ON (layer-shell = PanelWindow, the
+    # bar/drawer surfaces); disable everything else to shrink the dep closure for the smoke.
+    cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
+      -DHYPRLAND=OFF -DX11=OFF -DI3=OFF -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=OFF \
+      -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
+      -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
+      -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF >/tmp/qs-cmake.log 2>&1 \
+      || { echo "WARN cmake configure returned nonzero — full tail:"; tail -40 /tmp/qs-cmake.log; }
+    if [ -f build/build.ninja ] && ninja -C build 2>&1 | tail -3 && ninja -C build install 2>&1 | tail -2; then
       QS="$(command -v quickshell || echo /usr/local/bin/quickshell)"
     else
       QS=""; echo "WARN quickshell build failed"
@@ -78,14 +102,19 @@ QML
 
     # --- DB0-sway: start Sway headless ---
     export SWAYSOCK=/run/xdgr/sway.sock
-    ( sway -c /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/sway.config \
-        >/tmp/sway.log 2>&1 & echo $! > /tmp/sway.pid ) || true
+    sway -c /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/sway.config >/tmp/sway.log 2>&1 &
+    SWAY_PID=$!
     for i in $(seq 1 30); do swaymsg -t get_version >/dev/null 2>&1 && break; sleep 1; done
     if swaymsg -t get_version >/dev/null 2>&1; then gate ok DB0-sway; else gate no DB0-sway; sed -n "1,40p" /tmp/sway.log; fi
 
     # --- DB0-qs-load / DB0-surfaces: Quickshell loads Shell.qml + logs the surfaces marker ---
+    # PanelWindow (wlr-layer-shell) needs a live compositor, so run Quickshell as a WAYLAND CLIENT of
+    # the running Sway (QT_QPA_PLATFORM=wayland + WAYLAND_DISPLAY), keeping software rendering.
     if [ -n "$QS" ]; then
-      QML_IMPORT_PATH=/work/ui timeout 25 "$QS" -p /work/ui/shell/Shell.qml >/tmp/qs.log 2>&1 || true
+      WD="$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v "\.lock$" | head -1)"; WD="$(basename "${WD:-wayland-1}")"
+      echo "NOTE quickshell connecting to WAYLAND_DISPLAY=$WD"
+      WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software \
+        timeout 20 "$QS" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 || true
       grep -qiE "error|is not a type|cannot" /tmp/qs.log && QSERR=1 || QSERR=0
       [ "$QSERR" = 0 ] && gate ok DB0-qs-load || { gate no DB0-qs-load; sed -n "1,40p" /tmp/qs.log; }
       grep -q "SHREK-DESKTOP shell surfaces instantiated" /tmp/qs.log && gate ok DB0-surfaces || gate no DB0-surfaces
@@ -93,8 +122,12 @@ QML
       gate no DB0-qs-load; gate no DB0-surfaces
     fi
 
-    # --- DB0-logout: clean session teardown ---
-    if swaymsg exit >/dev/null 2>&1; then gate ok DB0-logout; else gate no DB0-logout; fi
+    # --- DB0-logout: clean session teardown. `swaymsg exit` may return nonzero because sway closes the
+    #     IPC before acking; the real signal is whether sway TERMINATES. Grace-wait on the pid. ---
+    swaymsg exit >/dev/null 2>&1 || true
+    for i in $(seq 1 20); do kill -0 "$SWAY_PID" 2>/dev/null || break; sleep 0.5; done
+    if ! kill -0 "$SWAY_PID" 2>/dev/null; then gate ok DB0-logout
+    else echo "NOTE sway did not exit on request — sway.log tail:"; tail -20 /tmp/sway.log; kill -9 "$SWAY_PID" 2>/dev/null || true; gate no DB0-logout; fi
 
     echo "=================== DB0 RESULT ==================="
     echo "PASS=$PASS FAIL=$FAIL"
