@@ -51,7 +51,7 @@ enrichment stages.
 
 ```
 swampd (systemd-supervised, User=swamp, Landlocked default-deny — §5)
-├── watcher      coalesced fanotify/inotify events → work queue        (cheap, always)
+├── watcher      coalesced inotify events → work queue (unprivileged) (cheap, always)
 ├── mapper       physical + structural map: path, inode, repo, domain  (cheap, always)
 ├── worker pool  enrichment, tier-gated (§8):
 │     · extractor   text extraction → FTS
@@ -190,6 +190,18 @@ kernel fs event (coalesced: burst of writes → one job)
   trees; a write under a denied domain produces no job because `swampd` cannot watch what it
   cannot read.
 
+**Realization (slice-3, `crates/swampd/src/watch.rs`).** The watcher is **inotify**, not fanotify.
+fanotify's create/delete/rename-with-names requires `CAP_SYS_ADMIN`, which would contradict `swampd`'s
+defining property — an *unprivileged*, Landlocked (§5), availability-plane daemon. inotify is
+unprivileged and can only arm watches on directories the kernel already lets `swampd` read, so the
+allow-set bounds the watcher exactly as it bounds the crawl. Coalescing at v1 is by `IN_CLOSE_WRITE`
+(one enrichment per file-close, not per write syscall); a timer-based debounce for pathological
+never-closing writers is a later refinement. A new or moved-in directory is **watched first, then its
+subtree is reconciled**, closing the window between `mkdir` and the watch being armed. Every applied
+event runs the SAME policy gate as the crawl, and an `IN_Q_OVERFLOW` marks the index STALE and forces a
+full reconcile + re-arm before it is FRESH again (§10 freshness). A degraded or absent watcher is never
+silently masqueraded as a live map — the query response carries the index freshness (§9).
+
 ## 7. Initial mapping — the crawl
 
 On first run for a user (or when a tree joins an enabled domain), `swampd` builds the map in
@@ -275,6 +287,13 @@ request:  { caller, intent: discover|search|read, query, domain_hint? }
   matching objects are absent from results entirely — not returned-and-marked. The caller cannot
   learn the object exists (the deterministic guarantee of architecture.md §6, within `swampd`'s
   scope; the readable-file-that-merely-names-it caveat of §6 still applies).
+- **Every response carries index freshness** (slice-3). A `freshness fresh|stale` header rides with the
+  result (`RESULT n` / `freshness …` / `hit …` / `END`). STALE means the live watcher or a reconcile is
+  behind reality, so a *miss* is "not found in a possibly-stale index," NOT proof of non-existence —
+  consumers (`shrek find`, the coder's `swamp_find`) surface this so a caller never mistakes staleness
+  for absence. Freshness is index-global: it discloses nothing about which sessions or objects exist, so
+  it does not weaken the projection guarantees above. The broker relays it verbatim and, on its own
+  fail-closed paths (it reached no healthy index), reports `freshness unknown`.
 - **The API reads; it never writes files.** A query can return "here is the object to edit";
   the edit itself is an agent action brokered through `agentd`/`gatekeeperd`
   ([`isolation.md`](isolation.md), [`agents.md`](agents.md)), which then generates the fs event
@@ -311,9 +330,13 @@ never depends on it running.
 - **Learned crawl/enrichment prioritization** — Phase-order and exclusions (§7) are fixed
   heuristics; learning which trees to enrich first is a later optimization and must keep the
   fixed order as fallback.
-- **erofs/read-only content addressing for the index store** — the index is mutable state on
-  the volatile/writable plane at v1; content-addressed sealing is deferred with the broader
-  writable-state design.
+- **erofs/read-only content addressing for the index store** — the index is **durable derived
+  state** on the writable plane: it lives on a dedicated persistent partition mounted at
+  `/var/lib/swamp` (the rest of `/var` stays a volatile per-boot tmpfs) and survives restart/reboot
+  (slice-3), reconciled to the filesystem on start. It is derived (never authority): a wipe merely
+  forces a rebuild. The partition is mounted `noexec,nosuid,nodev`. Content-addressed sealing of that
+  store is deferred with the broader writable-state design. *(Supersedes the slice-1/-2 model, where
+  the index was a `/run` snapshot rebuilt from empty each start.)*
 
 Every deferral is built, if at all, as a further subject of the §5 confinement — never as an
 exception to it.
