@@ -1,0 +1,19 @@
+# Dogfood-0 (M0) — auto-start the Shrek desktop on the first VT under the autologin PAM/logind session.
+#
+# Sourced by /etc/profile for the root login shell that agetty --autologin creates on tty1. Guarded so
+# it fires ONLY on a real graphical VT that has a DRM device — so it NEVER runs on the headless CI
+# serial gate (std-vga, no /dev/dri), leaving scripts/desktop-sealed-proof.sh and the other sealed
+# proofs unaffected.
+#
+#   XDG_VTNR=1          set by pam_systemd for the tty1 session (present because libpam-systemd is baked)
+#   WAYLAND_DISPLAY unset  don't recurse if a session is already up
+#   /dev/dri/card0      a real KMS device exists (virtio-gpu in the dogfood VM; absent on the CI std-vga)
+#   shrek-desktop       the shrek-desktop sysext merged onto /usr (oniond ran)
+#
+# WLR_RENDERER=pixman: software render on the VM's virtio-gpu DRM — works with OR without host virgl, so
+# the session lands regardless of the domain's GPU. M1 flips to GLES when the host provides acceleration.
+if [ "${XDG_VTNR:-}" = 1 ] && [ -z "${WAYLAND_DISPLAY:-}" ] \
+   && [ -e /dev/dri/card0 ] && command -v shrek-desktop >/dev/null 2>&1; then
+    export WLR_RENDERER="${WLR_RENDERER:-pixman}"
+    exec shrek-desktop
+fi

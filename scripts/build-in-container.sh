@@ -82,6 +82,22 @@ else
   rm -f "$POISON"
 fi
 
+# Dogfood-0 (M0): DOGFOOD=1 builds an INTERACTIVE image. The spike acceptance gates run late and then
+# power the VM OFF (shrek-mount-gate owns SuccessAction/FailureAction=poweroff-force) — correct for the
+# headless CI proof, fatal for a machine you want to sit at. Mask both the poweroff-owning mount gate and
+# the now-redundant headless desktop proof (the interactive tty1 session IS the surface proof) via
+# /etc/systemd/system/<unit> → /dev/null, which outranks the /usr unit. These masks are gitignored and
+# REMOVED on a normal build, so the default image + scripts/desktop-sealed-proof.sh are byte-unchanged.
+DOGFOOD_MASKS="image/overlay/etc/systemd/system"
+if [ "${DOGFOOD:-0}" = "1" ]; then
+  echo "!!! DOGFOOD=1: interactive image — masking self-poweroff spike gates (shrek-mount-gate, shrek-desktop-gate) !!!"
+  install -d "$DOGFOOD_MASKS"
+  ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
+  ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+else
+  rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+fi
+
 mkdir -p out    # must exist before the bind-mount, or docker creates it root-owned
 
 # S5: throwaway Shrek Secure Boot signing key (keys/ is gitignored, never shipped). Idempotent —
