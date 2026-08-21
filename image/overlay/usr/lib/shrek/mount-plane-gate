@@ -636,6 +636,21 @@ else
         else
           emit "FAIL P62-slice7 sealed coder lacks X-Shrek-Session (stale seal — re-run seal-t2-artifacts)"; p6fail=1
         fi
+        # Phase-6 Swamp slice-2: this image cycle must have baked the slice-2 change into BOTH on-image
+        # halves — the sealed CODER (a new swamp_find tool) and the sealed POLICY (compiled into
+        # gatekeeperd, the swamp-query egress dst). Broker-routing itself is oracle/unit territory
+        # (scripts/swamp-broker-find-proof.sh, off-image swamp-broker); here we prove only that the sealed
+        # image is not stale w.r.t. slice-2. A missing marker means a seal/rebuild was skipped.
+        if grep -aq 'swamp_find' /usr/lib/shrek/t2-rootfs/usr/bin/coder; then
+          emit "PASS P62-swamp2 sealed coder carries the swamp_find tool (broker-routed in-sandbox find)"
+        else
+          emit "FAIL P62-swamp2 sealed coder lacks swamp_find (stale seal — re-run seal-t2-artifacts)"; p6fail=1
+        fi
+        if grep -aq 'shrek-swamp-broker' "$GK"; then
+          emit "PASS P62-swamp2 sealed policy carries the swamp-query egress dst (shrek-swamp-broker)"
+        else
+          emit "FAIL P62-swamp2 sealed policy lacks swamp-query (stale gatekeeperd — rebuild the image)"; p6fail=1
+        fi
         P62TASK="Make the program print REAL-COMPILE-RUN-OK and exit 42."
         OUT62=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
                   --caps C-net --profile C-net --ingest-harness --id p62 --anchor "$P6SRV" \
