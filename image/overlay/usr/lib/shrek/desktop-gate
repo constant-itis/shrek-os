@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+# Shrek Desktop sealed-boot gate — Desktop Bootstrap-0 "Pn-desktop" assertion group.
+#
+# Runs INSIDE the sealed KVM boot, AFTER shrek-onion.service has merged the signed shrek-desktop sysext
+# onto /usr (docs/desktop-bootstrap-0.md §Delivery). It proves — headless, GPU-free, on the REAL sealed
+# image (not the container smoke) — that:
+#   Pn-desktop-merge     the layer landed on /usr: sway + quickshell + the wrapper + shell.qml are present
+#   Pn-desktop-sway      Sway comes up on the headless/pixman backend (swaymsg -t get_version)
+#   Pn-desktop-qs-load   Quickshell (autostarted by the delivered sway.config) loads shell.qml, no QML error
+#   Pn-desktop-surfaces  the shell surfaces instantiate (the SHREK-DESKTOP marker fires)
+#   Pn-desktop-logout    clean session teardown (swaymsg exit → Sway terminates)
+#
+# It drives the ACTUAL delivered session path (/usr/bin/shrek-desktop → sway → sway.config execs
+# quickshell), only supplying the caller-owned headless env the wrapper leaves to us. Emits the same
+# `SHREK_GATE: PASS/FAIL <name>` lines as scripts/desktop-smoke.sh so scripts/desktop-sealed-proof.sh
+# can read the verdict off vm-console.log.
+#
+# This is a PROOF gate, not a health gate: it never fails the boot (always exits 0, no FailureAction).
+# A regression shows up as a FAIL line + a non-zero tally in the console, which the proof script catches.
+set -u
+
+PASS=0; FAIL=0
+gate() { if [ "$1" = ok ]; then echo "SHREK_GATE: PASS $2"; PASS=$((PASS+1)); else echo "SHREK_GATE: FAIL $2"; FAIL=$((FAIL+1)); fi; }
+
+echo "=== shrek-desktop-gate: Desktop Bootstrap-0 sealed-boot surface proof ==="
+
+# --- Pn-desktop-merge: did the signed layer actually land on the sealed /usr? ---
+MERGE_OK=1
+for f in /usr/bin/shrek-desktop /usr/bin/sway /usr/bin/swaymsg /usr/bin/quickshell \
+         /usr/share/shrek/desktop/sway.config /usr/share/shrek/ui/shell.qml \
+         /usr/lib/extension-release.d/extension-release.shrek-desktop; do
+  if [ ! -e "$f" ]; then echo "  MISSING $f"; MERGE_OK=0; fi
+done
+if [ "$MERGE_OK" = 1 ]; then gate ok Pn-desktop-merge; else
+  gate no Pn-desktop-merge
+  echo "PASS=$PASS FAIL=$FAIL"
+  echo "=== shrek-desktop-gate: layer not merged — skipping runtime surface proof ==="
+  exit 0
+fi
+
+# --- headless / software env (the wrapper leaves this to the caller; mirror scripts/desktop-smoke.sh) ---
+export XDG_RUNTIME_DIR=/run/shrek-desktop-gate
+mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
+export QT_QUICK_BACKEND=software QT_QPA_PLATFORM=wayland QT_LOGGING_RULES="qt.qml*=false"
+export SWAYSOCK="$XDG_RUNTIME_DIR/sway.sock"
+SESSION_LOG="$XDG_RUNTIME_DIR/session.log"
+
+# --- launch the REAL delivered session: /usr/bin/shrek-desktop → sway → (sway.config) quickshell ---
+: > "$SESSION_LOG"
+/usr/bin/shrek-desktop >"$SESSION_LOG" 2>&1 &
+SESS_PID=$!
+
+# --- Pn-desktop-sway: Sway answers on the headless backend ---
+for i in $(seq 1 30); do swaymsg -t get_version >/dev/null 2>&1 && break; sleep 1; done
+if swaymsg -t get_version >/dev/null 2>&1; then gate ok Pn-desktop-sway
+else gate no Pn-desktop-sway; echo "--- session.log (head) ---"; sed -n '1,40p' "$SESSION_LOG"; fi
+
+# --- Pn-desktop-surfaces: wait (up to ~40s) for the surfaces marker Quickshell logs on instantiation.
+#     First-run QML compile in the VM is slow; the poweroff-owning shrek-mount-gate is ordered AFTER us
+#     (see its unit) so we are neither CPU-starved nor force-killed mid-instantiation. ---
+for i in $(seq 1 80); do grep -q "SHREK-DESKTOP shell surfaces instantiated" "$SESSION_LOG" && break; sleep 0.5; done
+
+# Always mirror the real desktop session output to the console — evidence for the proof + debugging.
+# Quickshell logs only into the in-VM session.log, which is otherwise invisible from vm-console.log.
+echo "--- shrek-desktop session.log ($SESSION_LOG) ---"
+sed 's/^/  ds| /' "$SESSION_LOG" | head -60
+echo "--- end session.log ---"
+
+# --- Pn-desktop-qs-load: Quickshell loaded shell.qml with no QUICKSHELL/QML error. Scope the scan to
+#     quickshell/QML failures — Sway's own benign [ERROR] lines share this log and must NOT count. ---
+if grep -qiE "error while loading shared|is not a type|QQmlApplicationEngine failed|module \"[^\"]*\" is not installed|\.qml:[0-9]+:.*(error|is not)" "$SESSION_LOG"; then
+  gate no Pn-desktop-qs-load
+else
+  gate ok Pn-desktop-qs-load
+fi
+
+# --- Pn-desktop-surfaces verdict ---
+if grep -q "SHREK-DESKTOP shell surfaces instantiated" "$SESSION_LOG"; then gate ok Pn-desktop-surfaces
+else gate no Pn-desktop-surfaces; fi
+
+# --- Pn-desktop-logout: clean teardown. swaymsg exit may return nonzero (IPC closes before ack); the
+#     real signal is whether the session process terminates. Grace-wait on the pid. ---
+swaymsg exit >/dev/null 2>&1 || true
+for i in $(seq 1 20); do kill -0 "$SESS_PID" 2>/dev/null || break; sleep 0.5; done
+if ! kill -0 "$SESS_PID" 2>/dev/null; then gate ok Pn-desktop-logout
+else echo "NOTE session did not exit on request — killing"; kill -9 "$SESS_PID" 2>/dev/null || true; gate no Pn-desktop-logout; fi
+
+echo "=================== Pn-desktop RESULT ==================="
+echo "SHREK_GATE: DESKTOP PASS=$PASS FAIL=$FAIL"
+exit 0

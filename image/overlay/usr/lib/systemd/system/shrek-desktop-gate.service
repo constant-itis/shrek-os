@@ -1,0 +1,27 @@
+# shrek-desktop-gate — Desktop Bootstrap-0 sealed-boot surface proof (Pn-desktop).
+#
+# After shrek-onion.service has merged the signed shrek-desktop sysext onto /usr, this runs the REAL
+# delivered session (/usr/bin/shrek-desktop → sway → quickshell) headless and asserts the shell
+# surfaces instantiate on the SEALED image — the step the container smoke (scripts/desktop-smoke.sh)
+# deliberately could not cover. It mirrors the gate's verdict onto the serial console so
+# scripts/desktop-sealed-proof.sh can read Pn-desktop off out/vm-console.log.
+#
+# PROOF gate, not a health gate: no FailureAction, /usr/lib/shrek/desktop-gate always exits 0. A
+# regression is a FAIL line + non-zero tally on the console, never a boot failure/rollback.
+# docs/desktop-bootstrap-0.md.
+[Unit]
+Description=Shrek Desktop sealed-boot gate (Desktop Bootstrap-0 Pn-desktop surface proof)
+Documentation=file:///usr/share/doc/shrek/desktop-bootstrap-0.md
+# Ordered after the Onion merge (the layer must be on /usr) and the base multi-user bring-up.
+After=shrek-onion.service multi-user.target
+Wants=shrek-onion.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/desktop-gate
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

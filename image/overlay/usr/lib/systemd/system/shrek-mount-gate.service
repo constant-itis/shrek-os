@@ -13,7 +13,12 @@
 [Unit]
 Description=Shrek Phase-5 slice-1 mount-plane VM gate (SPIKE)
 Documentation=file:///usr/share/doc/shrek/phase5-slice1-mount.md
-After=multi-user.target
+# This gate OWNS the VM poweroff (below), so it must run LAST: any other acceptance gate ordered
+# After=multi-user.target would otherwise be killed mid-run by poweroff-force. shrek-desktop-gate
+# (Desktop Bootstrap-0 surface proof) is slower than this battery, so order after it — else Quickshell
+# is force-killed before it instantiates and Pn-desktop-surfaces spuriously fails.
+After=multi-user.target shrek-desktop-gate.service
+Wants=shrek-desktop-gate.service
 # Always power off after the verdict — pass or fail — so the VM never lingers past the gate.
 # (SuccessAction/FailureAction are [Unit] directives, not [Service].)
 SuccessAction=poweroff-force
