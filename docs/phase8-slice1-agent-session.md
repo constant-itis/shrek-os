@@ -246,3 +246,35 @@ only a specific piece if C1–C3 implementation surfaces a new channel.
    view-matches-construction; sealed-VM `Pn-agentd-session` assertion group (two-boot).
 5. **docs** this file + `docs/graph-baselines.md` bump (baseline #8).
 Then: push `constant-itis master`; `system-index refresh --scope shrek-os --graphify`.
+
+---
+
+## §4 — Implementation result (2026-08-21) — BUILT & GREEN
+
+Landed owner-split atop the Desktop Bootstrap-0 close-out:
+- **feat(gatekeeperd)** `crates/gatekeeperd/src/session_view.rs` — the `shrek-session/1` record (write/
+  remove/CLI, cloned from `authority_record`: root-authored, `root:swamp` 0640, temp+rename, id-guarded).
+  `T2Spec.session_meta` carries the decision projection; `t2_plane` writes the view at the swamp-capable
+  construct seam (from the meta + realized grants/egress) and removes it on every teardown path.
+  `sandbox.rs` projects the RE-CHECKED effective tier/trust/caps/profile + `--subject`/`--live`.
+- **feat(agentd)** `session` — ceiling-check → deterministic tier → attach subject → exec the wall
+  (pass-through; agentd owns `--tier`, holds no privilege).
+- **feat(shrek)** `session` front door (routes through agentd) + read-only `session status <id>`.
+
+**Proven:**
+- **Unit** — 4 `session_view` tests (JSON well-formed/stable/escaped, 0640 roundtrip, id-traversal
+  guard) + the full 86-test gatekeeperd suite green (the 5 `T2Spec` sites carry the new field).
+- **Host oracle** `scripts/agentd-session-proof.sh` — **PASS=5/0**: G-refuse (ceiling), G-argv (agentd
+  owns tier + subject + passthrough), **G-view** (rendered `effective.*` == written decision — **C2**),
+  **G-mode** (0640 — **C1** structural), **G-teardown** (`--rm` ⇒ status fails closed — **C3**).
+- **Sealed-VM** — `Pn-agentd-session` block in the mount-plane gate. The endpoint-free VM cannot fully
+  *construct* an egress session (fail-closed before the identity commit, exactly as P62/P63), so — the
+  established P62-swamp pattern — it proves on the REAL sealed `agentd` + `gatekeeperd` what only the
+  seal can: seal-freshness (the surface is baked in), the tier/subject/passthrough decision, C1 (0640),
+  C2 (view matches the decision), C3 (teardown removes it). The inline construct-time write rides the
+  same `t2_plane` seam as `authority_record`/`net_binding`, exercised end-to-end by the host oracle.
+
+**Note:** the sealed image ships `agentd`/`gatekeeperd` (the TCB) but not the `shrek` host composer;
+`shrek session`/`shrek session status` are host CLIs driving the sealed wall (as `shrek run`/`find` are).
+Acceptance target for the next slice (§Data-model note): a real `SessionProvider` reads this exact
+`shrek-session/1` record into the Quickshell Work drawer, deleting `MockSessionProvider`.
