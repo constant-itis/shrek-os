@@ -28,6 +28,17 @@
 #                            its `swamp_find` tool over the routed path and receives ONLY its authorized
 #                            projection (in-scope hit present, out-of-scope BBSECRET absent).
 #
+# Slice-3 adds the LIVE + PERSISTENT gates (the index repairs itself and survives a restart), all still
+# routed through the broker so authority is exercised end-to-end:
+#   D1 live CREATE   — a newly-created in-scope file becomes searchable through the broker.
+#   D2 live MODIFY   — an edit swaps the searchable content (new token in, old token retired).
+#   D3 live DELETE   — removing a file removes its searchable content (metadata AND FTS).
+#   D4 live RENAME   — a mv reflects at the new path and is gone at the old.
+#   D5 freshness     — a healthy routed response carries `freshness fresh`; a broker fail-closed
+#                      (stolen/unbound) carries `freshness unknown` (index-global, no existence oracle).
+#   D6 persistence   — the DB survives a swampd restart, and the startup reconcile catches a CREATE and a
+#                      DELETE that happened while swampd was DOWN (offline-change reconciliation).
+#
 # Usage: scripts/swamp-broker-find-proof.sh
 set -u
 
@@ -271,6 +282,52 @@ has "C2 the routed tool result carried the IN-SCOPE hit (app-a)" "$CODER_OUT" "a
 absent "C3 the out-of-scope project never crossed to the agent" "$CODER_OUT" "app-b"
 absent "C4 the out-of-scope token never crossed to the agent" "$CODER_OUT" "BBSECRET"
 has "C5 the agent completed on its authorized projection" "$CODER_OUT" "CODER-DONE ok=true"
+absent "C6 a FRESH index adds no stale caution to the agent's tool result" "$CODER_OUT" "NOTE swamp_find index freshness"
+
+echo "=== D live watcher (slice-3): create / modify / delete / rename through the broker ==="
+# All edits are made by `tester` (the tree owner); swampd's inotify watch repairs the map; each change is
+# then queried THROUGH the broker, so authority is exercised on every live update.
+runuser -u tester -- bash -c "echo 'live created token LIVECREATE in app-a' > $H/Projects/app-a/src/created.rs"
+sleep 0.7
+has "D1 live CREATE reflected through the routed path" "$(route_query sbA sessH LIVECREATE)" "created.rs"
+
+runuser -u tester -- bash -c "echo 'edited token LIVEMODIFY app-a' > $H/Projects/app-a/src/created.rs"
+sleep 0.7
+has      "D2a live MODIFY: the new token is searchable" "$(route_query sbA sessH LIVEMODIFY)" "created.rs"
+gate_empty "D2b live MODIFY: the old token is retired (FTS replaced, not appended)" "$(route_query sbA sessH LIVECREATE)"
+
+runuser -u tester -- bash -c "rm $H/Projects/app-a/src/created.rs"
+sleep 0.7
+gate_empty "D3 live DELETE removes searchable content (metadata AND FTS)" "$(route_query sbA sessH LIVEMODIFY)"
+
+runuser -u tester -- bash -c "echo 'movable token LIVERENAME app-a' > $H/Projects/app-a/src/rn-old.rs"
+sleep 0.5
+runuser -u tester -- bash -c "mv $H/Projects/app-a/src/rn-old.rs $H/Projects/app-a/src/rn-new.rs"
+sleep 0.7
+D4=$(route_query sbA sessH LIVERENAME)
+has    "D4a live RENAME: the new path is present" "$D4" "rn-new.rs"
+absent "D4b live RENAME: the old path is gone"    "$D4" "rn-old.rs"
+
+echo "=== D5 freshness carried end-to-end (swampd → broker) ==="
+has "D5a a healthy routed response carries freshness=fresh (relayed verbatim)" "$(route_query sbA sessH ISCOPETOKEN)" "freshness fresh"
+has "D5b a broker fail-closed (stolen handle) carries freshness=unknown"       "$(route_query sbB sessH ISCOPETOKEN)" "freshness unknown"
+has "D5c a broker fail-closed (unbound source) carries freshness=unknown"      "$(route_query sbC sessH ISCOPETOKEN)" "freshness unknown"
+
+echo "=== D6 persistence + offline-change reconcile across a swampd restart ==="
+# Seed a file that is indexed WHILE UP, so we can prove its offline DELETE is reconciled on restart.
+runuser -u tester -- bash -c "echo 'delete-me-offline token OFFLINEDEL app-a' > $H/Projects/app-a/src/willdel.rs"
+sleep 0.7
+has "D6a willdel is indexed while swampd is up" "$(route_query sbA sessH OFFLINEDEL)" "willdel.rs"
+[ -f /run/swamp/index.db ] && pass "D6b index DB is a real persistent file on disk" || fail "D6b index DB missing"
+# Stop swampd, mutate the tree WHILE IT IS DOWN, then restart — the startup reconcile must catch both.
+pkill -x swampd 2>/dev/null || true; sleep 0.5; rm -f /run/swamp/query.sock
+runuser -u tester -- bash -c "echo 'born-while-down token OFFLINEADD app-a' > $H/Projects/app-a/src/offline.rs"
+runuser -u tester -- bash -c "rm $H/Projects/app-a/src/willdel.rs"
+runuser -u swamp -- env SWAMP_HOME=$H SWAMP_STATE_DIR=/run/swamp SWAMP_AUTHORITY_DIR=/run/shrek/authority \
+  SWAMP_ALLOW_UID=$TESTER_UID /swampd serve >/tmp/swampd2.log 2>&1 &
+for _ in $(seq 1 100); do [ -S /run/swamp/query.sock ] && env SWAMP_QUERY_SOCK=/run/swamp/query.sock /shrek find --session sessH __ping__ >/dev/null 2>&1 && break; sleep 0.1; done
+has       "D6c restart reconcile catches the offline CREATE" "$(route_query sbA sessH OFFLINEADD)" "offline.rs"
+gate_empty "D6d restart reconcile catches the offline DELETE" "$(route_query sbA sessH OFFLINEDEL)"
 
 # ---- teardown + verdict ----
 pkill -x swamp-broker 2>/dev/null || true; pkill -x swampd 2>/dev/null || true; pkill -f responder.py 2>/dev/null || true
@@ -278,11 +335,12 @@ for n in srv sbA sbB sbC sbU; do ip netns del "$n" 2>/dev/null || true; done
 nft delete table ip swamp_oracle 2>/dev/null || true
 
 echo "-----------------------------------------------------------------------------"
-if [ "$FAILN" = "0" ] && [ "$PASS" -ge 20 ]; then
-  echo "SHREK_GATE: PASS swamp-broker-find-slice2 ($PASS gates, 0 fail)"
+if [ "$FAILN" = "0" ] && [ "$PASS" -ge 32 ]; then
+  echo "SHREK_GATE: PASS swamp-live-persistent-slice3 ($PASS gates, 0 fail)"
   exit 0
 else
-  echo "SHREK_GATE: FAIL swamp-broker-find-slice2 (pass=$PASS fail=$FAILN)"
+  echo "SHREK_GATE: FAIL swamp-live-persistent-slice3 (pass=$PASS fail=$FAILN)"
+  echo "--- swampd2.log ---"; tail -20 /tmp/swampd2.log 2>/dev/null
   echo "--- broker.log ---"; tail -30 /tmp/broker.log 2>/dev/null
   echo "--- swampd.log ---"; tail -20 /tmp/swampd.log 2>/dev/null
   exit 1

@@ -651,6 +651,80 @@ else
         else
           emit "FAIL P62-swamp2 sealed policy lacks swamp-query (stale gatekeeperd — rebuild the image)"; p6fail=1
         fi
+
+        # Phase-6 Swamp slice-3: the LIVE watcher + PERSISTENT index. The full live-routed path (create/
+        # modify/delete/rename through the broker) is oracle territory (scripts/swamp-broker-find-proof.sh,
+        # 36 gates). On the sealed image we prove (a) the seal is not stale w.r.t. slice-3, and (b) the
+        # durable-state design works on the REAL sealed /var — the persistence guarantee the appliance must
+        # keep. swampd stays DISABLED as a boot service; we exercise it by explicit invocation (the unit
+        # correctness that swampd.service documents), never by enabling it globally.
+        SWAMPD_BIN=/usr/libexec/shrek/swampd
+        if grep -aq 'var/lib/swamp' "$SWAMPD_BIN"; then
+          emit "PASS P62-swamp3 sealed swampd carries the durable /var/lib/swamp state path"
+        else
+          emit "FAIL P62-swamp3 sealed swampd lacks durable /var state (stale seal — rebuild the image)"; p6fail=1
+        fi
+        if grep -aq 'freshness' "$SWAMPD_BIN"; then
+          emit "PASS P62-swamp3 sealed swampd emits the freshness wire (live/stale signalling)"
+        else
+          emit "FAIL P62-swamp3 sealed swampd lacks the freshness wire (stale seal)"; p6fail=1
+        fi
+        if grep -aq 'freshness' /usr/lib/shrek/t2-rootfs/usr/bin/coder; then
+          emit "PASS P62-swamp3 sealed coder surfaces index freshness to the model"
+        else
+          emit "FAIL P62-swamp3 sealed coder lacks the freshness caution (stale seal — re-run seal-t2-artifacts)"; p6fail=1
+        fi
+        # Live durable-state proof on the REAL dedicated persistent partition. First assert /var/lib/swamp
+        # is actually its own mount (the slice-3 on-image deliverable); then reconcile a tiny fixture there
+        # and reconcile AGAIN after an offline delete — the persistence-across-restart guarantee (process
+        # exits, the partition survives, the next start reconciles it) against the real sealed swampd.
+        SWPART=/var/lib/swamp
+        if grep -q " $SWPART " /proc/mounts; then
+          emit "PASS P62-swamp3 dedicated persistent partition mounted at /var/lib/swamp"
+        else
+          emit "FAIL P62-swamp3 /var/lib/swamp is NOT its own mount (persistent partition missing)"; p6fail=1
+        fi
+        SW3H=/var/lib/swamp-gate-home; SW3ST="$SWPART/gate-reconcile"; SW3AU=/run/shrek/authority
+        rm -rf "$SW3H" "$SW3ST"; mkdir -p "$SW3H/Projects/proj" "$SW3ST" "$SW3AU"
+        echo 'sealed swamp slice3 token SEALTOKEN' > "$SW3H/Projects/proj/a.txt"
+        env SWAMP_HOME="$SW3H" SWAMP_STATE_DIR="$SW3ST" SWAMP_AUTHORITY_DIR="$SW3AU" \
+          "$SWAMPD_BIN" reconcile >/tmp/sw3a.log 2>&1
+        if grep -q 'objects=' /tmp/sw3a.log && [ -f "$SW3ST/index.db" ]; then
+          emit "PASS P62-swamp3 live reconcile built a real index.db on the persistent partition"
+        else
+          emit "FAIL P62-swamp3 live reconcile produced no index.db ($(tr -d '\n' </tmp/sw3a.log | tail -c 160))"; p6fail=1
+        fi
+        SW3FS=$(stat -f -c %T "$SW3ST" 2>/dev/null)
+        if [ -n "$SW3FS" ] && [ "$SW3FS" != "tmpfs" ] && [ "$SW3FS" != "ramfs" ]; then
+          emit "PASS P62-swamp3 index DB lives on a durable (non-tmpfs) filesystem: $SW3FS"
+        else
+          emit "FAIL P62-swamp3 index DB is on a volatile mount ($SW3FS) — would not survive reboot"; p6fail=1
+        fi
+        rm -f "$SW3H/Projects/proj/a.txt"
+        env SWAMP_HOME="$SW3H" SWAMP_STATE_DIR="$SW3ST" SWAMP_AUTHORITY_DIR="$SW3AU" \
+          "$SWAMPD_BIN" reconcile >/tmp/sw3b.log 2>&1
+        if grep -q 'deleted=1' /tmp/sw3b.log; then
+          emit "PASS P62-swamp3 restart reconcile prunes an offline delete from the persistent DB"
+        else
+          emit "FAIL P62-swamp3 offline delete not reconciled ($(tr -d '\n' </tmp/sw3b.log | tail -c 160))"; p6fail=1
+        fi
+        rm -rf "$SW3ST"
+        # Reboot-persistence VERIFY (phase 2): if a prior boot seeded the sentinel on the PERSISTENT
+        # partition, we are the post-reboot boot — prove the swamp marker SURVIVED the reboot while the
+        # ordinary tmpfs /var probe was WIPED. (The seed + reboot are at the very end of this gate.)
+        if [ -f "$SWPART/.gate-persist-done" ]; then
+          if [ -f "$SWPART/gate-persist-marker" ]; then
+            emit "PASS P62-swamp3 swamp index SURVIVED a real reboot (persistent /var/lib/swamp partition)"
+          else
+            emit "FAIL P62-swamp3 swamp index did NOT survive reboot (persistence broken)"; p6fail=1
+          fi
+          if [ ! -f /var/lib/gate-volatile-probe ]; then
+            emit "PASS P62-swamp3 ordinary /var was WIPED on reboot (volatility preserved)"
+          else
+            emit "FAIL P62-swamp3 ordinary /var persisted across reboot (volatility lost)"; p6fail=1
+          fi
+        fi
+
         P62TASK="Make the program print REAL-COMPILE-RUN-OK and exit 42."
         OUT62=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
                   --caps C-net --profile C-net --ingest-harness --id p62 --anchor "$P6SRV" \
@@ -713,3 +787,27 @@ else
 fi
 [ "$p6fail" = 0 ] && emit "PASS P6 untrusted-ingest coding-session VM gate" || emit "FAIL P6 untrusted-ingest coding-session VM gate"
 verdict_done=1
+
+# ---------------------------------------------------------------------------------------------------
+# Phase-6 Swamp slice-3 reboot-persistence SEED (phase 1). Runs LAST, after the verdict is printed and
+# verdict_done=1 (so the reboot's shutdown SIGTERM cannot trip the crash-FAIL EXIT trap). If the
+# dedicated persistent swamp partition is mounted and we have NOT already run the reboot cycle this VM
+# run, seed a marker on the PERSISTENT partition + a probe on the VOLATILE tmpfs /var, then reboot. The
+# post-reboot boot re-runs this gate; its VERIFY step (in the P62 block) proves the swamp marker survived
+# and the /var probe did not. The sentinel on the persistent partition fires this EXACTLY ONCE per fresh
+# VM run — no reboot loop — and if the partition is absent we never reboot (self-skips, clean poweroff).
+SWPART=/var/lib/swamp
+if grep -q " $SWPART " /proc/mounts && [ ! -f "$SWPART/.gate-persist-done" ]; then
+  echo PERSISTED > "$SWPART/gate-persist-marker"
+  echo volatile > /var/lib/gate-volatile-probe
+  : > "$SWPART/.gate-persist-done"
+  sync
+  emit "P62-swamp3 phase1 seeded persistence markers — rebooting to prove reboot-survival"
+  # IMMEDIATE reboot (syscall-level), NOT a graceful `systemctl reboot`: a graceful stop would let this
+  # oneshot exit "successfully" and race its own SuccessAction=poweroff-force (poweroff could win → no
+  # phase-2). `reboot -f` after sync preempts the shutdown transaction entirely; the abrupt cycle also
+  # makes the durability test stricter. `sleep 120` only holds if the reboot somehow no-ops.
+  sync
+  reboot -f 2>/dev/null || systemctl --force --force reboot 2>/dev/null || reboot
+  sleep 120
+fi
