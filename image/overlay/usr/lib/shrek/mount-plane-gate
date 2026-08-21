@@ -627,6 +627,15 @@ else
         else
           emit "FAIL P62-sealed coder missing from sealed t2-rootfs (seal-t2-artifacts did not bake it)"; p6fail=1
         fi
+        # Phase-6 slice-7: the re-sealed coder carries the opaque per-session handle emit (X-Shrek-Session).
+        # The endpoint-free VM coder fails closed before it dials (below), so the header's ON-WIRE behavior
+        # stays oracle/unit territory (scripts/p6-session-broker-proof.sh); here we prove only that the
+        # SEALED binary was rebuilt WITH the slice-7 change — i.e. the sealed image is not stale.
+        if grep -aq 'X-Shrek-Session' /usr/lib/shrek/t2-rootfs/usr/bin/coder; then
+          emit "PASS P62-slice7 sealed coder carries the session-handle emit (X-Shrek-Session)"
+        else
+          emit "FAIL P62-slice7 sealed coder lacks X-Shrek-Session (stale seal — re-run seal-t2-artifacts)"; p6fail=1
+        fi
         P62TASK="Make the program print REAL-COMPILE-RUN-OK and exit 42."
         OUT62=$(SHREK_T2_RUNSC="$P6MNT/runsc" timeout 30 "$GK" sandbox --tier T2 --trust T-hostile \
                   --caps C-net --profile C-net --ingest-harness --id p62 --anchor "$P6SRV" \
