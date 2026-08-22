@@ -101,4 +101,59 @@ else
 fi
 rm -rf "$SM" 2>/dev/null || true
 
+# --- Dogfood-0 M3: a REAL gatekeeperd T2 session appears LIVE in the Work drawer (ACCEPTANCE) ----------
+# gatekeeperd constructs a genuine T2 gVisor session and writes the shrek-session/1 record (root:swamp
+# 0640) which the dev-session SessionProvider (dev is in `swamp`) reads → a live row in the Work drawer.
+# We drive the SAME engine path the sealed mount-plane-gate proves: `gatekeeperd sandbox --trust
+# T-untrust` under `systemd-run --scope -p Delegate=yes` (cgroup delegation for runsc). NOTE: the `shrek
+# run` FRONT DOOR cannot construct T2 in this endpoint-free sealed VM by design — it re-derives the band
+# from an integrity anchor (the runsc harness fs-verity, unmeasurable on RO dm-verity /usr, OR a sealed
+# entrypoint, which /bin/sh is not) and fail-highs to T-hostile. The engine call is gatekeeperd's own
+# authorized explicit-trust path; the session record + Work-drawer flow are identical either way.
+GK=/usr/libexec/shrek/gatekeeperd
+SRV=/run/shrek-m3/srv
+rm -rf /run/shrek-m3 2>/dev/null || true
+mkdir -p "$SRV/m3"
+printf 'int main(void){return 0;}\n' > "$SRV/m3/hello.c"
+# native-workload proof: run the sandbox's own tcc on the granted source, then hold long enough for the
+# 2s SessionProvider poll to catch the live record. `;` (not &&) so the hold+DONE run regardless of tcc.
+M3WL='/usr/bin/tcc -c /srv/m3/hello.c -o /tmp/hello.o && echo M3-COMPILED || echo M3-COMPILE-FAIL; /bin/busybox sleep 16; echo M3-WORK-DONE'
+# wait for the dev quickshell log to exist (the Work-drawer reader must be running to prove "live")
+QSLOG=; k=0
+while [ "$k" -lt 30 ]; do
+    QSLOG=$(ls /run/user/1000/quickshell/by-id/*/log.qslog 2>/dev/null | head -1)
+    [ -n "$QSLOG" ] && break; sleep 1; k=$((k + 1))
+done
+say "M3 quickshell-log=[${QSLOG:-absent}] after ${k}s"
+# real T2 construct in the background (systemd-run --scope for the delegated cgroup runsc needs)
+( systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T2 --trust T-untrust \
+    --caps C-ro-nosec --profile C-ro-nosec --id m3 --anchor "$SRV" --grant m3 \
+    -- /bin/sh -c "$M3WL" > /run/m3-run.log 2>&1; echo "$?" > /run/m3-run.rc ) &
+M3PID=$!
+# poll for the live session record during the workload's hold window
+rec=; tier=; sub=; i=0
+while [ "$i" -lt 25 ]; do
+    f=$(ls /run/shrek/session/*.json 2>/dev/null | head -1)
+    if [ -n "$f" ]; then rec="$f"; tier=$(grep -oE '"tier"[^,]*' "$f" 2>/dev/null | head -1); break; fi
+    sleep 1; i=$((i + 1))
+done
+say "M3 session-record=[${rec:-absent}] found-after=${i}s ${tier:-}"
+[ -n "$rec" ] && say "M3 record-perms=[$(stat -c '%U:%G %a' "$rec" 2>/dev/null)]"
+# open the Work drawer in the dev session so the screenshot shows the live row (best-effort)
+runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
+    /usr/bin/quickshell ipc call work toggle >/dev/null 2>&1 || true
+# give the 2s SessionProvider poll time to read the record + log the marker, then check the LIVE proof
+sleep 5
+if [ -n "$QSLOG" ] && grep -qa 'SHREK-DESKTOP work session' "$QSLOG" 2>/dev/null; then
+    say "M3 drawer-marker=yes [$(grep -a 'SHREK-DESKTOP work session' "$QSLOG" | tail -1 | sed 's/.*SHREK-DESKTOP //')]"
+else
+    say "M3 drawer-marker=no"
+fi
+# wait for the workload to finish + teardown, then confirm the record was removed
+w=0; while kill -0 "$M3PID" 2>/dev/null && [ "$w" -lt 40 ]; do sleep 1; w=$((w + 1)); done
+wait "$M3PID" 2>/dev/null || true
+say "M3 workload=[done=$(grep -ac M3-WORK-DONE /run/m3-run.log 2>/dev/null || echo 0) compiled=$(grep -ac M3-COMPILED /run/m3-run.log 2>/dev/null || echo 0)] rc=$(cat /run/m3-run.rc 2>/dev/null || echo '?')"
+after=$(ls /run/shrek/session/*.json 2>/dev/null | head -1)
+say "M3 record-after-teardown=[${after:-absent}]"
+
 say "DONE boot=$n"
