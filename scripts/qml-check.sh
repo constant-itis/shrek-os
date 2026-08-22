@@ -79,11 +79,15 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work -e CACHE="${CACHE}
       timeout 15 "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 || true
     swaymsg exit >/dev/null 2>&1 || true
     echo "----- quickshell log -----"; cat /tmp/qs.log; echo "--------------------------"
-    if grep -qiE "error|is not a type|cannot|unavailable|Unexpected token" /tmp/qs.log; then
-      echo "QMLCHECK: FAIL"
-    elif grep -q "SHREK-DESKTOP shell surfaces instantiated" /tmp/qs.log; then
+    # Scope to QML/config LOAD failures only. Quickshell prints "Failed to load configuration" (+ "caused
+    # by @file[l:c]") iff the QML tree fails to load. Runtime service warnings ("Failed to create pipewire
+    # context", "Could not connect to DBus" for bluez/upower) are EXPECTED here -- this bare container runs
+    # no pipewire/bluez/upower daemon -- and must NOT count as a QML failure.
+    if grep -q "Failed to load configuration" /tmp/qs.log; then
+      echo "QMLCHECK: FAIL (QML load error)"; grep -A6 "Failed to load configuration" /tmp/qs.log
+    elif grep -q "SHREK-DESKTOP shell surfaces instantiated" /tmp/qs.log && grep -q "Configuration Loaded" /tmp/qs.log; then
       echo "QMLCHECK: PASS"
     else
-      echo "QMLCHECK: NOMARKER (loaded without error but surfaces marker missing)"
+      echo "QMLCHECK: NOMARKER (no load error, but surfaces/loaded markers missing)"; tail -20 /tmp/qs.log
     fi
   '

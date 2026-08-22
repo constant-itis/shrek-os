@@ -39,7 +39,7 @@ docker run --rm --privileged \
       git cmake ninja-build build-essential pkg-config \
       qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
       qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev libwayland-dev libwayland-bin \
-      wayland-protocols libcli11-dev libdrm-dev libxcb1-dev
+      wayland-protocols libcli11-dev libdrm-dev libxcb1-dev libpipewire-0.3-dev
     # BEST-EFFORT extras — a wrong/absent name must NOT sink the whole run.
     for p in qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
              qml6-module-qtquick-controls qt6-declarative-dev-tools qt6-shadertools-dev \
@@ -88,10 +88,10 @@ QML
     # Minimal feature set: keep WAYLAND + WAYLAND_WLR_LAYERSHELL ON (layer-shell = PanelWindow, the
     # bar/drawer surfaces); disable everything else to shrink the dep closure for the smoke.
     cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-      -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+      -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=ON -DNETWORK=OFF \
       -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
-      -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
-      -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
+      -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=ON -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
+      -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=ON -DSERVICE_NOTIFICATIONS=OFF \
       -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF >/tmp/qs-cmake.log 2>&1 \
       || { echo "WARN cmake configure returned nonzero — full tail:"; tail -40 /tmp/qs-cmake.log; }
     if [ -f build/build.ninja ] && ninja -C build 2>&1 | tail -3 && ninja -C build install 2>&1 | tail -2; then
@@ -115,7 +115,11 @@ QML
       echo "NOTE quickshell connecting to WAYLAND_DISPLAY=$WD"
       WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software \
         timeout 20 "$QS" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 || true
-      grep -qiE "error|is not a type|cannot" /tmp/qs.log && QSERR=1 || QSERR=0
+      # Scope to QML/config LOAD failures only. Quickshell prints "Failed to load configuration" iff the
+      # QML tree fails to load. Runtime service warnings ("Failed to create pipewire context", "Could not
+      # connect to DBus" for bluez/upower) are EXPECTED in this bare container (no daemons) once those
+      # backends are enabled, and must NOT count as a QML failure.
+      grep -q "Failed to load configuration" /tmp/qs.log && QSERR=1 || QSERR=0
       [ "$QSERR" = 0 ] && gate ok DB0-qs-load || { gate no DB0-qs-load; sed -n "1,40p" /tmp/qs.log; }
       grep -q "SHREK-DESKTOP shell surfaces instantiated" /tmp/qs.log && gate ok DB0-surfaces || gate no DB0-surfaces
     else

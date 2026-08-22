@@ -44,7 +44,10 @@ docker run --rm --privileged \
       qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
       qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev \
       libwayland-dev libwayland-bin wayland-protocols libcli11-dev libdrm-dev \
-      libxcb1-dev >/dev/null   # Quickshell.I3 (Sway IPC) lives under src/x11 -> X11=ON -> find_package(XCB)
+      libxcb1-dev libpipewire-0.3-dev >/dev/null
+      # libxcb1-dev: Quickshell.I3 (Sway IPC) is under src/x11 -> X11=ON -> find_package(XCB).
+      # libpipewire-0.3-dev: SERVICE_PIPEWIRE (audio). Bluetooth/UPower/Notifications are pure Qt-DBus
+      # (no extra native dep, verified in Quickshell v0.3.1 CMake).
 
     # (1) stage the QML source tree
     rm -rf "/work/$OVL/usr/share/shrek/ui"
@@ -80,10 +83,10 @@ docker run --rm --privileged \
       # toplevel). Phases 3/4 flip PIPEWIRE/BLUETOOTH/UPOWER then NOTIFICATIONS. Changing these flags
       # needs FORCE_QS=1 (else the staged binary is reused and the flags do not take effect).
       cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-        -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+        -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=ON -DNETWORK=OFF \
         -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
-        -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
-        -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
+        -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=ON -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
+        -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=ON -DSERVICE_NOTIFICATIONS=OFF \
         -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF
       ninja -C build
       DESTDIR="/work/$OVL" ninja -C build install
