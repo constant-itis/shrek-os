@@ -14,7 +14,8 @@ QtObject {
     property NotificationServer server: NotificationServer {
         keepOnReload: false
         bodySupported: true
-        actionsSupported: false     // Slice 1: display + dismiss; action buttons later
+        actionsSupported: true      // render + invoke the sender's action buttons (display + dismiss + act)
+        actionIconsSupported: false
         imageSupported: true
         onNotification: function (n) { n.tracked = true }
     }

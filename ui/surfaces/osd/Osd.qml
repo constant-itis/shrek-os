@@ -20,11 +20,17 @@ PanelWindow {
     property real level: 0
     property bool muted: false
 
+    // 0 hidden -> 1 shown; drives a fade + rise. The window stays mapped through the fade-out, then
+    // unmaps (layer-shell can't animate an unmap, so we animate the child and unmap after).
+    property real anim: 0
+    Behavior on anim { NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic } }
+
     function trigger() {
         if (!Audio.ready) return
         osd.level = Audio.volume
         osd.muted = Audio.muted
         osd.visible = true
+        osd.anim = 1
         hideTimer.restart()
     }
 
@@ -34,7 +40,9 @@ PanelWindow {
         function onMutedChanged() { osd.trigger() }
     }
 
-    Timer { id: hideTimer; interval: 1500; repeat: false; onTriggered: osd.visible = false }
+    // fade out, then unmap once the fade has finished
+    Timer { id: hideTimer; interval: 1400; repeat: false; onTriggered: { osd.anim = 0; unmap.restart() } }
+    Timer { id: unmap; interval: Tokens.animMed + 40; repeat: false; onTriggered: if (osd.anim === 0) osd.visible = false }
 
     Rectangle {
         anchors.horizontalCenter: parent.horizontalCenter
@@ -45,6 +53,8 @@ PanelWindow {
         radius: Tokens.radiusLg
         color: Tokens.overlay
         border.color: Tokens.border
+        opacity: osd.anim
+        transform: Translate { y: (1 - osd.anim) * 12 }
 
         Row {
             anchors.centerIn: parent
