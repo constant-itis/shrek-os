@@ -16,10 +16,16 @@ PanelWindow {
     visible: ShellState.launcherOpen
     anchors { top: true; bottom: true; left: true; right: true }
     exclusiveZone: 0
-    color: "#88000000"   // dim scrim
+    color: "transparent"   // scrim is an animated child so it can fade in
 
     property int sel: 0
     readonly property var results: Applications.results
+
+    // Entrance motion: 0 = closed, 1 = open. Deferred to the next tick (Qt.callLater) so the Behavior
+    // animates from 0 on each show instead of snapping to the bound value. Layer-shell windows are torn
+    // down on hide, so there is no exit animation to drive — entrance only, per the calm motion vocab.
+    property real anim: 0
+    Behavior on anim { NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic } }
 
     onVisibleChanged: if (visible) open()
 
@@ -28,6 +34,8 @@ PanelWindow {
         sel = 0
         input.text = ""
         input.forceActiveFocus()
+        anim = 0
+        Qt.callLater(function () { anim = 1 })
     }
     function close() { ShellState.closeAll() }
     function launchSel() {
@@ -41,8 +49,13 @@ PanelWindow {
         list.positionViewAtIndex(sel, ListView.Contain)
     }
 
-    // click-out closes
-    MouseArea { anchors.fill: parent; onClicked: launcher.close() }
+    // dim scrim — fades in with the launcher; click-out closes
+    Rectangle {
+        anchors.fill: parent
+        color: "#000000"
+        opacity: 0.53 * launcher.anim
+        MouseArea { anchors.fill: parent; onClicked: launcher.close() }
+    }
 
     Rectangle {
         id: panel
@@ -54,6 +67,16 @@ PanelWindow {
         radius: Tokens.radiusLg
         color: Tokens.panelBg
         border.color: Tokens.border
+        // scale up + fade + rise slightly as it opens
+        opacity: launcher.anim
+        transform: [
+            Scale {
+                origin.x: panel.width / 2; origin.y: 0
+                xScale: 0.96 + 0.04 * launcher.anim
+                yScale: 0.96 + 0.04 * launcher.anim
+            },
+            Translate { y: (1 - launcher.anim) * 10 }
+        ]
 
         // eat clicks inside the panel so they don't fall through to the close scrim
         MouseArea { anchors.fill: parent }
