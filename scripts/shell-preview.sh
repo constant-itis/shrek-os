@@ -17,13 +17,16 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     apt-get install -y --no-install-recommends -qq \
       sway foot grim qt6-wayland qml6-module-qtquick qml6-module-qtquick-window \
       qml6-module-qtquick-layouts qml6-module-qtquick-shapes libqt6widgets6 libqt6dbus6 \
-      libgl1-mesa-dri libxcb1 libpipewire-0.3-0 fonts-dejavu-core >/dev/null 2>&1 || echo "WARN pkgs"
+      libgl1-mesa-dri libxcb1 libpipewire-0.3-0 fonts-dejavu-core papirus-icon-theme >/dev/null 2>&1 || echo "WARN pkgs"
     export XDG_RUNTIME_DIR=/run/xdgr; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
     export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=1
     export SWAYSOCK=/run/xdgr/sway.sock
     # stage the wallpaper at the absolute path the sealed config references, so the preview shows it
     mkdir -p /usr/share/shrek/desktop
     cp /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/wallpaper.png /usr/share/shrek/desktop/wallpaper.png 2>/dev/null || true
+    # icon theme resolution (same as the sealed shrek-desktop wrapper): gtk settings in /usr via XDG_CONFIG_DIRS
+    cp -r /work/layers/shrek-desktop/overlay/usr/share/shrek/xdg /usr/share/shrek/xdg 2>/dev/null || true
+    export XDG_CONFIG_DIRS="/usr/share/shrek/xdg:/etc/xdg"
     sway -c /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/sway.config >/tmp/sway.log 2>&1 &
     for i in $(seq 1 30); do swaymsg -t get_version >/dev/null 2>&1 && break; sleep 1; done
     swaymsg -t get_version >/dev/null 2>&1 || { echo "sway failed"; sed -n 1,20p /tmp/sway.log; exit 1; }

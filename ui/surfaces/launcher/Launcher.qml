@@ -124,18 +124,35 @@ PanelWindow {
                             anchors.rightMargin: Tokens.spaceMd
                             spacing: Tokens.spaceMd
 
-                            // text-avatar (real freedesktop icons deferred: no icon theme in the layer yet)
-                            Rectangle {
+                            // real freedesktop icon (Quickshell image://icon -> Papirus); letter-avatar
+                            // fallback only when the entry declares no icon name.
+                            Item {
                                 anchors.verticalCenter: parent.verticalCenter
-                                width: 32; height: 32; radius: Tokens.radiusSm
-                                color: Tokens.accentDim
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: ("" + (modelData.name || "?")).charAt(0).toUpperCase()
-                                    color: Tokens.accentText
-                                    font.family: Tokens.fontFamily
-                                    font.pixelSize: Tokens.fontTitle
-                                    font.bold: true
+                                width: 32; height: 32
+                                readonly property string iconName: modelData.icon !== undefined ? ("" + modelData.icon) : ""
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    visible: parent.iconName.length === 0
+                                    radius: Tokens.radiusSm
+                                    color: Tokens.accentDim
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: ("" + (modelData.name || "?")).charAt(0).toUpperCase()
+                                        color: Tokens.accentText
+                                        font.family: Tokens.fontFamily
+                                        font.pixelSize: Tokens.fontTitle
+                                        font.bold: true
+                                    }
+                                }
+                                Image {
+                                    anchors.fill: parent
+                                    visible: parent.iconName.length > 0
+                                    source: parent.iconName.length > 0 ? ("image://icon/" + parent.iconName) : ""
+                                    sourceSize.width: 32
+                                    sourceSize.height: 32
+                                    smooth: true
+                                    asynchronous: true
                                 }
                             }
 

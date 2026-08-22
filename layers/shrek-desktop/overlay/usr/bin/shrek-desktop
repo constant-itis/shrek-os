@@ -14,4 +14,9 @@ chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 # Qt Quick renders QML with no GPU/EGL under the software backend — keeps the shell GPU-free.
 export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
 
+# Icon theme: the sealed image has no /etc gtk config, so point Qt's generic theme at a gtk settings
+# file baked in /usr (sysext-friendly) via XDG_CONFIG_DIRS. This makes QIcon::fromTheme (Quickshell's
+# image://icon provider) resolve real app icons from Papirus-Dark instead of a placeholder.
+export XDG_CONFIG_DIRS="/usr/share/shrek/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
+
 exec sway -c /usr/share/shrek/desktop/sway.config "$@"
