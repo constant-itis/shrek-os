@@ -29,9 +29,17 @@ Row {
         MouseArea {
             id: appsMa
             anchors.fill: parent
+            acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
-            onClicked: ShellState.toggleLauncher()
+            // Left = launcher; right = the root context menu, dropped just under the bar so it is
+            // reachable even when windows cover the bare desktop.
+            onClicked: (m) => {
+                if (m.button === Qt.RightButton)
+                    ShellState.openMenu(Tokens.spaceMd, Tokens.barHeight + 2 * Tokens.spaceSm, Menus.root())
+                else
+                    ShellState.toggleLauncher()
+            }
         }
     }
 

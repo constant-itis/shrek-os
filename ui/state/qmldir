@@ -1,1 +1,2 @@
 singleton ShellState ShellState.qml
+singleton Menus Menus.qml

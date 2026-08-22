@@ -10,6 +10,7 @@ import "../surfaces/work"
 import "../surfaces/system"
 import "../surfaces/notifications"
 import "../surfaces/osd"
+import "../surfaces/menu"
 
 // Shell.qml — composition root (loaded by the config-folder entry ui/shell.qml).
 //
@@ -32,12 +33,16 @@ ShellRoot {
     SystemDrawer {}
     Toasts {}
     Osd {}
+    ContextMenu {}
 
     // IPC seam for Sway keybinds. `system` is wired here so Super+S is inert-safe until the SYSTEM
     // drawer lands; its toggle just flips ShellState (no surface renders it yet).
     IpcHandler { target: "launcher"; function toggle(): void { ShellState.toggleLauncher() } }
     IpcHandler { target: "work";     function toggle(): void { ShellState.toggleWork() } }
     IpcHandler { target: "system";   function toggle(): void { ShellState.toggleSystem() } }
+    // `menu open` drops the root context menu just under the bar — for the Super+M keybind and for
+    // scripting/preview (right-click builds it with a cursor position instead).
+    IpcHandler { target: "menu";     function open(): void { ShellState.openMenu(16, 52, Menus.root()) } }
 
     // Load marker the desktop smoke test greps for.
     Component.onCompleted: console.log("SHREK-DESKTOP shell surfaces instantiated")
