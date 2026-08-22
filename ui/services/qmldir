@@ -1,1 +1,2 @@
 singleton Sway Sway.qml
+singleton Applications Applications.qml
