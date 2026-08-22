@@ -7,6 +7,7 @@ import "../state"
 import "../surfaces/desktop"
 import "../surfaces/bar"
 import "../surfaces/launcher"
+import "../surfaces/clipboard"
 import "../surfaces/work"
 import "../surfaces/system"
 import "../surfaces/notifications"
@@ -52,6 +53,7 @@ ShellRoot {
 
     // Single-instance overlays — rendered on the focused output.
     Launcher { screen: shell.activeScreen }
+    ClipboardPicker { screen: shell.activeScreen }
     WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
     SystemDrawer { screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
@@ -60,9 +62,17 @@ ShellRoot {
 
     // IPC seam for Sway keybinds. `system` is wired here so Super+S is inert-safe until the SYSTEM
     // drawer lands; its toggle just flips ShellState (no surface renders it yet).
-    IpcHandler { target: "launcher"; function toggle(): void { ShellState.toggleLauncher() } }
-    IpcHandler { target: "work";     function toggle(): void { ShellState.toggleWork() } }
-    IpcHandler { target: "system";   function toggle(): void { ShellState.toggleSystem() } }
+    IpcHandler { target: "launcher";  function toggle(): void { ShellState.toggleLauncher() } }
+    IpcHandler { target: "work";      function toggle(): void { ShellState.toggleWork() } }
+    IpcHandler { target: "system";    function toggle(): void { ShellState.toggleSystem() } }
+    IpcHandler { target: "clipboard"; function toggle(): void { ShellState.toggleClipboard() } }
+    // Screenshot (Super+Print / Print via Sway binds, or the context menu). region() drops slurp then
+    // grim; screen() captures the whole output. Both save + copy + notify via the Screenshot service.
+    IpcHandler {
+        target: "screenshot"
+        function region(): void { Screenshot.region() }
+        function screen(): void { Screenshot.screen() }
+    }
     // `menu open` drops the root context menu just under the bar — for the Super+M keybind and for
     // scripting/preview (right-click builds it with a cursor position instead).
     IpcHandler { target: "menu";     function open(): void { ShellState.openMenu(16, 52, Menus.root()) } }

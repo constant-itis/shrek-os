@@ -7,3 +7,5 @@ singleton Network Network.qml
 singleton Notifications Notifications.qml
 singleton Mpris Mpris.qml
 singleton Tray Tray.qml
+singleton Clipboard Clipboard.qml
+singleton Screenshot Screenshot.qml

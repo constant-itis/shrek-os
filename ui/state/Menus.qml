@@ -17,7 +17,11 @@ QtObject {
         var items = [
             { label: "Applications…",   action: function () { ShellState.toggleLauncher() } },
             { label: "Terminal",        action: function () { terminal() } },
-            { label: "System settings", action: function () { ShellState.toggleSystem() } }
+            { label: "System settings", action: function () { ShellState.toggleSystem() } },
+            { separator: true },
+            { label: "Clipboard history",   action: function () { ShellState.toggleClipboard() } },
+            { label: "Screenshot (region)", action: function () { Screenshot.region() } },
+            { label: "Screenshot (screen)", action: function () { Screenshot.screen() } }
         ]
         if (Sway.activeToplevel) {
             items.push({ separator: true })
