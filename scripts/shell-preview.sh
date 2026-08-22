@@ -37,12 +37,18 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 &
     sleep 6
     shot() { grim -o "$OUT" "/work/out/preview/$1.png" 2>>/tmp/grim.log || grim "/work/out/preview/$1.png" 2>>/tmp/grim.log || echo "grim $1 failed"; }
+    # spawn a real window so the titlebar / border WM chrome is visible in the shots
+    swaymsg exec "foot --font=DejaVu Sans Mono:size=11" >/dev/null 2>&1 || true
+    sleep 3
     shot bar
-    "/work/$CACHE/quickshell" ipc call launcher toggle >/dev/null 2>&1 || true
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call launcher toggle >/dev/null 2>&1 || true
     sleep 2; shot launcher
-    "/work/$CACHE/quickshell" ipc call launcher toggle >/dev/null 2>&1 || true
-    "/work/$CACHE/quickshell" ipc call system toggle >/dev/null 2>&1 || true
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call launcher toggle >/dev/null 2>&1 || true
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call system toggle >/dev/null 2>&1 || true
     sleep 2; shot system
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call system toggle >/dev/null 2>&1 || true   # close the system drawer
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call menu open >/dev/null 2>&1 || true
+    sleep 2; shot menu
     swaymsg exit >/dev/null 2>&1 || true
     chown -R "$HOST_UID:$HOST_GID" /work/out/preview 2>/dev/null || true
     echo "--- previews ---"; ls -la /work/out/preview; [ -s /tmp/grim.log ] && { echo "grim log:"; cat /tmp/grim.log; } || true
