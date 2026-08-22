@@ -71,10 +71,22 @@ PanelWindow {
                 color: Tokens.surface
                 border.color: input.activeFocus ? Tokens.accent : Tokens.border
 
+                Text {
+                    id: prompt
+                    anchors.left: parent.left
+                    anchors.leftMargin: Tokens.spaceMd
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "›"
+                    color: Tokens.accent
+                    font.family: Tokens.fontMono
+                    font.pixelSize: Tokens.fontHeadline
+                    font.bold: true
+                }
+
                 TextInput {
                     id: input
                     anchors.fill: parent
-                    anchors.leftMargin: Tokens.spaceMd
+                    anchors.leftMargin: Tokens.spaceMd + 20
                     anchors.rightMargin: Tokens.spaceMd
                     verticalAlignment: TextInput.AlignVCenter
                     color: Tokens.text
@@ -102,7 +114,7 @@ PanelWindow {
             // ── results ──
             Item {
                 width: parent.width
-                height: parent.height - 40 - Tokens.spaceMd
+                height: parent.height - 40 - hints.height - 2 * Tokens.spaceMd
 
                 ListView {
                     id: list
@@ -195,6 +207,29 @@ PanelWindow {
                     color: Tokens.textFaint
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
+                }
+            }
+
+            // ── footer: keyboard hints + live result count ──
+            Item {
+                id: hints
+                width: parent.width
+                height: 16
+                Text {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "↑↓ select   ↵ open   esc close"
+                    color: Tokens.textFaint
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
+                }
+                Text {
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: launcher.results.length + (launcher.results.length === 1 ? " app" : " apps")
+                    color: Tokens.textFaint
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontCaption
                 }
             }
         }
