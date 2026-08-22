@@ -1,7 +1,9 @@
 # Dogfood-0 — boot the sealed image interactively and do real work in it
 
-**Status:** OPEN (2026-08-21). **M0 + M1 shipped** (branch `dogfood-m1`) — the sealed image boots
-interactively to a persistent Sway + Quickshell dev box with standard desktop services; M2/M3 next.
+**Status:** OPEN. **M0 + M1 + M2 shipped** — the sealed image boots interactively to a persistent
+Sway + Quickshell dev box with standard desktop services, the `shrek` CLI on `PATH`, and a `shrek-dev`
+Rust + C toolchain sysext that builds/tests shrek-os in the box. **M3** (`shrek run -- cargo test` live
+in the Work drawer = Dogfood-0 acceptance) is next.
 Backend/security feature development is **frozen for the duration** of
 this track (see §Parked). Dogfood-0 is a desktop/integration track: take the artifacts we already
 build (sealed dm-verity image + `shrek-desktop` sysext + the read-only Work-drawer wiring) and make
@@ -149,6 +151,39 @@ cycle** (enroll → write a `/home` marker + reboot → assert the marker surviv
 networking / audio / Bluetooth / portals / session units active — an **11-check** PASS/FAIL verdict
 (`dogfood-persist-probe` is the in-guest probe). M1 landed **4-boot reliability green** (`PASS=11
 FAIL=0`, `bluetooth=active`) after the login-race diagnostic scaffolding was stripped.
+
+## M2 implementation (as built)
+Gap #4a — the toolchain to build/test shrek-os **in the box**, plus the `shrek` front door on `PATH`
+(the owner hit `shrek: command not found`). Two parts, split by where each belongs:
+
+- **`shrek` CLI in the sealed base.** `shrek` is the Phase-6 user front door (std-only, dependency-free) —
+  a sealed-image citizen, not a dev-layer add-on. `scripts/build-in-container.sh` now installs it (and the
+  operator CLI `shrekctl`) into `/usr/libexec/shrek` and symlinks both onto `/usr/bin`. The privileged
+  daemons stay **off** `PATH`; `shrek run`/`shrek session` reach them via `SHREK_GATEKEEPERD` /
+  `SHREK_AGENTD` (baked in `etc/profile.d/10-shrek-env.sh` → `/usr/libexec/shrek/{gatekeeperd,agentd}`), so
+  the front door never shells out to a bare name.
+- **`shrek-dev` toolchain sysext.** A new signed dm-verity Onion layer (`layers/shrek-dev/`,
+  `scripts/build-dev-layer.sh`) carrying the **minimum** toolchain: `rustc` + `cargo` + `build-essential`
+  (cc/g++/make/libc6-dev) + `pkg-config` + `git`. No `rustup`, no pinned-1.95 vendoring, no
+  mkosi/qemu/docker — an editor (`nano`) already ships in the base. **Key finding:** the workspace is
+  edition-2021 with no MSRV pin, and the sealed default-members compile **offline with zero registry
+  crates**, so debian trixie's **stock `rustc` 1.85** builds *and* tests them (verified 2026-08-22 in a
+  clean container). The `bundled`-SQLite (`rusqlite`) + `ring` C/asm compiles live in the excluded broker
+  crates; `build-essential` covers them for a full-workspace dev build. Built like `shrek-desktop`
+  (`--base-tree <sealed-base closure> --overlay`, since mkosi 25.3 won't install `Packages=` into a sysext
+  without a base tree) so only the new toolchain files land in the DDI, signed with the Shrek key.
+- **Sealed-enable + store.** `image/overlay/usr/lib/shrek/onion-policy` gains `enable shrek-dev` (the
+  selection is sealed under dm-verity, never read from the untrusted store). `scripts/build-layers.sh
+  desktop` stages `shrek-dev*.raw` into the store **when it was built** — a listed-but-absent layer is
+  simply not merged, so a plain desktop store still works. Build order:
+  `build-desktop-layer.sh` → `build-dev-layer.sh` → `DOGFOOD=1 build-in-container.sh 1` →
+  `build-layers.sh desktop` → `dogfood-vm.sh`.
+
+**Verification:** `dogfood-persist-probe` gained an M2 stage — after the Onion merge it asserts `shrek` is
+on `PATH`, `shrek --help` runs, `rustc`/`cargo` are present (proving `shrek-dev` merged), and the
+toolchain actually **compiles** a dep-free crate offline (`M2 cargo-build=ok`). `scripts/dogfood-vm.sh`
+greps these into **5 added checks** (16-check verdict). M3 (`shrek run -- cargo test` → live Work-drawer
+row) is the remaining Dogfood-0 acceptance and is unchanged.
 
 ## Parked (do NOT build unless Dogfood-0 exposes it as a concrete blocker)
 Authority-mutation UX (grant/stop/promote), SAK/VT trusted path, SWAMP-5 (hybrid reranking), PN1
