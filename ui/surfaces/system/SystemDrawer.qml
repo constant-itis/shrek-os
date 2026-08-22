@@ -36,6 +36,70 @@ PanelWindow {
             font.bold: true
         }
 
+        // ── Quick toggles ──
+        Row {
+            width: parent.width
+            spacing: Tokens.spaceSm
+
+            component QuickToggle: Rectangle {
+                property string label: ""
+                property string state: ""
+                property bool active: false
+                property bool avail: true
+                property var act
+                width: (parent.width - 2 * Tokens.spaceSm) / 3
+                height: 56
+                radius: Tokens.radius
+                color: active ? Tokens.accentDim : Tokens.surface
+                border.color: active ? Tokens.accent : Tokens.border
+                opacity: avail ? 1 : 0.45
+                Behavior on color { ColorAnimation { duration: Tokens.animFast } }
+                Column {
+                    anchors.centerIn: parent
+                    spacing: 3
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: label
+                        color: active ? Tokens.accentText : Tokens.text
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        font.bold: true
+                    }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: state
+                        color: active ? Tokens.accentText : Tokens.textFaint
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                    }
+                }
+                MouseArea {
+                    anchors.fill: parent; enabled: avail; hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: if (act) act()
+                }
+            }
+
+            QuickToggle {
+                label: "Bluetooth"; avail: Bluetooth.available
+                active: Bluetooth.available && Bluetooth.enabled
+                state: !Bluetooth.available ? "no adapter" : (Bluetooth.enabled ? "on" : "off")
+                act: function () { Bluetooth.toggle() }
+            }
+            QuickToggle {
+                label: "Sound"; avail: Audio.ready
+                active: Audio.ready && !Audio.muted
+                state: !Audio.ready ? "—" : (Audio.muted ? "muted" : Math.round(Audio.volume * 100) + "%")
+                act: function () { Audio.toggleMute() }
+            }
+            QuickToggle {
+                label: "Focus"
+                active: Notifications.dnd
+                state: Notifications.dnd ? "on" : "off"
+                act: function () { Notifications.toggleDnd() }
+            }
+        }
+
         // ── Audio ──
         Column {
             width: parent.width
@@ -81,6 +145,17 @@ PanelWindow {
                     onPressed: (m) => Audio.setVolume(m.x / width)
                     onPositionChanged: (m) => Audio.setVolume(Math.max(0, Math.min(1, m.x / width)))
                 }
+            }
+
+            // output device
+            Text {
+                width: parent.width
+                visible: ("" + Audio.label).length > 0
+                text: Audio.label
+                color: Tokens.textFaint
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+                elide: Text.ElideRight
             }
         }
 

@@ -11,12 +11,17 @@ QtObject {
 
     readonly property var list: server.trackedNotifications
 
+    // Do Not Disturb: when on, incoming notifications are NOT tracked (no toast) — the sender still gets a
+    // valid reply, the notification just doesn't interrupt. A quiet, honest mute of the attention surface.
+    property bool dnd: false
+    function toggleDnd() { root.dnd = !root.dnd }
+
     property NotificationServer server: NotificationServer {
         keepOnReload: false
         bodySupported: true
         actionsSupported: true      // render + invoke the sender's action buttons (display + dismiss + act)
         actionIconsSupported: false
         imageSupported: true
-        onNotification: function (n) { n.tracked = true }
+        onNotification: function (n) { if (!root.dnd) n.tracked = true }
     }
 }
