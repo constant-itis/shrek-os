@@ -718,6 +718,25 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
                 Err(e) => eprintln!("gatekeeperd/t2_plane: WARN session-view write failed (display only, session unaffected): {e}"),
             }
         }
+    } else if let Some(meta) = &spec.session_meta {
+        // Dogfood-0 M3: a NON-swamp (loopback-only) T2 session commits no swamp identity above, but the
+        // Work drawer must still show it running. Write the effective-authority view here too — best-
+        // effort and identical in shape to the swamp path, keyed on `session_meta` exactly as the
+        // teardown `remove_view` below already is (the write had been coupled to the swamp identity
+        // block, asymmetric with that teardown, so a loopback session removed a view it never wrote).
+        // NOT part of any fail-closed transaction; a failure only logs and the session is unaffected.
+        let grant_paths: Vec<PathBuf> = spec
+            .rw_grant
+            .iter()
+            .chain(spec.build_grant.iter())
+            .chain(spec.grants.iter())
+            .map(|name| spec.anchor.join(name))
+            .collect();
+        let view = build_session_view(spec, meta, &grant_paths);
+        match crate::session_view::write_view(&crate::session_view::view_dir(), &view) {
+            Ok(p) => eprintln!("gatekeeperd/t2_plane: session-view written {} (non-swamp T2, effective tier={})", p.display(), view.tier),
+            Err(e) => eprintln!("gatekeeperd/t2_plane: WARN session-view write failed (display only, session unaffected): {e}"),
+        }
     }
 
     // Drive runsc directly (no shim, no containerd). Network: a granted egress session joins the
@@ -773,11 +792,13 @@ pub fn construct(spec: &T2Spec) -> io::Result<i32> {
             let _ = net_binding::remove_binding(&net_binding::binding_dir(), n.cont_ip);
         }
         let _ = authority_record::remove_record(&authority_record::authority_dir(), h);
-        // Phase-8 slice-1: remove the effective-authority view (C3 — no residual). Idempotent; keyed
-        // by the caller session id it was written under, and only present when session_meta was set.
-        if spec.session_meta.is_some() {
-            let _ = crate::session_view::remove_view(&crate::session_view::view_dir(), &spec.id);
-        }
+    }
+    // Phase-8 slice-1 / Dogfood-0 M3: remove the effective-authority view on EVERY teardown path —
+    // swamp OR non-swamp — keyed on `session_meta` exactly as the construct-time write now is. Pulled
+    // out of the swamp block above so a loopback-only session's view is not left as residue (C3 — no
+    // residual). Idempotent; a missing record is not an error.
+    if spec.session_meta.is_some() {
+        let _ = crate::session_view::remove_view(&crate::session_view::view_dir(), &spec.id);
     }
     // Slice-1b: tear the egress netns down (deletes the nft table + veth + netns). Leaves NO residual
     // plumbing — the fail-closed default is "no network".

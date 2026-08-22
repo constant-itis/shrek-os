@@ -37,6 +37,21 @@ grep -q '^dev:' "$BUILDROOT/etc/passwd" || {
 }
 echo "postinst: dev desktop user -> $(grep '^dev:' "$BUILDROOT/etc/passwd")"
 
+# Dogfood-0 (M3): the `swamp` system user+group. gatekeeperd writes its session/authority records
+# root:swamp 0640 (session_view.rs `swamp_ids()` resolves BOTH the swamp user in /etc/passwd and the
+# swamp group in /etc/group by NAME — absent either, the chown silently falls back to root:root and the
+# 0640 record is unreadable by anyone but root). The desktop `dev` user JOINS swamp so the read-only
+# SessionProvider can `cat` the records → a real `shrek run` T2 session appears LIVE in the Work drawer.
+# This is the record's designed second reader; the 0640/root:swamp C1 property is unchanged (a non-root,
+# non-swamp process still cannot read it).
+grep -q '^swamp:' "$BUILDROOT/etc/group" \
+    || echo 'swamp:x:20001:dev' >> "$BUILDROOT/etc/group"
+grep -q '^swamp:' "$BUILDROOT/etc/passwd" || {
+    echo 'swamp:x:20001:20001:Shrek swamp service:/nonexistent:/usr/sbin/nologin' >> "$BUILDROOT/etc/passwd"
+    echo 'swamp:!*:20000:0:99999:7:::' >> "$BUILDROOT/etc/shadow"
+}
+echo "postinst: swamp svc + dev membership -> $(grep '^swamp:' "$BUILDROOT/etc/group")"
+
 # Dogfood-0 (M1) LOGIN-RACE FIX: normalize the shadow files to the Debian-canonical DAC shape.
 # mkosi/sysusers creates /etc/shadow + /etc/gshadow as mode 000 root:root — readable only via
 # CAP_DAC_OVERRIDE. That interacts fatally with the Onion /etc confext merge: overlayfs re-checks
