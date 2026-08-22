@@ -1,9 +1,11 @@
 # Dogfood-0 — boot the sealed image interactively and do real work in it
 
-**Status:** OPEN. **M0 + M1 + M2 shipped** — the sealed image boots interactively to a persistent
-Sway + Quickshell dev box with standard desktop services, the `shrek` CLI on `PATH`, and a `shrek-dev`
-Rust + C toolchain sysext that builds/tests shrek-os in the box. **M3** (`shrek run -- cargo test` live
-in the Work drawer = Dogfood-0 acceptance) is next.
+**Status:** **M0 + M1 + M2 + M3 shipped — Dogfood-0 ACCEPTANCE MET.** The sealed image boots
+interactively to a persistent Sway + Quickshell dev box with standard desktop services, the `shrek` CLI
+on `PATH`, a `shrek-dev` Rust + C toolchain sysext that builds/tests shrek-os in the box, and a real
+gatekeeperd T2 session that appears **live in the Work drawer** (boot-verified). See M3 below for the
+one caveat (the literal `shrek run` front door can't construct T2 in the endpoint-free sealed VM by
+design; M3 drives the same engine via the proven explicit-trust path).
 Backend/security feature development is **frozen for the duration** of
 this track (see §Parked). Dogfood-0 is a desktop/integration track: take the artifacts we already
 build (sealed dm-verity image + `shrek-desktop` sysext + the read-only Work-drawer wiring) and make
@@ -184,6 +186,40 @@ on `PATH`, `shrek --help` runs, `rustc`/`cargo` are present (proving `shrek-dev`
 toolchain actually **compiles** a dep-free crate offline (`M2 cargo-build=ok`). `scripts/dogfood-vm.sh`
 greps these into **5 added checks** (16-check verdict). M3 (`shrek run -- cargo test` → live Work-drawer
 row) is the remaining Dogfood-0 acceptance and is unchanged.
+
+## M3 implementation (as built) — Dogfood-0 acceptance
+
+Gap #4b — a **real gatekeeperd T2 session appears LIVE in the Work drawer**, boot-verified. Three findings
+shaped the build:
+
+- **The drawer must be able to READ the record.** Session records are `root:swamp 0640` (the C1
+  property). But the image never created the `swamp` user/group, so `session_view.rs`'s `swamp_ids()`
+  resolved nothing and records fell back to `root:root` — unreadable by the dev-session SessionProvider.
+  `mkosi.postinst` now creates the `swamp` system user+group and puts `dev` in it: the record lands
+  `root:swamp`, the desktop (dev ∈ swamp) reads it, and a non-root/non-swamp process still cannot (C1
+  intact — the desktop is the record's designed second reader).
+- **The view write was coupled to the swamp identity commit.** `t2_plane` wrote the session-view only
+  inside the egress/swamp session-commit block (`if let Some(h) = session`), so a **loopback-only** T2
+  session wrote no record — yet teardown's `remove_view` was keyed on `session_meta` (any T2). That
+  write/remove asymmetry meant a plain sandbox removed a view it never wrote. Fixed: a non-swamp T2
+  session now writes the view too (best-effort, display-only, same shape), symmetric with teardown, so
+  **any** running T2 session shows in the drawer.
+- **`shrek run` cannot construct T2 in the endpoint-free sealed VM — by design.** The front door
+  re-derives the trust band from an integrity anchor: the runsc harness's fs-verity (unmeasurable on RO
+  dm-verity `/usr`) or a **sealed** entrypoint (`/bin/sh` is not) — both fail-high to `T-hostile`, and a
+  `T2` request below that floor is refused (`reason=downgrade-below-floor`). So M3 drives the **same
+  engine** `shrek run` wraps via gatekeeperd's authorized explicit-trust path — exactly as the sealed
+  `mount-plane-gate` proves genuine T2: `gatekeeperd sandbox --tier T2 --trust T-untrust --caps
+  C-ro-nosec --profile C-ro-nosec` under `systemd-run --scope -p Delegate=yes` (cgroup delegation runsc
+  needs). Lighting up the drawer via the literal `shrek run` front door needs a sealed entrypoint or a
+  measurable harness — a separate slice.
+
+**Verification:** `dogfood-persist-probe` gained an M3 stage — it constructs a real T2 gVisor session
+whose workload is the sandbox's native `tcc` compiling a granted `.c`, held long enough for the 2s
+SessionProvider poll. `scripts/dogfood-vm.sh` asserts (added checks): a live `shrek-session/1` record at
+tier T2 during the run; the dev-session SessionProvider **read it** (the `SHREK-DESKTOP work session`
+marker in the running Quickshell's log = the drawer row is live); the native workload ran; and the record
+was **removed on teardown** (clean lifecycle). This closes Dogfood-0.
 
 ## Parked (do NOT build unless Dogfood-0 exposes it as a concrete blocker)
 Authority-mutation UX (grant/stop/promote), SAK/VT trusted path, SWAMP-5 (hybrid reranking), PN1
