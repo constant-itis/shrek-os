@@ -1,0 +1,4 @@
+# Dogfood-0 (M1): the dev desktop user runs admin commands without a password. dev's own password is
+# LOCKED (passwd -l shape in the sealed /etc/shadow); admin goes through this NOPASSWD rule instead.
+# Baked into the sealed /etc (read-only dm-verity at runtime). sudoers.d files must be mode 0440.
+dev ALL=(ALL) NOPASSWD:ALL

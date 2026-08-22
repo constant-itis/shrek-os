@@ -1,0 +1,15 @@
+# Dogfood-0 (M1) — stateless DHCP on the VM's virtio NIC via systemd-networkd.
+#
+# Networking is "stateless-functional": no per-boot state is persisted (nothing in /home), the address
+# is simply re-leased on every boot — so this needs NO writable /var and survives the volatile-state
+# model. Matches the usual predictable names for a virtio-net device (enp*/ens*) plus the classic eth*.
+# systemd-resolved provides DNS (see the /etc/resolv.conf → stub symlink baked in the overlay).
+[Match]
+Name=en* eth*
+
+[Network]
+DHCP=yes
+
+[DHCPv4]
+UseDNS=yes
+UseHostname=no

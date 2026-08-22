@@ -13,3 +13,53 @@ grep -q '^shrek:' "$BUILDROOT/etc/passwd" || {
     echo 'shrek:!*:19723:0:99999:7:::' >> "$BUILDROOT/etc/shadow"
 }
 echo "postinst: shrek control-plane user -> $(grep '^shrek:' "$BUILDROOT/etc/passwd")"
+
+# Dogfood-0 (M1): the real, non-root DESKTOP user (uid 1000). Replaces the M0 root tty1 autologin —
+# getty@tty1 now autologins `dev` (image/overlay/.../getty@tty1.service.d/autologin.conf), and sway
+# runs as this user. NO video/render/input groups: the ACTIVE logind session gets the DRM/input device
+# ACLs via systemd-logind uaccess, so membership is unnecessary. dev's HOME is /home/dev on the
+# persistent shrek-data disk (home.mount + tmpfiles.d/shrek-home.conf), created on first boot. Baked
+# here (runtime /etc is read-only dm-verity).
+#
+# PASSWORD: a LOCKED-but-VALID sha512 hash (`!` prefix + a real hash of `shrek`), i.e. the `passwd -l`
+# shape — NOT the hash-LESS `!*` used for the nologin `shrek` control-plane user, and NOT an empty
+# password. The `!` prefix disables manual password login (autologin uses `login -f`, which skips
+# authentication), while the real, non-expired hash means pam_unix acct_mgmt returns SUCCESS on a normal
+# boot. (An empty/hash-less field is deliberately avoided: it would only mask the real boot-time race.)
+# Admin work inside the dogfood box goes through NOPASSWD sudo (sudoers.d/dev-nopasswd), not this
+# password. Throwaway dogfood credential (like keys/ — not a real secret).
+DEV_PW='!$6$Ylf7qC855/ESKbuC$5K7c15ydx9s3vgGnYOtXg5nfDi0NaUuSBfgIEJdN5ilgPab9h/i3jXUpJbHFPla6Leq9S5ZLrvfM2TnRzrECh.'
+grep -q '^dev:' "$BUILDROOT/etc/group" \
+    || echo 'dev:x:1000:' >> "$BUILDROOT/etc/group"
+grep -q '^dev:' "$BUILDROOT/etc/passwd" || {
+    echo 'dev:x:1000:1000:Shrek OS dogfood dev:/home/dev:/bin/bash' >> "$BUILDROOT/etc/passwd"
+    echo "dev:${DEV_PW}:20000:0:99999:7:::" >> "$BUILDROOT/etc/shadow"
+}
+echo "postinst: dev desktop user -> $(grep '^dev:' "$BUILDROOT/etc/passwd")"
+
+# Dogfood-0 (M1) LOGIN-RACE FIX: normalize the shadow files to the Debian-canonical DAC shape.
+# mkosi/sysusers creates /etc/shadow + /etc/gshadow as mode 000 root:root — readable only via
+# CAP_DAC_OVERRIDE. That interacts fatally with the Onion /etc confext merge: overlayfs re-checks
+# every lower-inode access with the MOUNTER's credentials, and the merge is performed by gatekeeperd
+# (CapabilityBoundingSet=CAP_SYS_ADMIN — deliberately NO CAP_DAC_OVERRIDE), so on any boot where the
+# shrek-conf confext merges, mode-000 /etc/shadow becomes unreadable by EVERYONE, even full-caps root.
+# login's pam_unix acct_mgmt then gets getspnam()==NULL -> PAM_AUTHINFO_UNAVAIL (silent) -> pam_deny
+# -> the intermittent tty1 "Authentication failure" (green boots were logins that won the race against
+# the merge). 0640 root:shadow (gid 42) is the stock Debian shape: root reads via the OWNER bit and
+# unix_chkpwd via the shadow GROUP bit — no capability needed on either side of the overlay, so the
+# account phase is merge-order-independent. gatekeeperd's bounding set stays untouched.
+for f in shadow gshadow shadow- gshadow-; do
+    [ -f "$BUILDROOT/etc/$f" ] || continue
+    chown 0:42 "$BUILDROOT/etc/$f"      # root:shadow (gid 42 baked in /etc/group)
+    chmod 0640 "$BUILDROOT/etc/$f"
+done
+echo "postinst: shadow files normalized -> $(ls -ln "$BUILDROOT/etc/shadow" | awk '{print $1, $3":"$4}')"
+
+# Dogfood-0 (M1): the desktop sysext carries Debian's bluez package, whose packaged
+# bluetooth.service has ConfigurationDirectory=bluetooth and ConfigurationDirectoryMode=0555.
+# Runtime /etc is sealed read-only, so the directory must already exist with the exact mode;
+# otherwise systemd fails the service at CONFIGURATION_DIRECTORY before bluetoothd execs.
+install -d -o 0 -g 0 -m 0555 "$BUILDROOT/etc/bluetooth"
+[ -f "$BUILDROOT/etc/bluetooth/main.conf" ] && chown 0:0 "$BUILDROOT/etc/bluetooth/main.conf"
+[ -f "$BUILDROOT/etc/bluetooth/main.conf" ] && chmod 0644 "$BUILDROOT/etc/bluetooth/main.conf"
+echo "postinst: bluetooth config dir -> $(ls -ldn "$BUILDROOT/etc/bluetooth" | awk '{print $1, $3":"$4}')"

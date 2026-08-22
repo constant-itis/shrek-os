@@ -1,9 +1,10 @@
 # Dogfood-0 (M0) — auto-start the Shrek desktop on the first VT under the autologin PAM/logind session.
 #
-# Sourced by /etc/profile for the root login shell that agetty --autologin creates on tty1. Guarded so
-# it fires ONLY on a real graphical VT that has a DRM device — so it NEVER runs on the headless CI
-# serial gate (std-vga, no /dev/dri), leaving scripts/desktop-sealed-proof.sh and the other sealed
-# proofs unaffected.
+# Sourced by /etc/profile for the login shell that agetty --autologin creates on tty1 — the non-root
+# `dev` user as of Dogfood-0 M1 (was root in M0). Guarded so it fires ONLY on a real graphical VT that
+# has a DRM device — so it NEVER runs on the headless CI serial gate (std-vga, no /dev/dri), leaving
+# scripts/desktop-sealed-proof.sh and the other sealed proofs unaffected. dev's session owns seat0
+# (pam_systemd), so sway's libseat→logind backend gets the DRM/input uaccess ACLs without group edits.
 #
 #   XDG_VTNR=1          set by pam_systemd for the tty1 session (present because libpam-systemd is baked)
 #   WAYLAND_DISPLAY unset  don't recurse if a session is already up

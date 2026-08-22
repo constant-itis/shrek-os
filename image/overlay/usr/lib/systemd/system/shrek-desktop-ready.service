@@ -1,0 +1,29 @@
+# Dogfood-0 (M1) — barrier that gates the tty1 dev autologin until the Onion merge is verifiably settled.
+#
+# The dev tty1 login intermittently failed PAM ("Authentication failure" on tty1, PAM:accounting in the
+# audit, with NO pam_unix debug = the module never loaded) because getty→login ran its PAM stack while
+# the boot-time sysext (/usr) + confext (/etc) merge was still settling, so a PAM module/config read was
+# not yet resolvable. shrek-onion.service "Finished" does not guarantee the overlays are fully live for a
+# fresh process. This oneshot waits until login's real prerequisites — the login binary + its shared libs,
+# /etc/pam.d/{login,common-account}, and the merged shrek-desktop binary (proves the sysext overlay is
+# active) — are all readable, THEN lets getty@tty1 start (getty's drop-in orders After + Wants this).
+# It always exits 0 (a timeout must not wedge boot); it only *delays* login until the merge is ready.
+# The `getent shadow dev` gate is the load-bearing one: it proves the PAM account phase's exact NSS
+# read works from a root context — i.e. /etc/shadow is readable THROUGH the (possibly confext-merged)
+# /etc view. A regression of the shadow-DAC/overlay-mounter class (see image/mkosi.postinst) turns into
+# a visible 30s barrier timeout on the console instead of a silent intermittent login flake.
+[Unit]
+Description=Shrek desktop login-readiness barrier (Dogfood-0 M1 — gates tty1 autologin on Onion merge settle)
+Documentation=file:///usr/share/doc/shrek/dogfood-0.md
+After=shrek-onion.service systemd-user-sessions.service
+Wants=shrek-onion.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'sync; n=0; while [ $n -lt 30 ]; do if test -x /usr/bin/login && test -r /etc/pam.d/login && test -r /etc/pam.d/common-account && test -r /usr/lib/x86_64-linux-gnu/security/pam_unix.so && test -x /usr/sbin/unix_chkpwd && getent shadow dev >/dev/null 2>&1 && command -v shrek-desktop >/dev/null 2>&1 && ! ldd /usr/bin/login 2>&1 | grep -q "not found"; then echo "shrek-desktop-ready: login prerequisites resolvable after ${n}s"; exit 0; fi; sleep 1; n=$((n + 1)); done; echo "shrek-desktop-ready: TIMEOUT after ${n}s — proceeding anyway"; exit 0'
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

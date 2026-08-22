@@ -10,7 +10,12 @@
 # Overlay contents staged by build-in-container.sh STAGE 1 (release binaries + installed docs).
 # Generated every build; the tracked source under image/overlay/ is only the systemd unit files.
 /image/overlay/usr/libexec/
-/image/overlay/usr/share/
+/image/overlay/usr/share/*
+!/image/overlay/usr/share/dbus-1/
+!/image/overlay/usr/share/dbus-1/system.d/
+!/image/overlay/usr/share/dbus-1/system.d/bluetooth.conf
+!/image/overlay/usr/share/dbus-1/system-services/
+!/image/overlay/usr/share/dbus-1/system-services/org.bluez.service
 # S7: per-build version input (build-in-container.sh writes it), and mkosi's local cache/output dirs.
 /image/mkosi.version
 /image/mkosi.cache/
@@ -42,9 +47,18 @@
 # these are build inputs, not tracked units (the real units live under image/overlay/usr/lib).
 /image/overlay/etc/systemd/system/shrek-mount-gate.service
 /image/overlay/etc/systemd/system/shrek-desktop-gate.service
-# Dogfood artifacts (generated VM definition + captured screenshots)
+# Dogfood-0 (M1): DOGFOOD-only enable symlinks (home.mount + the persistence probe) — staged by
+# DOGFOOD=1, removed on a normal build. The unit FILES under image/overlay/usr/lib are tracked source;
+# only the .wants enablement is a build input (like the masks above). Scoped so the tracked symlinks in
+# the same .wants dirs (shrek-onion, gatekeeperd, systemd-networkd, …) stay under version control.
+/image/overlay/usr/lib/systemd/system/local-fs.target.wants/home.mount
+/image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-dogfood-persist.service
+# Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;
+# the daily persistent /home disk out/shrek-data.raw is also under out/ and never committed).
 /out/dogfood-shrek.xml
 /out/dogfood_VARS.fd
 /out/dogfood-screen*.png
 /out/dogfood-screen*.ppm
 /out/dogfood-console.log
+/out/dogfood-data.raw
+/out/shrek-data.raw
