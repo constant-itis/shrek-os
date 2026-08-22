@@ -49,6 +49,10 @@ PanelWindow {
         Row {
             anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: Tokens.spaceMd }
             spacing: Tokens.spaceLg
+            // Media transport + system tray — each hides itself when empty (no player / no tray items), so
+            // the common case is just the status cluster + work + clock + power (no gap reserved).
+            MediaControl { anchors.verticalCenter: parent.verticalCenter }
+            TrayCluster { anchors.verticalCenter: parent.verticalCenter; window: bar }
             StatusCluster { anchors.verticalCenter: parent.verticalCenter }
             WorkPill { anchors.verticalCenter: parent.verticalCenter; session: bar.session }
             Clock { anchors.verticalCenter: parent.verticalCenter }
