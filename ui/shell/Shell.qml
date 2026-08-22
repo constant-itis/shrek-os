@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Io
 import QtQuick
 import "../providers"
+import "../services"
 import "../state"
 import "../surfaces/desktop"
 import "../surfaces/bar"
@@ -25,15 +26,37 @@ ShellRoot {
     // Phase-8 Slice-1 — the proven read-only Work path.
     SessionProvider { id: sessionProvider }
 
-    // Surfaces
-    Desktop {}
-    Bar { session: sessionProvider }
-    Launcher {}
-    WorkDrawer { provider: sessionProvider }
-    SystemDrawer {}
-    Toasts {}
-    Osd {}
-    ContextMenu {}
+    // The output that follows focus, used by the single-instance overlays so a drawer/launcher/menu opens
+    // on the monitor you're working on rather than being stranded on output 0. Falls back to the first
+    // screen before the Sway IPC reports a focused monitor (and on single-monitor / headless preview).
+    readonly property var activeScreen: Sway.focusedScreen
+        || (Quickshell.screens.length > 0 ? Quickshell.screens[0] : null)
+
+    // Per-monitor surfaces — one Bar and one Desktop backdrop on every screen (Variants instantiates the
+    // delegate once per Quickshell.screens entry and injects `modelData` = that ShellScreen).
+    Variants {
+        model: Quickshell.screens
+        Bar {
+            required property var modelData
+            screen: modelData
+            session: sessionProvider
+        }
+    }
+    Variants {
+        model: Quickshell.screens
+        Desktop {
+            required property var modelData
+            screen: modelData
+        }
+    }
+
+    // Single-instance overlays — rendered on the focused output.
+    Launcher { screen: shell.activeScreen }
+    WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
+    SystemDrawer { screen: shell.activeScreen }
+    Toasts { screen: shell.activeScreen }
+    Osd { screen: shell.activeScreen }
+    ContextMenu { screen: shell.activeScreen }
 
     // IPC seam for Sway keybinds. `system` is wired here so Super+S is inert-safe until the SYSTEM
     // drawer lands; its toggle just flips ShellState (no surface renders it yet).

@@ -13,6 +13,13 @@ QtObject {
     readonly property var workspaces: I3.workspaces
     readonly property var focusedWorkspace: I3.focusedWorkspace
 
+    // Outputs (multi-monitor). I3Monitor { name, focused, rect, screen, activeWorkspace } where `screen`
+    // is the matching Quickshell ShellScreen. `focusedScreen` is the ShellScreen the active output maps to
+    // (null until the compositor IPC connects) — surfaces that should follow focus target it.
+    readonly property var monitors: I3.monitors
+    readonly property var focusedMonitor: I3.focusedMonitor
+    readonly property var focusedScreen: I3.focusedMonitor ? I3.focusedMonitor.screen : null
+
     // Focused window (wlr-foreign-toplevel): Toplevel { title, appId, activated }, or null.
     readonly property var activeToplevel: ToplevelManager.activeToplevel
 
