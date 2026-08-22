@@ -158,12 +158,13 @@ build phase:
 | Flag | Slice 1 | Rationale |
 |---|---|---|
 | `I3` | ON | native Sway/i3 IPC; workspaces+focus, event-driven, no text parsing |
+| `X11` | ON | **required for `I3`** — the i3/Sway IPC module lives under `src/x11` and only builds when `X11=ON` (verified in Quickshell v0.3.1 `src/CMakeLists.txt`). Links `libxcb` (build: `libxcb1-dev`, runtime: `libxcb1`) but runs **no X server** — Xwayland stays disabled; dormant client linkage only. Chosen over shelling out to `swaymsg` text (native = stable/fast/secure). |
 | `WAYLAND_TOPLEVEL_MANAGEMENT` | ON | window titles/app-ids via wlr-foreign-toplevel (compositor-agnostic) |
 | `SERVICE_PIPEWIRE` | ON | audio direct to libpipewire; lib already shipped |
 | `SERVICE_NOTIFICATIONS` | ON | Quickshell *is* the notif server; one audited surface |
 | `BLUETOOTH` | ON | native BlueZ D-Bus; `bluez` already shipped; empty-adapter-OK |
 | `SERVICE_UPOWER` | ON | battery; cheap, hardware-gated |
-| `SESSION_LOCK` `STATUS_NOTIFIER` `MPRIS` `NETWORK` `PAM` `POLKIT` `GREETD` `SCREENCOPY` `X11` `HYPRLAND` | OFF | deferred / not on path / networkd-not-NM; keep closure lean |
+| `SESSION_LOCK` `STATUS_NOTIFIER` `MPRIS` `NETWORK` `PAM` `POLKIT` `GREETD` `SCREENCOPY` `HYPRLAND` | OFF | deferred / not on path / networkd-not-NM; keep closure lean |
 
 Shell-out survives only for `brightnessctl` (no backend; hw-gated). Flag names are `# VERIFY`-at-build
 against the pinned Quickshell tag. Optional identity UI font is a later, non-blocking add.

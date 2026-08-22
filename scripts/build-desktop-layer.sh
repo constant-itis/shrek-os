@@ -43,7 +43,8 @@ docker run --rm --privileged \
       git cmake ninja-build build-essential pkg-config \
       qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
       qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev \
-      libwayland-dev libwayland-bin wayland-protocols libcli11-dev libdrm-dev >/dev/null
+      libwayland-dev libwayland-bin wayland-protocols libcli11-dev libdrm-dev \
+      libxcb1-dev >/dev/null   # Quickshell.I3 (Sway IPC) lives under src/x11 -> X11=ON -> find_package(XCB)
 
     # (1) stage the QML source tree
     rm -rf "/work/$OVL/usr/share/shrek/ui"
@@ -72,11 +73,15 @@ docker run --rm --privileged \
       [ "$QS_TAG" = "AUTO-FIRST-BUILD" ] && QS_TAG="$(git tag --sort=-v:refname | head -1)" && \
         echo "SHREK-QS-RESOLVED-TAG $QS_TAG (record into image/supply/desktop.pins)"
       git checkout --quiet "$QS_TAG" || true
-      # Feature set verified green by scripts/desktop-smoke.sh: keep WAYLAND + WLR layer-shell (the
-      # PanelWindow surfaces); disable the rest to shrink the dep closure.
+      # WAYLAND + WLR layer-shell (PanelWindow surfaces) always on. Backends are enabled INCREMENTALLY
+      # per Desktop Slice-1 phase (docs/desktop-slice1-plan.md §5/§8) — each links a library ALREADY in
+      # the layer, so this adds native event-driven consumers, not a new dep closure. Phase 1: I3 (Sway
+      # workspaces/window IPC) + WAYLAND_TOPLEVEL_MANAGEMENT (focused-window title via wlr-foreign-
+      # toplevel). Phases 3/4 flip PIPEWIRE/BLUETOOTH/UPOWER then NOTIFICATIONS. Changing these flags
+      # needs FORCE_QS=1 (else the staged binary is reused and the flags do not take effect).
       cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-        -DHYPRLAND=OFF -DX11=OFF -DI3=OFF -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
-        -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=OFF \
+        -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+        -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
         -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
         -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
         -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF

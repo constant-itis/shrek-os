@@ -39,7 +39,7 @@ docker run --rm --privileged \
       git cmake ninja-build build-essential pkg-config \
       qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
       qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev libwayland-dev libwayland-bin \
-      wayland-protocols libcli11-dev libdrm-dev
+      wayland-protocols libcli11-dev libdrm-dev libxcb1-dev
     # BEST-EFFORT extras — a wrong/absent name must NOT sink the whole run.
     for p in qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
              qml6-module-qtquick-controls qt6-declarative-dev-tools qt6-shadertools-dev \
@@ -88,8 +88,8 @@ QML
     # Minimal feature set: keep WAYLAND + WAYLAND_WLR_LAYERSHELL ON (layer-shell = PanelWindow, the
     # bar/drawer surfaces); disable everything else to shrink the dep closure for the smoke.
     cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-      -DHYPRLAND=OFF -DX11=OFF -DI3=OFF -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
-      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=OFF \
+      -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
       -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
       -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
       -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF >/tmp/qs-cmake.log 2>&1 \
