@@ -18,7 +18,7 @@ HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 pin() { grep -E "^[[:space:]]*$1[[:space:]]*=" image/supply/desktop.pins | head -1 | sed 's/#.*//' | cut -d'"' -f2; }
 QS_REPO="$(pin repo)"; QS_TAG="$(pin quickshell_tag)"
 CACHE=out/qs-cache
-FLAGS="tag=${QS_TAG};I3;X11;TOPLEVEL;PIPEWIRE;BLUETOOTH;UPOWER;NOTIFICATIONS"
+FLAGS="tag=${QS_TAG};I3;X11;TOPLEVEL;PIPEWIRE;BLUETOOTH;UPOWER;NOTIFICATIONS;STATUS_NOTIFIER;MPRIS"
 
 mkdir -p "$CACHE"
 if [ "${FORCE_QS:-0}" = 1 ] || [ ! -x "$CACHE/quickshell" ] || [ "$(cat "$CACHE/flags.txt" 2>/dev/null || true)" != "$FLAGS" ]; then
@@ -44,7 +44,7 @@ if [ "${FORCE_QS:-0}" = 1 ] || [ ! -x "$CACHE/quickshell" ] || [ "$(cat "$CACHE/
       cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
         -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=ON -DNETWORK=OFF \
         -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
-        -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=ON -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
+        -DSERVICE_STATUS_NOTIFIER=ON -DSERVICE_PIPEWIRE=ON -DSERVICE_MPRIS=ON -DSERVICE_PAM=OFF \
         -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=ON -DSERVICE_NOTIFICATIONS=ON \
         -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF >/tmp/cmake.log 2>&1 || { echo "CMAKE FAILED"; tail -40 /tmp/cmake.log; exit 1; }
       ninja -C build >/tmp/ninja.log 2>&1 || { echo "BUILD FAILED"; tail -40 /tmp/ninja.log; exit 1; }
