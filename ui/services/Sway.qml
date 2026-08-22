@@ -16,6 +16,10 @@ QtObject {
     // Focused window (wlr-foreign-toplevel): Toplevel { title, appId, activated }, or null.
     readonly property var activeToplevel: ToplevelManager.activeToplevel
 
+    // Live ObjectModel of ALL open windows (wlr-foreign-toplevel): Toplevel { title, appId, activated,
+    // activate(), close() }. Drives the bar's window list / taskbar.
+    readonly property var toplevels: ToplevelManager.toplevels
+
     // Ordinary compositor command (e.g. switch workspace). Not an authority operation.
     function dispatch(cmd) { I3.dispatch(cmd) }
 }

@@ -38,10 +38,11 @@ PanelWindow {
             Workspaces { anchors.verticalCenter: parent.verticalCenter }
         }
 
-        // centre: focused window
-        WindowTitle {
+        // centre: live window list (taskbar) — click to focus, middle-click to close
+        WindowList {
             anchors.centerIn: parent
-            width: Math.min(implicitWidth, body.width * 0.4)
+            width: Math.min(implicitWidth, body.width * 0.46)
+            clip: true
         }
 
         // right module
@@ -51,6 +52,7 @@ PanelWindow {
             StatusCluster { anchors.verticalCenter: parent.verticalCenter }
             WorkPill { anchors.verticalCenter: parent.verticalCenter; session: bar.session }
             Clock { anchors.verticalCenter: parent.verticalCenter }
+            PowerButton { anchors.verticalCenter: parent.verticalCenter }
         }
     }
 }
