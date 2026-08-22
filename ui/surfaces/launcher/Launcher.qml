@@ -19,7 +19,12 @@ PanelWindow {
     color: "transparent"   // scrim is an animated child so it can fade in
 
     property int sel: 0
-    readonly property var results: Applications.results
+    // `>` prefix = run-command mode: one actionable "run this" row instead of an app search.
+    readonly property bool runMode: input.text.charAt(0) === ">"
+    readonly property string runCmd: runMode ? input.text.substring(1).trim() : ""
+    readonly property var results: runMode
+        ? (runCmd.length > 0 ? [{ run: true, name: runCmd, genericName: "Run command" }] : [])
+        : Applications.results
 
     // Entrance motion: 0 = closed, 1 = open. Deferred to the next tick (Qt.callLater) so the Behavior
     // animates from 0 on each show instead of snapping to the bound value. Layer-shell windows are torn
@@ -39,6 +44,7 @@ PanelWindow {
     }
     function close() { ShellState.closeAll() }
     function launchSel() {
+        if (runMode) { if (runCmd.length > 0) Applications.run(runCmd); close(); return }
         if (sel >= 0 && sel < results.length)
             Applications.launch(results[sel])
         close()
@@ -116,9 +122,11 @@ PanelWindow {
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
                     clip: true
-                    onTextChanged: { Applications.query = text; launcher.sel = 0 }
+                    onTextChanged: { Applications.query = launcher.runMode ? "" : text; launcher.sel = 0 }
                     Keys.onDownPressed: launcher.move(1)
                     Keys.onUpPressed: launcher.move(-1)
+                    Keys.onTabPressed: launcher.move(1)
+                    Keys.onBacktabPressed: launcher.move(-1)
                     Keys.onReturnPressed: launcher.launchSel()
                     Keys.onEnterPressed: launcher.launchSel()
                     Keys.onEscapePressed: launcher.close()
@@ -127,7 +135,7 @@ PanelWindow {
                         anchors.fill: parent
                         verticalAlignment: Text.AlignVCenter
                         visible: input.text.length === 0
-                        text: "Search apps…"
+                        text: "Search apps…   › to run a command"
                         color: Tokens.textFaint
                         font: input.font
                     }
@@ -226,7 +234,8 @@ PanelWindow {
                 Text {
                     anchors.centerIn: parent
                     visible: launcher.results.length === 0
-                    text: input.text.length === 0 ? "No applications found" : "No matches"
+                    text: launcher.runMode ? "Type a command to run…"
+                          : (input.text.length === 0 ? "No applications found" : "No matches")
                     color: Tokens.textFaint
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -249,7 +258,11 @@ PanelWindow {
                 Text {
                     anchors.right: parent.right
                     anchors.verticalCenter: parent.verticalCenter
-                    text: launcher.results.length + (launcher.results.length === 1 ? " app" : " apps")
+                    text: launcher.runMode
+                          ? "↵ runs a command"
+                          : (input.text.length === 0
+                             ? (launcher.results.length + " apps · recents first")
+                             : (launcher.results.length + (launcher.results.length === 1 ? " result" : " results")))
                     color: Tokens.textFaint
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontCaption
