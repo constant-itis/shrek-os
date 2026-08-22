@@ -6,6 +6,7 @@ import "../state"
 import "../surfaces/bar"
 import "../surfaces/launcher"
 import "../surfaces/work"
+import "../surfaces/system"
 
 // Shell.qml — composition root (loaded by the config-folder entry ui/shell.qml).
 //
@@ -24,6 +25,7 @@ ShellRoot {
     Bar { session: sessionProvider }
     Launcher {}
     WorkDrawer { provider: sessionProvider }
+    SystemDrawer {}
 
     // IPC seam for Sway keybinds. `system` is wired here so Super+S is inert-safe until the SYSTEM
     // drawer lands; its toggle just flips ShellState (no surface renders it yet).

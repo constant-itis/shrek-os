@@ -37,6 +37,7 @@ PanelWindow {
     Row {
         anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: Tokens.spaceMd }
         spacing: Tokens.spaceLg
+        StatusCluster { anchors.verticalCenter: parent.verticalCenter }
         WorkPill { anchors.verticalCenter: parent.verticalCenter; session: bar.session }
         Clock { anchors.verticalCenter: parent.verticalCenter }
     }
