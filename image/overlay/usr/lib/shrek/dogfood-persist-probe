@@ -80,4 +80,25 @@ asdev systemctl --user start pipewire.service wireplumber.service xdg-desktop-po
 for u in dbus.socket pipewire wireplumber xdg-desktop-portal; do
     say "SVC user $u=$(asdev systemctl --user is-active "$u" 2>/dev/null || echo unknown)"
 done
+
+# --- Dogfood-0 M2: user CLI on PATH (base) + toolchain sysext merged (shrek-dev) ------------------------
+# `shrek` ships in the sealed base on /usr/bin (the owner hit `shrek: command not found`); rustc/cargo
+# arrive only via the shrek-dev Onion sysext merge. Prove the CLI resolves and the toolchain can actually
+# COMPILE (a dep-free crate, offline) — not merely that the binaries are present.
+say "M2 shrek=$(command -v shrek 2>/dev/null || echo MISSING)"
+if shrek --help >/dev/null 2>&1; then say "M2 shrek-help=ok"; else say "M2 shrek-help=FAIL"; fi
+say "M2 rustc=$(rustc --version 2>/dev/null || echo MISSING)"
+say "M2 cargo=$(cargo --version 2>/dev/null || echo MISSING)"
+SM=$(mktemp -d 2>/dev/null || echo /tmp/m2smoke)
+mkdir -p "$SM/src"
+printf 'fn main(){println!("shrek-m2-ok");}\n' > "$SM/src/main.rs"
+printf '[package]\nname="m2smoke"\nversion="0.0.0"\nedition="2021"\n\n[[bin]]\nname="m2smoke"\npath="src/main.rs"\n' > "$SM/Cargo.toml"
+if ( cd "$SM" && CARGO_HOME="$SM/.cargo" cargo build --offline --quiet 2>/dev/null \
+       && [ "$("$SM/target/debug/m2smoke" 2>/dev/null)" = "shrek-m2-ok" ] ); then
+    say "M2 cargo-build=ok"
+else
+    say "M2 cargo-build=FAIL"
+fi
+rm -rf "$SM" 2>/dev/null || true
+
 say "DONE boot=$n"

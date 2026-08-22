@@ -121,5 +121,19 @@ svc xdg-desktop-portal '^active'
 [ -s out/dogfood-screen-2.png ] && ok "post-reboot desktop screenshot captured (out/dogfood-screen-2.png)" \
   || bad "no post-reboot desktop screenshot"
 
-echo "--- M1 tally: PASS=$pass FAIL=$fail ---"
-[ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1: GREEN ===" || { echo "=== Dogfood-0 M1: NOT GREEN — inspect $LOG ==="; exit 1; }
+# --- Dogfood-0 M2: `shrek` on PATH (base) + shrek-dev toolchain sysext merged + it can COMPILE ----------
+m2() { # $1 = probe key after "SHREK-DOGFOOD M2 ", $2 = value regex that counts as pass, $3 = label
+  line=$(grep -a "SHREK-DOGFOOD M2 $1=" "$LOG" | tail -1 | tr -d '\r' || true)
+  val=${line#*"$1="}
+  if   [ -z "$line" ];              then bad "$3 — not reported (probe did not reach the M2 stage)"
+  elif echo "$val" | grep -qE "$2"; then ok  "$3 ($val)"
+  else                                   bad "$3=$val (expected $2)"; fi
+}
+m2 shrek      '^/usr/bin/shrek$|/shrek$' "shrek on PATH"
+m2 shrek-help '^ok$'                     "shrek --help runs"
+m2 rustc      '^rustc '                  "rustc present (shrek-dev merged)"
+m2 cargo      '^cargo '                  "cargo present (shrek-dev merged)"
+m2 cargo-build '^ok$'                    "toolchain compiles a crate offline"
+
+echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
+[ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }
