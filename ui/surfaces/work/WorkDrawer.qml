@@ -12,6 +12,7 @@ import "../../state"
 PanelWindow {
     id: drawer
     property var provider
+    readonly property int count: provider ? provider.sessions.length : 0
 
     WlrLayershell.layer: WlrLayer.Top
     visible: ShellState.workOpen
@@ -39,20 +40,63 @@ PanelWindow {
         opacity: drawer.anim
         transform: Translate { x: (1 - drawer.anim) * 24 }
 
-        Text {
-            text: "Work"
-            color: Tokens.text
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontTitle
-            font.bold: true
+        // header — title + live count badge + the Shrek-native framing: every row is an ISOLATED
+        // gVisor T2 sandbox with its own tier/trust, not just a window.
+        Column {
+            width: parent.width
+            spacing: 3
+            Row {
+                width: parent.width
+                spacing: Tokens.spaceSm
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "Work"
+                    color: Tokens.text
+                    font.family: Tokens.fontFamily
+                    font.pixelSize: Tokens.fontTitle
+                    font.bold: true
+                }
+                Rectangle {
+                    anchors.verticalCenter: parent.verticalCenter
+                    visible: drawer.count > 0
+                    height: 18
+                    width: cnt.implicitWidth + 2 * Tokens.spaceSm
+                    radius: Tokens.radiusFull
+                    color: Tokens.accentDim
+                    Text {
+                        id: cnt
+                        anchors.centerIn: parent
+                        text: drawer.count
+                        color: Tokens.accentText
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                        font.bold: true
+                    }
+                }
+            }
+            Text {
+                width: parent.width
+                text: drawer.count > 0
+                      ? (drawer.count + " isolated session" + (drawer.count === 1 ? "" : "s"))
+                      : "No sandboxed work running"
+                color: Tokens.textFaint
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+            }
         }
 
-        Text {
-            visible: !drawer.provider || drawer.provider.sessions.length === 0
-            text: "Nothing running"
-            color: Tokens.textDim
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontBody
+        // empty state
+        Item {
+            width: parent.width
+            height: 64
+            visible: drawer.count === 0
+            Text {
+                anchors.centerIn: parent
+                text: "Nothing running"
+                color: Tokens.textDim
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontBody
+            }
         }
 
         Repeater {
