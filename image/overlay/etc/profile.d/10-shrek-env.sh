@@ -14,6 +14,11 @@ export LANG="${LANG:-C.UTF-8}"
 export EDITOR="${EDITOR:-nano}"
 export PAGER="${PAGER:-less}"
 
+# `shrek run`/`shrek session` compose the privileged engines, which live in /usr/libexec/shrek (kept off
+# PATH). Point the front door at them explicitly so it need not shell out to a bare `gatekeeperd` name.
+export SHREK_GATEKEEPERD="${SHREK_GATEKEEPERD:-/usr/libexec/shrek/gatekeeperd}"
+export SHREK_AGENTD="${SHREK_AGENTD:-/usr/libexec/shrek/agentd}"
+
 # Interactive-only niceties.
 case "$-" in
   *i*)

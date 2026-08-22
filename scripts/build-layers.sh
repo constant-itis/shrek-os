@@ -96,6 +96,13 @@ docker run --rm --privileged \
     # shrek-hello. onion-policy enables it → the broker merges it → shrek-desktop-gate.service proves it.
     if [ "$MODE" = "desktop" ]; then
       cp "$(ls out/layers/shrek-desktop*.raw | head -1)" out/store-stage/extensions/shrek-desktop.raw
+      # Dogfood-0 M2: also stage the shrek-dev toolchain sysext WHEN it was built (scripts/build-dev-
+      # layer.sh). Optional — a plain desktop store omits it and the sealed onion-policy just does not
+      # merge the listed-but-absent layer. When present, oniond merges the toolchain onto /usr.
+      if ls out/layers/shrek-dev*.raw >/dev/null 2>&1; then
+        cp "$(ls out/layers/shrek-dev*.raw | head -1)" out/store-stage/extensions/shrek-dev.raw
+        echo "--- staged shrek-dev toolchain sysext into the store ---"
+      fi
     fi
     # inject: drop the compromised-brain marker oniond reads off the (untrusted) store. World-readable
     # so the unprivileged oniond can read it from the ro mount. The wall (gatekeeperd) must still refuse.

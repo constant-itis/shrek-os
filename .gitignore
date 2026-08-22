@@ -10,6 +10,9 @@
 # Overlay contents staged by build-in-container.sh STAGE 1 (release binaries + installed docs).
 # Generated every build; the tracked source under image/overlay/ is only the systemd unit files.
 /image/overlay/usr/libexec/
+# M2: build-in-container.sh stages the on-PATH shrek/shrekctl symlinks here (into the gitignored
+# usr/libexec binaries) — build products, not tracked source.
+/image/overlay/usr/bin/
 /image/overlay/usr/share/*
 !/image/overlay/usr/share/dbus-1/
 !/image/overlay/usr/share/dbus-1/system.d/

@@ -14,3 +14,8 @@ enable shrek-conf
 # proposes it and the gatekeeperd broker merges it onto /usr; the shrek-desktop-gate.service then
 # proves the shell surfaces instantiate headless in the sealed boot (Pn-desktop). docs/desktop-bootstrap-0.md.
 enable shrek-desktop
+# Dogfood-0 M2: the shrek-dev toolchain sysext (min Rust + C toolchain to build/test shrek-os in the box,
+# scripts/build-dev-layer.sh). Sealed-enabled so oniond merges it when the store carries it; when the
+# store omits it (e.g. a plain desktop build), a listed-but-absent layer is simply not merged — no error.
+# docs/dogfood-0.md §M2.
+enable shrek-dev
