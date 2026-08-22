@@ -1,12 +1,16 @@
 #!/usr/bin/env bash
-# Dogfood-0 (M0) — disposable HEADLESS acceptance oracle for the interactive desktop (docs/dogfood-0.md).
+# Dogfood-0 (M1) — disposable HEADLESS acceptance oracle for persistence + standard desktop services
+# (docs/dogfood-0.md). Supersedes the M0 "see it boot" oracle: it now also PROVES that user state on
+# /home survives a reboot while networking/audio/Bluetooth/portals/session services return functional.
 #
-# Boots the sealed, Secure-Boot, dm-verity image (built with DOGFOOD=1) with a GRAPHICAL adapter
-# (virtio-vga) + virtio input under OVMF, the same firmware/secboot/layer-store assumptions as the
-# libvirt daily-driver domain (scripts/dogfood-libvirt.sh) — but headless and reproducible. It cannot
-# "look" at the screen, so instead it drives QEMU's monitor to `screendump` the guest scanout at two
-# moments and converts them to PNG: the images ARE the evidence that the boot lands at the real
-# Sway + Quickshell desktop (root tty1 autologin → shrek-desktop → sway → quickshell).
+# Boots the sealed Secure-Boot/dm-verity image (built DOGFOOD=1) with a graphical adapter + virtio input
+# AND a third, WRITABLE virtio disk carrying /home (a FRESH ext4 `shrek-data`, disposable — the daily
+# libvirt domain keeps a persistent one). The baked shrek-dogfood-persist.service runs on each boot:
+#   boot after key-enrollment → writes a marker under /home, then reboots the guest.
+#   next boot               → asserts the marker SURVIVED and reports the standard services active,
+#                             emitting SHREK-DOGFOOD lines on the serial console.
+# This script drives QEMU's monitor to screendump the *post-reboot* desktop (the visual evidence) and
+# then greps the serial log for those lines to produce the M1 PASS/FAIL verdict.
 #
 # Runs qemu inside an ephemeral --privileged debian:trixie container (/dev/kvm passthrough), same
 # hermetic pattern as scripts/boot-vm.sh — beepboop stays untouched.
@@ -21,16 +25,24 @@ RAW="${RAW:-$(ls -t out/shrek_*_x86-64.raw 2>/dev/null | head -1)}"
 STORE="${STORE:-out/layer-store.raw}"
 [ -f "$STORE" ] || { echo "no $STORE — run scripts/build-layers.sh desktop first" >&2; exit 1; }
 
-BUDGET="${BUDGET:-165}"          # total qemu wall-clock (covers enroll-reboot + 2nd boot + desktop bring-up)
-SHOT1="${SHOT1:-105}"            # first screenshot (desktop usually up by now)
-SHOT2="${SHOT2:-150}"           # second screenshot (settled)
+# FRESH disposable data disk each run: boot1 must see an EMPTY /home so the probe writes the marker and
+# reboots; a stale marker would short-circuit the persistence proof. (The daily domain uses a persistent
+# out/shrek-data.raw instead — see scripts/dogfood-libvirt.sh.)
+DATA="out/dogfood-data.raw"
+FRESH=1 scripts/dogfood-data-disk.sh "$DATA" 4G
+
+# The M1 cycle is THREE boots (enroll-reboot → write-marker+reboot → verify), so it needs more wall-clock
+# than the M0 single boot; the post-reboot desktop appears late, so screenshot near the end.
+BUDGET="${BUDGET:-300}"          # total qemu wall-clock (enroll + write-boot + verify-boot + bring-up)
+SHOT1="${SHOT1:-180}"            # first screenshot (verify boot usually bringing up the desktop)
+SHOT2="${SHOT2:-270}"           # second screenshot (settled post-reboot desktop = the evidence)
 LOG=out/dogfood-console.log; : > "$LOG"
 rm -f out/dogfood-screen-1.png out/dogfood-screen-2.png out/dogfood-screen-1.ppm out/dogfood-screen-2.ppm
 
-echo "=== Dogfood-0 M0: booting $RAW (+store $STORE) graphical under OVMF Secure Boot, budget ${BUDGET}s ==="
+echo "=== Dogfood-0 M1: booting $RAW (+store $STORE +data $DATA) graphical under OVMF Secure Boot, budget ${BUDGET}s ==="
 docker run --rm --device /dev/kvm \
   -v "${REPO_ROOT}:/work" -w /work \
-  -e RAW="$RAW" -e STORE="$STORE" -e BUDGET="$BUDGET" -e SHOT1="$SHOT1" -e SHOT2="$SHOT2" \
+  -e RAW="$RAW" -e STORE="$STORE" -e DATA="$DATA" -e BUDGET="$BUDGET" -e SHOT1="$SHOT1" -e SHOT2="$SHOT2" \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update -qq >/dev/null
@@ -47,6 +59,8 @@ docker run --rm --device /dev/kvm \
 
     # virtio-vga = a real KMS/DRM device in the guest (/dev/dri/card0) whose scanout `screendump` reads;
     # virtio keyboard+tablet = the input the interactive session needs. -display none (headless host).
+    # THIRD disk = writable /home data disk (NO snapshot=on, so writes persist across the guest reboot
+    # within this run — that persistence is exactly what the probe proves).
     qemu-system-x86_64 \
       -machine q35,smm=on -accel kvm -cpu host -m 4096 -smp 4 \
       -global driver=cfi.pflash01,property=secure,value=on \
@@ -54,6 +68,7 @@ docker run --rm --device /dev/kvm \
       -drive if=pflash,format=raw,unit=1,file="$tmp/vars.fd" \
       -drive file="/work/$RAW",format=raw,if=virtio,snapshot=on \
       -drive file="/work/$STORE",format=raw,if=virtio,snapshot=on \
+      -drive file="/work/$DATA",format=raw,if=virtio \
       -device virtio-vga -device virtio-keyboard-pci -device virtio-tablet-pci -device virtio-rng-pci \
       -display none -serial file:/work/'"$LOG"' \
       -monitor "unix:$mon,server,nowait" &
@@ -61,10 +76,50 @@ docker run --rm --device /dev/kvm \
 
     # Wait, screenshot, wait more, screenshot again, then power down.
     sleep "$SHOT1"; echo "--- t=${SHOT1}s screenshot ---"; shot dogfood-screen-1
-    REM=$(( BUDGET - SHOT1 )); [ "$REM" -gt 0 ] && sleep $(( SHOT2 - SHOT1 ))
+    [ $(( SHOT2 - SHOT1 )) -gt 0 ] && sleep $(( SHOT2 - SHOT1 ))
     echo "--- t=${SHOT2}s screenshot ---"; shot dogfood-screen-2
     printf "quit\n" | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || true
     kill "$QPID" 2>/dev/null || true; wait "$QPID" 2>/dev/null || true
   '
+
 echo "=== serial log: $LOG ($(wc -l < "$LOG" 2>/dev/null || echo 0) lines) ==="
 ls -l out/dogfood-screen-*.png 2>/dev/null || echo "no screenshots captured — inspect $LOG"
+
+# --- M1 verdict: read the probe's SHREK-DOGFOOD lines off the serial console -------------------------
+echo
+echo "=== Dogfood-0 M1 acceptance verdict ==="
+pass=0; fail=0
+ok()   { echo "  PASS $*"; pass=$((pass + 1)); }
+bad()  { echo "  FAIL $*"; fail=$((fail + 1)); }
+svc()  { # $1 unit label, $2 = active-value regex that counts as functional
+  line=$(grep -a "SHREK-DOGFOOD SVC .* $1=" "$LOG" | tail -1 || true)
+  val=${line##*=}
+  if   [ -z "$line" ];              then bad "$1 — not reported (probe did not reach the report stage)"
+  elif echo "$val" | grep -qE "$2"; then ok  "$1=$val"
+  else                                   bad "$1=$val (expected $2)"; fi
+}
+
+if grep -qa 'SHREK-DOGFOOD PERSIST-OK' "$LOG"; then
+  ok "persistence — /home marker survived the reboot: $(grep -a 'SHREK-DOGFOOD PERSIST-OK' "$LOG" | tail -1 | sed 's/.*PERSIST-OK //')"
+elif grep -qa 'SHREK-DOGFOOD PERSIST-FAIL' "$LOG"; then
+  bad "persistence — /home did NOT survive the reboot (PERSIST-FAIL)"
+else
+  bad "persistence — no PERSIST verdict on serial (guest may not have reached the 2nd boot within budget)"
+fi
+grep -qa 'SHREK-DOGFOOD MARKER-WRITTEN' "$LOG" && ok "marker written on the first boot (reboot cycle ran)" \
+  || bad "marker-written line absent (persist probe did not run on boot1)"
+
+svc systemd-networkd '^active'
+svc systemd-resolved '^active'
+svc bluetooth        '^active'
+svc dbus-broker      '^active'
+svc user@1000.service '^active'
+svc pipewire         '^active'
+svc wireplumber      '^active'
+svc xdg-desktop-portal '^active'
+
+[ -s out/dogfood-screen-2.png ] && ok "post-reboot desktop screenshot captured (out/dogfood-screen-2.png)" \
+  || bad "no post-reboot desktop screenshot"
+
+echo "--- M1 tally: PASS=$pass FAIL=$fail ---"
+[ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1: GREEN ===" || { echo "=== Dogfood-0 M1: NOT GREEN — inspect $LOG ==="; exit 1; }

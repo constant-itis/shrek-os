@@ -89,13 +89,25 @@ fi
 # /etc/systemd/system/<unit> → /dev/null, which outranks the /usr unit. These masks are gitignored and
 # REMOVED on a normal build, so the default image + scripts/desktop-sealed-proof.sh are byte-unchanged.
 DOGFOOD_MASKS="image/overlay/etc/systemd/system"
+# Dogfood-0 (M1): the persistent /home mount + the persistence/services acceptance probe are ENABLED
+# only on DOGFOOD images — they assume the writable shrek-data disk (home.mount would otherwise wait on
+# an absent device on a CI image) and the probe REBOOTS the guest (never wanted in CI). The unit FILES
+# ship in the sealed overlay unconditionally; only these enable symlinks are DOGFOOD-gated. Gitignored,
+# removed on a normal build — so the default CI image + scripts/desktop-sealed-proof.sh stay byte-clean.
+LOCALFS_WANTS="image/overlay/usr/lib/systemd/system/local-fs.target.wants"
+MU_WANTS="image/overlay/usr/lib/systemd/system/multi-user.target.wants"
 if [ "${DOGFOOD:-0}" = "1" ]; then
   echo "!!! DOGFOOD=1: interactive image — masking self-poweroff spike gates (shrek-mount-gate, shrek-desktop-gate) !!!"
   install -d "$DOGFOOD_MASKS"
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+  echo "!!! DOGFOOD=1: enabling persistent /home (home.mount) + the M1 persistence probe !!!"
+  install -d "$LOCALFS_WANTS" "$MU_WANTS"
+  ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
+  ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
 else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+  rm -f "$LOCALFS_WANTS/home.mount" "$MU_WANTS/shrek-dogfood-persist.service"
 fi
 
 mkdir -p out    # must exist before the bind-mount, or docker creates it root-owned

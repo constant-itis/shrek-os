@@ -1,0 +1,83 @@
+#!/bin/sh
+# Dogfood-0 (M1) — persistence + standard-services acceptance probe (DOGFOOD oracle scaffolding).
+#
+# Driven by shrek-dogfood-persist.service, which is ENABLED only on DOGFOOD=1 builds (it REBOOTS the
+# guest — never wanted in a CI/shipped image). It proves the M1 acceptance to scripts/dogfood-vm.sh
+# over the serial console (console=ttyS0), which greps these SHREK-DOGFOOD lines:
+#
+#   boot after key-enrollment (bootcount 0 -> 1): /home is a fresh ext4, so write a marker under
+#     /home, fsync, and reboot — this is the reboot the acceptance requires.
+#   next boot (bootcount 1 -> 2): the marker SURVIVED the reboot on the persistent shrek-data disk =>
+#     emit PERSIST-OK and report that the standard desktop services returned functional, then stay up
+#     so the oracle can screenshot the live desktop.
+#
+# If /home were NOT persistent the counter would never exceed 1 and the guest would reboot-loop; the
+# oracle's wall-clock budget bounds that into a clean "no PERSIST-OK" FAILURE rather than a hang.
+set -eu
+MARK=/home/.shrek-dogfood
+CNT="$MARK/bootcount"
+say() { echo "SHREK-DOGFOOD $*"; }   # unit StandardOutput=journal+console -> ttyS0 -> oracle serial log
+
+mkdir -p "$MARK"
+n=0; [ -f "$CNT" ] && n=$(cat "$CNT" 2>/dev/null || echo 0)
+n=$((n + 1)); echo "$n" > "$CNT"; sync
+
+if [ "$n" -eq 1 ]; then
+    printf 'boot1 marker written by dogfood-persist-probe\n' > "$MARK/marker"; sync
+    say "MARKER-WRITTEN boot=$n path=$MARK/marker — rebooting to prove /home persistence"
+    systemctl --no-block reboot
+    exit 0
+fi
+
+# n >= 2: the marker survived a reboot on the shrek-data disk.
+if [ -f "$MARK/marker" ]; then
+    say "PERSIST-OK boot=$n marker-present=yes contents=[$(head -1 "$MARK/marker" 2>/dev/null)]"
+else
+    say "PERSIST-FAIL boot=$n marker-present=no — /home did NOT survive the reboot"
+fi
+
+# Wait for the dev user session (tty1 autologin → pam_systemd starts the user@1000 manager). `systemctl
+# --user` talks to that manager via XDG_RUNTIME_DIR and does NOT need the session bus, so gate only on
+# the manager being active — not on /run/user/1000/bus.
+RT=/run/user/1000
+# Wait up to 120s for dev's per-user manager to come active; progress lines timestamp the wait on the
+# serial log.
+i=0
+while [ "$i" -lt 120 ]; do
+    [ "$(systemctl is-active user@1000.service 2>/dev/null)" = active ] && break
+    [ $(( i % 30 )) -eq 0 ] && say "user-session-wait t=${i}s user@1000=$(systemctl is-active user@1000.service 2>/dev/null || echo unknown)"
+    sleep 1; i=$((i + 1))
+done
+say "user-session: user@1000=$(systemctl is-active user@1000.service 2>/dev/null || echo unknown) after ${i}s loginctl=[$(loginctl list-sessions --no-legend 2>&1 | tr '\n' '|')]"
+say "user-runtime dir=[$(ls -1 "$RT" 2>&1 | tr '\n' ' ')] bus=$([ -S "$RT/bus" ] && echo present || echo absent)"
+
+# Bluetooth: bluez's bluetooth.service is ConditionPathIsDirectory=/sys/class/bluetooth. The VM may have
+# no Bluetooth controller, but bluetoothd can still run correctly with an empty controller set once the
+# kernel Bluetooth core exposes the class directory. Do not invent a fake adapter; zero controllers is a
+# valid dogfood VM state. The layer's bluetooth.service lands in /usr only after the Onion sysext merge,
+# so daemon-reload first to make it loadable; login is long done by now, so this reload cannot race the
+# tty1 autologin.
+modprobe bluetooth 2>/dev/null || true
+j=0; while [ "$j" -lt 5 ]; do [ -d /sys/class/bluetooth ] && break; sleep 1; j=$((j + 1)); done
+systemctl daemon-reload 2>/dev/null || true
+systemctl start bluetooth.service 2>/dev/null || true
+# Type=dbus (BusName=org.bluez): the unit is briefly `activating` until bluetoothd claims the name on the
+# system bus. Poll until it settles to active (no adapter is needed for the daemon to run).
+b=0; while [ "$b" -lt 20 ]; do [ "$(systemctl is-active bluetooth.service 2>/dev/null)" = active ] && break; sleep 1; b=$((b + 1)); done
+say "bluetooth hci=[$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ')] settled-after=${b}s"
+
+for u in systemd-networkd systemd-resolved bluetooth dbus-broker; do
+    say "SVC system $u=$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
+done
+say "SVC system user@1000.service=$(systemctl is-active user@1000.service 2>/dev/null || echo unknown)"
+
+# User-session services (audio + portals): query dev's per-user manager directly (XDG_RUNTIME_DIR is
+# sufficient; no session bus needed for systemctl --user). pipewire is socket-activated, so start it +
+# wireplumber + the portal so the report shows capability, not a lazily-dead socket.
+asdev() { runuser -u dev -- env XDG_RUNTIME_DIR="$RT" "$@"; }
+say "SVC user failed=[$(asdev systemctl --user --failed --no-legend 2>&1 | tr '\n' '|')]"
+asdev systemctl --user start pipewire.service wireplumber.service xdg-desktop-portal.service >/dev/null 2>&1 || true
+for u in dbus.socket pipewire wireplumber xdg-desktop-portal; do
+    say "SVC user $u=$(asdev systemctl --user is-active "$u" 2>/dev/null || echo unknown)"
+done
+say "DONE boot=$n"

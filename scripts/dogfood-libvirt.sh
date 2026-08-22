@@ -20,7 +20,14 @@ RAW="${RAW:-$(ls -t out/shrek_*_x86-64.raw 2>/dev/null | head -1)}"
 [ -n "$RAW" ] && [ -f "$RAW" ] || { echo "no out/shrek_*_x86-64.raw — build DOGFOOD=1 first" >&2; exit 1; }
 STORE="${STORE:-out/layer-store.raw}"
 [ -f "$STORE" ] || { echo "no $STORE — run scripts/build-layers.sh desktop first" >&2; exit 1; }
-RAW_ABS="$REPO_ROOT/$RAW"; STORE_ABS="$REPO_ROOT/$STORE"; NVRAM_ABS="$REPO_ROOT/out/dogfood_VARS.fd"
+
+# M1: the PERSISTENT /home data disk. Created ONCE (never wiped — this is the owner's durable state),
+# unlike the oracle's disposable disk. home.mount finds it by fs-label `shrek-data`.
+DATA="${DATA:-out/shrek-data.raw}"
+scripts/dogfood-data-disk.sh "$DATA" "${DATA_SIZE:-16G}"
+
+RAW_ABS="$REPO_ROOT/$RAW"; STORE_ABS="$REPO_ROOT/$STORE"; DATA_ABS="$REPO_ROOT/$DATA"
+NVRAM_ABS="$REPO_ROOT/out/dogfood_VARS.fd"
 NAME="${NAME:-shrek-dogfood}"
 
 # --- locate host OVMF secboot firmware (Debian/Ubuntu/Pop!_OS `ovmf` package) ---
@@ -75,6 +82,13 @@ cat > out/dogfood-shrek.xml <<XML
       <target dev='vdb' bus='virtio'/>
       <readonly/>
     </disk>
+    <!-- M1: persistent /home. WRITABLE (no <readonly/>) and never snapshotted — user state must survive
+         reboots and A/B image updates. home.mount mounts it by fs-label shrek-data. -->
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='raw' cache='writeback'/>
+      <source file='${DATA_ABS}'/>
+      <target dev='vdc' bus='virtio'/>
+    </disk>
     <input type='keyboard' bus='virtio'/>
     <input type='tablet' bus='virtio'/>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
@@ -94,4 +108,5 @@ echo "  virsh --connect qemu:///system start ${NAME}      # or open it in virt-m
 echo
 echo "First boot enrolls the Shrek Secure Boot key into the persistent NVRAM (a reboot), then lands at"
 echo "the Sway + Quickshell desktop over SPICE. NVRAM persists, so later boots skip enrollment."
-echo "NOTE: qemu:///system needs the raw + store + NVRAM readable by libvirt-qemu (or use qemu:///session)."
+echo "NOTE: qemu:///system needs the raw + store + data disk + NVRAM readable/writable by libvirt-qemu"
+echo "      (the data disk must be WRITABLE) — or use qemu:///session."
