@@ -4,3 +4,4 @@ singleton Audio Audio.qml
 singleton Bluetooth Bluetooth.qml
 singleton Power Power.qml
 singleton Network Network.qml
+singleton Notifications Notifications.qml
