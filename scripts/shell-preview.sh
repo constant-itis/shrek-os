@@ -37,9 +37,10 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 &
     sleep 6
     shot() { grim -o "$OUT" "/work/out/preview/$1.png" 2>>/tmp/grim.log || grim "/work/out/preview/$1.png" 2>>/tmp/grim.log || echo "grim $1 failed"; }
-    # spawn a real window so the titlebar / border WM chrome is visible in the shots
-    swaymsg exec "foot --font=DejaVu Sans Mono:size=11" >/dev/null 2>&1 || true
-    sleep 3
+    # spawn real windows (as wayland clients) so the taskbar pills + titlebar chrome show in the shots
+    foot --title=editor sh -c "exec sleep 600" >/tmp/foot1.log 2>&1 &
+    foot --title=logs   sh -c "exec sleep 600" >/tmp/foot2.log 2>&1 &
+    sleep 4
     shot bar
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call launcher toggle >/dev/null 2>&1 || true
     sleep 2; shot launcher
