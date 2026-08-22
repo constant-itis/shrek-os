@@ -1,6 +1,8 @@
 # Dogfood-0 — boot the sealed image interactively and do real work in it
 
-**Status:** OPEN (2026-08-21). Backend/security feature development is **frozen for the duration** of
+**Status:** OPEN (2026-08-21). **M0 + M1 shipped** (branch `dogfood-m1`) — the sealed image boots
+interactively to a persistent Sway + Quickshell dev box with standard desktop services; M2/M3 next.
+Backend/security feature development is **frozen for the duration** of
 this track (see §Parked). Dogfood-0 is a desktop/integration track: take the artifacts we already
 build (sealed dm-verity image + `shrek-desktop` sysext + the read-only Work-drawer wiring) and make
 them into a machine the owner can sit down at and develop on.
@@ -101,6 +103,52 @@ layer reflects real usage, then **pinned** so the layer is reproducible.
   virgl-when-supported) — the authoritative reproducible config virt-manager imports.
 - **Build order:** `scripts/build-desktop-layer.sh` → `DOGFOOD=1 scripts/build-in-container.sh 1` →
   `scripts/build-layers.sh desktop` → `scripts/dogfood-vm.sh`.
+
+## M1 implementation (as built)
+Gaps #2 + #3. Reboot-survivable user state + a normal desktop session, honoring **persist only what is
+explicitly required** — `/usr` stays sealed dm-verity, `/var` stays a volatile tmpfs
+(`systemd.volatile=state`); the **only** durable plane is `/home`.
+
+- **Persistent `/home`:** a separate **writable ext4 disk** (fs-label `shrek-data`), mounted by a baked
+  `home.mount` (`What=/dev/disk/by-label/shrek-data`) + `tmpfiles.d/shrek-home.conf`. Provisioned once by
+  `scripts/dogfood-data-disk.sh` (16G, sparse, never wiped = the owner's durable state); `FRESH=1` makes
+  the disposable variant the oracle uses. Survives reboot **and** A/B image updates (never part of the
+  sealed image).
+- **Non-root `dev` user (uid 1000):** created at build in `image/mkosi.postinst` (bash shell, **locked**
+  password, `NOPASSWD` sudo via `sudoers.d/dev-nopasswd`). Root autologin is **replaced**: dropped
+  `Autologin=yes`; a `getty@tty1.service.d/autologin.conf` drop-in runs `agetty --autologin dev` and
+  `getty@tty1` is force-enabled (`getty.target.wants`). Sway/Quickshell run non-root; logind **uaccess
+  ACLs** grant the active session its DRM/input devices (no `video`/`render`/`input` group membership
+  needed). A `shrek-desktop-ready.service` ordering barrier gates the launcher on login prerequisites
+  being resolvable, closing an intermittent tty1-autologin race.
+- **Networking:** `systemd-networkd` DHCP on the virtio NIC via a baked `network/20-wired.network` +
+  `systemd-resolved` (both enabled via `.wants` symlinks; `/etc/resolv.conf` → the resolved stub).
+  Stateless — "returns functional" needs no persisted state.
+- **Audio + portals:** PipeWire / WirePlumber + `xdg-desktop-portal` run in `dev`'s `systemd --user`
+  session (the desktop layer ships the user `pipewire`/`pipewire-pulse` sockets + `wireplumber` enabled);
+  `pam_systemd` starts the user manager, `/run/user/1000/bus` is the session bus.
+- **Bluetooth:** BlueZ's `bluetooth.service` runs **active with zero controllers** (`hci=[]` is a valid
+  VM state — no fake adapter). Two real failures were fixed the Debian-native way: (1) sealed read-only
+  `/etc` can't satisfy the unit's `ConfigurationDirectory=bluetooth` (`status=241/CONFIGURATION_DIRECTORY`)
+  → a desktop-layer `bluetooth.service.d/10-shrek-immutable-etc.conf` clears only that directive, and
+  `mkosi.postinst` seeds a sealed `/etc/bluetooth/main.conf` (root-owned `0555`/`0644`); (2) BlueZ's own
+  D-Bus policy ships in the late-merged sysext, after `dbus-broker` starts (`Request to own name refused
+  by policy`) → the base `usr/share/dbus-1/system.d/bluetooth.conf` policy + `system-services/org.bluez.service`
+  activation descriptor are seeded into the sealed base so `dbus-broker` knows `org.bluez` at boot. No
+  mask, no retry/sleep, no gate relaxation.
+- **DOGFOOD gating:** `home.mount` + the `shrek-dogfood-persist.service` acceptance probe are enabled
+  **only** under `DOGFOOD=1` (they assume the data disk and the probe reboots the guest); the enable
+  symlinks are gitignored and removed on a normal build, so the CI image stays byte-clean.
+- **Render note:** the desktop stays on software render (pixman/llvmpipe). The `dogfood-libvirt.sh`
+  virgl/SPICE-GL path exists but is gated behind host EGL access — under `qemu:///system` the
+  `libvirt-qemu` process has no DRM/EGL, so the daily box runs `NOGL=1`. (Bring-up + ACL details:
+  see the "Boot the Shrek Dogfood-0 VM in virt-manager" runbook.)
+
+**Verification:** `scripts/dogfood-vm.sh` attaches the writable `shrek-data` disk and drives a **3-boot
+cycle** (enroll → write a `/home` marker + reboot → assert the marker survived), then reports
+networking / audio / Bluetooth / portals / session units active — an **11-check** PASS/FAIL verdict
+(`dogfood-persist-probe` is the in-guest probe). M1 landed **4-boot reliability green** (`PASS=11
+FAIL=0`, `bluetooth=active`) after the login-race diagnostic scaffolding was stripped.
 
 ## Parked (do NOT build unless Dogfood-0 exposes it as a concrete blocker)
 Authority-mutation UX (grant/stop/promote), SAK/VT trusted path, SWAMP-5 (hybrid reranking), PN1
