@@ -17,7 +17,7 @@ PanelWindow {
     visible: ShellState.workOpen
     anchors { top: true; right: true; bottom: true }
     implicitWidth: Tokens.drawerWidth
-    color: Tokens.overlay
+    color: Tokens.panelBg
 
     // left hairline separating the drawer from content
     Rectangle {

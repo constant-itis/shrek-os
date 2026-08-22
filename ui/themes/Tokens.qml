@@ -15,6 +15,11 @@ QtObject {
     readonly property color border:       "#2f333b"
     readonly property color borderStrong: "#3d424c"
 
+    // Floating surfaces over the wallpaper — slightly translucent for depth (#AARRGGBB).
+    readonly property color barBg:   "#ec1a1b20"   // floating bar
+    readonly property color panelBg: "#f21d1f26"   // launcher / drawers
+    readonly property color rowHi:   "#26311c"     // selected launcher row (accent-tinted)
+
     readonly property color text:      "#e8e8e6"       // primary
     readonly property color textDim:   "#9aa0a8"       // secondary
     readonly property color textFaint: "#6b7079"       // tertiary / disabled

@@ -3,6 +3,7 @@ import Quickshell.Io
 import QtQuick
 import "../providers"
 import "../state"
+import "../surfaces/desktop"
 import "../surfaces/bar"
 import "../surfaces/launcher"
 import "../surfaces/work"
@@ -24,6 +25,7 @@ ShellRoot {
     SessionProvider { id: sessionProvider }
 
     // Surfaces
+    Desktop {}
     Bar { session: sessionProvider }
     Launcher {}
     WorkDrawer { provider: sessionProvider }

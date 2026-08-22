@@ -15,7 +15,7 @@ PanelWindow {
     visible: ShellState.systemOpen
     anchors { top: true; right: true; bottom: true }
     implicitWidth: Tokens.drawerWidth
-    color: Tokens.overlay
+    color: Tokens.panelBg
 
     Rectangle {
         anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
@@ -188,8 +188,11 @@ PanelWindow {
             MouseArea { id: hover; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if (parent.act) parent.act() }
         }
 
+        // Reboot/Off need root. The sealed image ships no polkit agent, so logind denies these to the
+        // non-root dev user -- route through the dev user's passwordless sudo (sudo -n = non-interactive).
+        // Log out exits Sway; in this single-user autologin VM (no greeter) the session just relaunches.
         PowerBtn { label: "Log out"; act: function () { ShellState.closeAll(); Sway.dispatch("exit") } }
-        PowerBtn { label: "Reboot";  act: function () { Quickshell.execDetached(["systemctl", "reboot"]) } }
-        PowerBtn { label: "Off"; danger: true; act: function () { Quickshell.execDetached(["systemctl", "poweroff"]) } }
+        PowerBtn { label: "Reboot";  act: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "reboot"]) } }
+        PowerBtn { label: "Off"; danger: true; act: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "poweroff"]) } }
     }
 }

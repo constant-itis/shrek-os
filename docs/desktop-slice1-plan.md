@@ -1,6 +1,13 @@
 # Desktop Slice 1 — the first operable Shrek shell
 
-> **Status:** ACCEPTED (2026-08-22), building on branch `desktop-slice1`. Sub-track of Dogfood-0:
+> **Status:** ALL FOUR PHASES LANDED (2026-08-22) on branch `desktop-slice1`, each fast-check green.
+> Commits: Phase 1 `d01a04e`/`e9c19c7`, Phase 2 `5425bae`, Phase 3 `8f138fb`/`855aa99`, Phase 4
+> `c496faf`/`b2de84c` (owner-split feat/build, no Co-Authored-By). Backends were enabled incrementally
+> per phase (I3+toplevel → +pipewire/bluetooth/upower → +notifications). Remaining: authoritative
+> from-source `desktop-smoke.sh` at the final flag set, then the sealed KVM proof + graphical screendump
+> (the visual "you can operate it" evidence). A dev-only fast-iteration harness `scripts/qml-check.sh`
+> (cached Quickshell binary; QML-scoped verdict) was added so phases validated in ~1 min instead of a
+> full recompile each. Sub-track of Dogfood-0:
 > M0/M1 boot the sealed image to a persistent Sway + Quickshell desktop, but the Quickshell surface is
 > still the Bootstrap-0 skeleton (static bar + launcher placeholder + Work drawer). Owner dogfood
 > result: *"I can't really do anything on the screen."* Slice 1 turns that skeleton into a desktop a

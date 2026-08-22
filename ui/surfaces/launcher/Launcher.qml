@@ -52,7 +52,7 @@ PanelWindow {
         width: Math.min(640, parent.width - 2 * Tokens.spaceXl)
         height: Math.min(480, Math.round(parent.height * 0.6))
         radius: Tokens.radiusLg
-        color: Tokens.overlay
+        color: Tokens.panelBg
         border.color: Tokens.border
 
         // eat clicks inside the panel so they don't fall through to the close scrim
@@ -116,7 +116,7 @@ PanelWindow {
                         width: list.width
                         height: 48
                         radius: Tokens.radius
-                        color: index === launcher.sel ? Tokens.surfaceAlt : "transparent"
+                        color: index === launcher.sel ? Tokens.rowHi : "transparent"
 
                         Row {
                             anchors.fill: parent
