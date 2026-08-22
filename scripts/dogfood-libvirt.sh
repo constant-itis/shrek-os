@@ -29,6 +29,9 @@ scripts/dogfood-data-disk.sh "$DATA" "${DATA_SIZE:-16G}"
 RAW_ABS="$REPO_ROOT/$RAW"; STORE_ABS="$REPO_ROOT/$STORE"; DATA_ABS="$REPO_ROOT/$DATA"
 NVRAM_ABS="$REPO_ROOT/out/dogfood_VARS.fd"
 NAME="${NAME:-shrek-dogfood}"
+# Stable domain UUID so `virsh define` UPDATES the existing domain in place (a UUID-less XML makes libvirt
+# mint a new UUID and then collide on the name). Overridable if you run more than one dogfood domain.
+UUID="${UUID:-255f88bc-f2a5-4b7e-9448-24d743fdbdcb}"
 
 # --- locate host OVMF secboot firmware (Debian/Ubuntu/Pop!_OS `ovmf` package) ---
 find_fw() { for p in "$@"; do [ -f "$p" ] && { echo "$p"; return; }; done; }
@@ -42,10 +45,12 @@ VARS_TMPL="$(find_fw /usr/share/OVMF/OVMF_VARS_4M.fd /usr/share/OVMF/OVMF_VARS.f
 if [ ! -f "$NVRAM_ABS" ]; then cp "$VARS_TMPL" "$NVRAM_ABS"; echo "seeded persistent NVRAM (setup mode): $NVRAM_ABS"; else echo "keeping existing NVRAM: $NVRAM_ABS"; fi
 
 # --- GPU: virgl (accelerated) when the host has a render node + qemu virgl support; else plain/llvmpipe ---
-if [ -e /dev/dri/renderD128 ] && qemu-system-x86_64 -device help 2>/dev/null | grep -q virtio-vga-gl; then
+if [ "${NOGL:-0}" != "1" ] && [ -e /dev/dri/renderD128 ] && qemu-system-x86_64 -device help 2>/dev/null | grep -q virtio-vga-gl; then
   echo "host virgl available → virtio-gpu with 3D acceleration + SPICE GL"
   VIDEO="    <video><model type='virtio' heads='1'><acceleration accel3d='yes'/></model></video>"
-  GRAPHICS="    <graphics type='spice' autoport='yes'><listen type='address'/><gl enable='yes'/></graphics>"
+  # SPICE GL is local-only: qemu rejects a TCP port with -spice gl, so the listener MUST be a local unix
+  # socket (autoport/-spice port is incompatible with GL). View it in virt-manager on this host.
+  GRAPHICS="    <graphics type='spice'><listen type='socket'/><gl enable='yes'/></graphics>"
 else
   echo "host virgl unavailable → plain virtio-gpu (llvmpipe software render in-guest)"
   VIDEO="    <video><model type='virtio' heads='1'/></video>"
@@ -55,6 +60,7 @@ fi
 cat > out/dogfood-shrek.xml <<XML
 <domain type='kvm'>
   <name>${NAME}</name>
+  <uuid>${UUID}</uuid>
   <memory unit='MiB'>4096</memory>
   <vcpu>4</vcpu>
   <os firmware='efi'>
