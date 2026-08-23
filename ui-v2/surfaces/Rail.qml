@@ -15,11 +15,24 @@ import "../services"
 // workspace switch on click. A window-count badge at the bottom reflects ToplevelManager state. This is
 // the shell's first real compositor-connected surface.
 PanelWindow {
+    id: rail
     anchors { left: true; top: true; bottom: true }
     implicitWidth: Config.railWidth
     color: Tokens.surface
+    property string clockText: ""
 
     Component.onCompleted: if (this.WlrLayershell != null) this.WlrLayershell.layer = WlrLayer.Top
+
+    Timer {
+        interval: 15000
+        running: true
+        repeat: true
+        triggeredOnStart: true
+        onTriggered: {
+            var d = new Date()
+            rail.clockText = Qt.formatTime(d, "h:mm")
+        }
+    }
 
     Column {
         anchors.top: parent.top
@@ -87,20 +100,71 @@ PanelWindow {
         }
     }
 
-    // Window-count badge — live ToplevelManager state, pinned to the rail bottom.
-    Rectangle {
+    // Compact daily-driver status, pinned to the rail bottom.
+    Column {
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Config.gap
         anchors.horizontalCenter: parent.horizontalCenter
-        width: 36; height: 36; radius: Tokens.radius
-        visible: CompositorService.windowCount > 0
-        color: Tokens.surfaceRaised
-        Text {
-            anchors.centerIn: parent
-            text: "" + CompositorService.windowCount
-            font.family: Tokens.fontMono
-            font.pixelSize: Tokens.fontBody
-            color: Tokens.textSecondary
+        spacing: Tokens.spaceXs
+
+        component StatusCell: Rectangle {
+            property string label: ""
+            property color tint: Tokens.textSecondary
+            property var action
+            width: 36; height: 28; radius: Tokens.radiusSm
+            color: hover.containsMouse ? Tokens.surfaceRaised : Tokens.surface
+            border.width: 1
+            border.color: hover.containsMouse ? Tokens.outlineStrong : "transparent"
+            Text {
+                anchors.centerIn: parent
+                text: parent.label
+                color: parent.tint
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+                font.bold: parent.tint === Tokens.accent
+            }
+            MouseArea {
+                id: hover
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (parent.action) parent.action()
+            }
+        }
+
+        StatusCell {
+            label: Network.online ? "net" : "--"
+            tint: Network.online ? Tokens.accent : Tokens.muted
+            action: function () { UI.openSystem("network") }
+        }
+        StatusCell {
+            visible: Audio.ready
+            label: Audio.muted ? "mut" : Math.round(Audio.volume * 100)
+            tint: Audio.muted ? Tokens.warning : Tokens.textSecondary
+            action: function () { UI.openSystem("audio") }
+        }
+        StatusCell {
+            visible: Bluetooth.available
+            label: "bt"
+            tint: Bluetooth.enabled ? Tokens.textSecondary : Tokens.muted
+            action: function () { UI.openSystem("bluetooth") }
+        }
+        StatusCell {
+            visible: Power.present
+            label: "" + Math.round(Power.percentage)
+            tint: Power.onBattery ? Tokens.warning : Tokens.textSecondary
+            action: function () { UI.openSystem("power") }
+        }
+        StatusCell {
+            visible: CompositorService.windowCount > 0
+            label: "" + CompositorService.windowCount
+            tint: Tokens.textSecondary
+            action: function () { UI.openSystem("system") }
+        }
+        StatusCell {
+            label: rail.clockText
+            tint: Tokens.textSecondary
+            action: function () { UI.openSystem("overview") }
         }
     }
 }

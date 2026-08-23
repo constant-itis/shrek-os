@@ -50,10 +50,17 @@ ShellRoot {
     // (`quickshell ipc call ui togglePanel true` / `... ui toggleWork true`). Functions must be fully typed.
     IpcHandler {
         target: "ui"
-        function togglePanel(open: bool): void { UI.panelOpen = open }
+        function togglePanel(open: bool): void { if (open) UI.openSystem(UI.systemSection); else UI.panelOpen = false }
         function toggle(): void { UI.togglePanel() }
         function panelState(): bool { return UI.panelOpen }
-        function toggleWork(open: bool): void { UI.workOpen = open }
+        function system(): void { UI.toggleSystem("overview") }
+        function network(): void { UI.openSystem("network") }
+        function audio(): void { UI.openSystem("audio") }
+        function bluetooth(): void { UI.openSystem("bluetooth") }
+        function power(): void { UI.openSystem("power") }
+        function appearance(): void { UI.openSystem("appearance") }
+        function close(): void { UI.closeMajor() }
+        function toggleWork(open: bool): void { if (open) { UI.panelOpen = false; UI.workOpen = true } else UI.workOpen = false }
         function work(): void { UI.toggleWork() }
         function workState(): bool { return UI.workOpen }
     }

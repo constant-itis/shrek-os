@@ -10,6 +10,7 @@ QtObject {
     readonly property int frameRadius: 16
     readonly property int frameBorder: 2
     readonly property int panelWidth: 320
+    readonly property int systemWidth: 520
     readonly property int workWidth: 360
     readonly property int gap: 10
     readonly property int animMs: 180
