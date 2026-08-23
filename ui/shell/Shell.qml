@@ -6,8 +6,10 @@ import "../services"
 import "../state"
 import "../themes"
 import "../surfaces/desktop"
+import "../surfaces/frame"
 import "../surfaces/bar"
 import "../surfaces/dashboard"
+import "../surfaces/dock"
 import "../surfaces/launcher"
 import "../surfaces/clipboard"
 import "../surfaces/work"
@@ -37,6 +39,14 @@ ShellRoot {
 
     // Per-monitor surfaces — one Bar and one Desktop backdrop on every screen (Variants instantiates the
     // delegate once per Quickshell.screens entry and injects `modelData` = that ShellScreen).
+    // Rounded desktop frame — created FIRST so it layers under the shell surfaces (and over windows).
+    Variants {
+        model: Quickshell.screens
+        ScreenFrame {
+            required property var modelData
+            screen: modelData
+        }
+    }
     Variants {
         model: Quickshell.screens
         Bar {
@@ -59,6 +69,7 @@ ShellRoot {
     WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
     SystemDrawer { screen: shell.activeScreen }
     Dashboard { provider: sessionProvider; screen: shell.activeScreen }
+    QuickDock { screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
     Osd { screen: shell.activeScreen }
     ContextMenu { screen: shell.activeScreen }
