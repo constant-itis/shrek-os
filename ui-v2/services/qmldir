@@ -1,2 +1,6 @@
 singleton CompositorService CompositorService.qml
 singleton Network Network.qml
+singleton Audio Audio.qml
+singleton Bluetooth Bluetooth.qml
+singleton Power Power.qml
+singleton Appearance Appearance.qml
