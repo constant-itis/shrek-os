@@ -40,12 +40,12 @@ QtObject {
     function toggleDashboard() { var v = !dashboardOpen; _closeAll(); dashboardOpen = v }
     function openMenu(x, y, items) { _closeAll(); menuX = x; menuY = y; menuItems = items; menuOpen = true }
     function closeAll()       { _closeAll() }
+    // Rail hover-popout is DISABLED. Every rail module (WorkPill/StatusCluster/ThemeToggle/PowerButton/
+    // BarActions/Clock) calls this onEntered, so it popped a placeholder box ("Context routed through the
+    // bar wrapper") over windows on every hover — the stray dark boxes near the rail. Neutered at the
+    // source so all callers go inert; rail items still act on click. Re-enable when the popouts carry
+    // real content.
     function openRailPopout(name, y) {
-        if (launcherOpen || workOpen || systemOpen || clipboardOpen || dashboardOpen || menuOpen)
-            return
-        railPopoutName = name
-        railPopoutY = y
-        railPopoutOpen = true
     }
     function closeRailPopout(name) {
         if (name === undefined || railPopoutName === name)

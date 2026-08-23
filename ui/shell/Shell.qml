@@ -6,6 +6,7 @@ import "../services"
 import "../state"
 import "../themes"
 import "../ported"
+import "../surfaces/frame"
 import "../surfaces/desktop"
 import "../surfaces/clipboard"
 import "../surfaces/notifications"
@@ -40,6 +41,17 @@ ShellRoot {
             screen: modelData
             activeScreen: shell.activeScreen
             session: sessionProvider
+        }
+    }
+    // Reserve the work area so tiled windows sit INSIDE the frame instead of under the bar/border.
+    // Caelestia does this with separate exclusion-zone layers; the full-screen ContentWindow itself
+    // stays exclusionMode=Ignore (drawers overlay windows). Without this, windows tile full-screen and
+    // the bar/frame paints over their left edge (clipped text, stray dark slabs).
+    Variants {
+        model: Quickshell.screens
+        ShellExclusions {
+            required property var modelData
+            screen: modelData
         }
     }
     Variants {

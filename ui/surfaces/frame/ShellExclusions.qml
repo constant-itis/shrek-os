@@ -13,8 +13,11 @@ Scope {
 
     required property var screen
 
-    readonly property int inset: Tokens.spaceSm
-    readonly property int railTotal: Tokens.railWidth + 2 * Tokens.spaceSm
+    // Reserve enough that tiled windows clear the Blob frame's border + corner rounding on every side,
+    // so no window pokes above/through the frame (the stray dark tab at the top). Left also clears the
+    // vertical rail. These stack with sway `gaps` — keep sway gaps small so the inset stays controlled here.
+    readonly property int inset: Tokens.spaceLg + Tokens.spaceSm     // 24 — clears the ~border+rounding
+    readonly property int railTotal: Tokens.railWidth + Tokens.spaceLg + Tokens.spaceSm  // rail + margin
 
     component ExclusionZone: PanelWindow {
         WlrLayershell.layer: WlrLayer.Top
