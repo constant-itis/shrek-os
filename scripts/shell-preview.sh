@@ -50,6 +50,9 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call system toggle >/dev/null 2>&1 || true   # close the system drawer
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call menu open >/dev/null 2>&1 || true
     sleep 2; shot menu
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call dashboard toggle >/dev/null 2>&1 || true
+    sleep 2; shot dashboard
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call dashboard toggle >/dev/null 2>&1 || true
     swaymsg exit >/dev/null 2>&1 || true
     chown -R "$HOST_UID:$HOST_GID" /work/out/preview 2>/dev/null || true
     echo "--- previews ---"; ls -la /work/out/preview; [ -s /tmp/grim.log ] && { echo "grim log:"; cat /tmp/grim.log; } || true
