@@ -1,10 +1,10 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
-import QtQuick.Shapes
 import "../../themes"
 import "../../state"
 import "../../services"
+import "../../geometry"
 
 // Launcher — the app/action launcher (Desktop Slice 1, Phase 2). Toggled with Super+D via IPC. A
 // centered search panel over a dim scrim: type to filter installed apps (Applications service, fuzzy-
@@ -82,20 +82,9 @@ PanelWindow {
             Translate { y: (1 - launcher.anim) * 16 }
         ]
 
-        Shape {
+        EdgePanelShape {
             anchors.fill: parent
-            ShapePath {
-                fillColor: Tokens.panelBg
-                strokeColor: Tokens.border
-                strokeWidth: 1
-                startX: Tokens.radiusLg; startY: 0
-                PathLine { x: panel.width - Tokens.radiusLg; y: 0 }
-                PathArc { x: panel.width; y: Tokens.radiusLg; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-                PathLine { x: panel.width; y: panel.height }
-                PathLine { x: 0; y: panel.height }
-                PathLine { x: 0; y: Tokens.radiusLg }
-                PathArc { x: Tokens.radiusLg; y: 0; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-            }
+            edge: "bottom"
         }
 
         // eat clicks inside the panel so they don't fall through to the close scrim

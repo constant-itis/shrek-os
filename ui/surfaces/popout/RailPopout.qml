@@ -1,10 +1,10 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
-import QtQuick.Shapes
 import "../../themes"
 import "../../state"
 import "../../services"
+import "../../geometry"
 
 // RailPopout — contextual rail hover surface. This is the QML bridge for the Caelestia-style bar popout
 // route: rail items set a semantic popout name and anchor, while this edge-attached surface renders the
@@ -35,20 +35,9 @@ PanelWindow {
         Behavior on y { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
         Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
-        Shape {
+        EdgePanelShape {
             anchors.fill: parent
-            ShapePath {
-                fillColor: Tokens.panelBg
-                strokeColor: Tokens.border
-                strokeWidth: 1
-                startX: 0; startY: 0
-                PathLine { x: panel.width - Tokens.radiusLg; y: 0 }
-                PathArc { x: panel.width; y: Tokens.radiusLg; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-                PathLine { x: panel.width; y: panel.height - Tokens.radiusLg }
-                PathArc { x: panel.width - Tokens.radiusLg; y: panel.height; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-                PathLine { x: 0; y: panel.height }
-                PathLine { x: 0; y: 0 }
-            }
+            edge: "left"
         }
 
         Column {

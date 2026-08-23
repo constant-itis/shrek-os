@@ -1,10 +1,10 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
-import QtQuick.Shapes
 import "../../themes"
 import "../../state"
 import "../../services"
+import "../../geometry"
 
 // Dashboard — a top-centre overview panel (Super+A / click the rail clock). Deliberately PURPOSE-DRIVEN
 // for Shrek OS rather than a generic system monitor: the default tab is WORK (the live isolated-sandbox
@@ -61,20 +61,9 @@ PanelWindow {
             opacity: dash.anim
             transform: Translate { y: (1 - dash.anim) * -16 }
 
-            Shape {
+            EdgePanelShape {
                 anchors.fill: parent
-                ShapePath {
-                    fillColor: Tokens.panelBg
-                    strokeColor: Tokens.border
-                    strokeWidth: 1
-                    startX: 0; startY: 0
-                    PathLine { x: panel.width; y: 0 }
-                    PathLine { x: panel.width; y: panel.height - Tokens.radiusLg }
-                    PathArc { x: panel.width - Tokens.radiusLg; y: panel.height; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-                    PathLine { x: Tokens.radiusLg; y: panel.height }
-                    PathArc { x: 0; y: panel.height - Tokens.radiusLg; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
-                    PathLine { x: 0; y: 0 }
-                }
+                edge: "top"
             }
 
             Column {
