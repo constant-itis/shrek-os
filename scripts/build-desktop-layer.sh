@@ -91,6 +91,19 @@ docker run --rm --privileged \
       ninja -C build
       DESTDIR="/work/$OVL" ninja -C build install
     fi
+
+    # (2b) Build + stage the GPLv3 Caelestia.Blobs QML module. This is the Caelestia Shell machinery
+    #     Shrek ports directly for merged frame/panel geometry; it is intentionally separate from the
+    #     broader Caelestia service/config plugin.
+    if [ "${FORCE_BLOBS:-0}" != 1 ] && [ -f "/work/$OVL/usr/lib/qt6/qml/Caelestia/Blobs/qmldir" ]; then
+      echo "SHREK-BLOBS-REUSE: staged Caelestia.Blobs present — skipping source build (FORCE_BLOBS=1 to rebuild)"
+    else
+      cmake -S /work/third_party/caelestia-shell -B /tmp/caelestia-blobs-build -GNinja \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DQT_QML_OUTPUT_DIRECTORY="/work/$OVL/usr/lib/qt6/qml"
+      ninja -C /tmp/caelestia-blobs-build
+    fi
     cd /work
 
     # (3a) base tree for the overlay build. mkosi 25.3 REFUSES to install Packages= into a sysext
