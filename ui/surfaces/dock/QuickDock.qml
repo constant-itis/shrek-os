@@ -11,28 +11,27 @@ import "../../geometry"
 // available to mouse users when they intentionally touch the right edge.
 PanelWindow {
     id: dock
-    WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.layer: WlrLayer.Overlay
     anchors { top: true; right: true; bottom: true }
     implicitWidth: 64
     color: "transparent"
-    visible: !(ShellState.workOpen || ShellState.systemOpen || ShellState.dashboardOpen
-               || ShellState.launcherOpen || ShellState.clipboardOpen || ShellState.menuOpen)
+    visible: ShellState.rightEdgeHot
+             && !(ShellState.workOpen || ShellState.systemOpen || ShellState.dashboardOpen
+                  || ShellState.launcherOpen || ShellState.clipboardOpen || ShellState.menuOpen)
 
-    property bool expanded: false
-
-    // The shell only captures the edge trigger while closed, then the revealed notch while open.
+    // InteractionPlane owns the closed-edge trigger. QuickDock only captures the revealed popout.
     mask: Region { item: hitRegion }
 
     Item {
         id: hitRegion
         anchors { top: parent.top; right: parent.right; bottom: parent.bottom }
-        width: dock.expanded ? dock.implicitWidth : 6
+        width: dock.implicitWidth
 
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
-            onEntered: dock.expanded = true
-            onExited: dock.expanded = false
+            onEntered: ShellState.openRightEdge()
+            onExited: ShellState.closeRightEdge()
         }
     }
 
@@ -42,8 +41,8 @@ PanelWindow {
         anchors.verticalCenter: parent.verticalCenter
         width: 54
         height: col.implicitHeight + 2 * Tokens.spaceSm
-        opacity: dock.expanded ? 1 : 0
-        transform: Translate { x: dock.expanded ? 0 : 14 }
+        opacity: dock.visible ? 1 : 0
+        transform: Translate { x: dock.visible ? 0 : 14 }
 
         Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
@@ -61,8 +60,8 @@ PanelWindow {
         anchors.verticalCenter: parent.verticalCenter
         anchors.rightMargin: Tokens.spaceSm
         spacing: Tokens.spaceSm
-        opacity: dock.expanded ? 1 : 0
-        transform: Translate { x: dock.expanded ? 0 : 14 }
+        opacity: dock.visible ? 1 : 0
+        transform: Translate { x: dock.visible ? 0 : 14 }
 
         Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
@@ -109,7 +108,7 @@ PanelWindow {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
-                onEntered: dock.expanded = true
+                onEntered: ShellState.openRightEdge()
                 onClicked: if (btn.act) btn.act()
             }
         }

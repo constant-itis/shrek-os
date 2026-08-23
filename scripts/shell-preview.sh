@@ -46,6 +46,9 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     foot --title=logs   sh -c "exec sleep 600" >/tmp/foot2.log 2>&1 &
     sleep 4
     shot bar
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call edge rightOpen >/dev/null 2>&1 || true
+    sleep 1; shot quickdock
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call edge close >/dev/null 2>&1 || true
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call railpopout open system 120 >/dev/null 2>&1 || true
     sleep 1; shot rail-popout
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call railpopout close >/dev/null 2>&1 || true

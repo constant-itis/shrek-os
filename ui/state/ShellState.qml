@@ -24,9 +24,13 @@ QtObject {
     property string railPopoutName: ""
     property real railPopoutY: 0
 
+    // Edge interaction plane. Presentation-only hover state; the plane owns narrow hit regions while the
+    // visual/content surfaces remain separate and the desktop centre stays pass-through.
+    property bool rightEdgeHot: false
+
     function _closeAll() {
         launcherOpen = false; workOpen = false; systemOpen = false; clipboardOpen = false
-        dashboardOpen = false; menuOpen = false; railPopoutOpen = false
+        dashboardOpen = false; menuOpen = false; railPopoutOpen = false; rightEdgeHot = false
     }
 
     function toggleLauncher()  { var v = !launcherOpen;  _closeAll(); launcherOpen = v }
@@ -47,6 +51,12 @@ QtObject {
         if (name === undefined || railPopoutName === name)
             railPopoutOpen = false
     }
+    function openRightEdge() {
+        if (launcherOpen || workOpen || systemOpen || clipboardOpen || dashboardOpen || menuOpen)
+            return
+        rightEdgeHot = true
+    }
+    function closeRightEdge() { rightEdgeHot = false }
 
     // Theme control routed through state (surfaces never touch the Theme controller directly — the
     // check-tokens gate enforces that). Cycles the appearance mode: dynamic -> dark -> light -> high-contrast.

@@ -59,6 +59,13 @@ ShellRoot {
     }
     Variants {
         model: Quickshell.screens
+        InteractionPlane {
+            required property var modelData
+            screen: modelData
+        }
+    }
+    Variants {
+        model: Quickshell.screens
         Desktop {
             required property var modelData
             screen: modelData
@@ -88,6 +95,11 @@ ShellRoot {
         target: "railpopout"
         function open(name: string, y: real): void { ShellState.openRailPopout(name, y) }
         function close(): void { ShellState.closeRailPopout() }
+    }
+    IpcHandler {
+        target: "edge"
+        function rightOpen(): void { ShellState.openRightEdge() }
+        function close(): void { ShellState.closeRightEdge() }
     }
     // Screenshot (Super+Print / Print via Sway binds, or the context menu). region() drops slurp then
     // grim; screen() captures the whole output. Both save + copy + notify via the Screenshot service.
