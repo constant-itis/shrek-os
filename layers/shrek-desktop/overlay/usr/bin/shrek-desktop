@@ -11,8 +11,17 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
-# Qt Quick renders QML with no GPU/EGL under the software backend — keeps the shell GPU-free.
-export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+# Render backend. The Caelestia.Blobs shell geometry is a custom QSGMaterial shader; Qt Quick's
+# "software" scenegraph backend CANNOT paint custom shaders (the whole blob frame renders as nothing),
+# so we run the RHI/OpenGL backend over Mesa's llvmpipe — software GL that needs NO GPU hardware, so
+# the shell stays GPU-free while still executing the blob shaders. QSG_RENDER_LOOP=basic avoids an
+# llvmpipe crash in Qt's threaded render loop. Every var is overridable so the smoke/headless gates
+# (and a future real-GPU path) can set their own.
+unset QT_QUICK_BACKEND 2>/dev/null || true
+export QSG_RHI_BACKEND="${QSG_RHI_BACKEND:-opengl}"
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
+export QSG_RENDER_LOOP="${QSG_RENDER_LOOP:-basic}"
 
 # Icon theme: the sealed image has no /etc gtk config, so point Qt's generic theme at a gtk settings
 # file baked in /usr (sysext-friendly) via XDG_CONFIG_DIRS. This makes QIcon::fromTheme (Quickshell's

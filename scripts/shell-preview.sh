@@ -19,7 +19,8 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     apt-get install -y --no-install-recommends -qq \
       sway foot grim qt6-wayland qml6-module-qtquick qml6-module-qtquick-window \
       qml6-module-qtquick-layouts qml6-module-qtquick-shapes libqt6widgets6 libqt6dbus6 \
-      libgl1-mesa-dri libxcb1 libpipewire-0.3-0 fonts-dejavu-core papirus-icon-theme >/dev/null 2>&1 || echo "WARN pkgs"
+      libgl1-mesa-dri libglx-mesa0 libegl1 libgles2 libxcb1 libpipewire-0.3-0 \
+      fonts-dejavu-core papirus-icon-theme >/dev/null 2>&1 || echo "WARN pkgs"
     export XDG_RUNTIME_DIR=/run/xdgr; mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
     export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=1
     export SWAYSOCK=/run/xdgr/sway.sock
@@ -35,11 +36,16 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     swaymsg output "*" resolution 1440x900 >/dev/null 2>&1 || true
     OUT="$(swaymsg -t get_outputs | grep -oE "HEADLESS-[0-9]+" | head -1)"; OUT="${OUT:-HEADLESS-1}"
     WD="$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v "\.lock$" | head -1)"; WD="$(basename "${WD:-wayland-1}")"
-    export WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software   # grim + quickshell both need the display
+    export WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland   # grim + quickshell both need the display
+    # Caelestia blobs are a custom QSGMaterial shader — the Qt Quick "software" backend CANNOT paint
+    # custom shaders (they render as nothing). Use the RHI/OpenGL backend over llvmpipe (software GL,
+    # no GPU hardware needed) so the blob surface actually renders. QSG_RENDER_LOOP=basic avoids the
+    # llvmpipe threaded-render-loop segfault. This matches the sealed-image shrek-desktop wrapper.
+    export QSG_RHI_BACKEND=opengl LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe QSG_RENDER_LOOP=basic
     export QML_IMPORT_PATH="/work/$BLOBS_QML${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
     export QML2_IMPORT_PATH="/work/$BLOBS_QML${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 &
-    sleep 6
+    sleep 10   # llvmpipe GL init is slower than the software backend
     shot() { grim -o "$OUT" "/work/out/preview/$1.png" 2>>/tmp/grim.log || grim "/work/out/preview/$1.png" 2>>/tmp/grim.log || echo "grim $1 failed"; }
     # spawn real windows (as wayland clients) so the taskbar pills + titlebar chrome show in the shots
     foot --title=editor sh -c "exec sleep 600" >/tmp/foot1.log 2>&1 &
