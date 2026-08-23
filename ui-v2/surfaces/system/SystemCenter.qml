@@ -1,4 +1,5 @@
 import QtQuick
+import "../../components"
 import "../../state"
 import "../../theme"
 import "../../services"
@@ -21,67 +22,55 @@ Item {
         anchors.left: parent.left
         anchors.top: parent.top
         anchors.bottom: parent.bottom
-        width: 132
+        width: 144
         spacing: Tokens.spaceXs
 
-        Text {
+        ShrekCard {
             width: parent.width
-            text: "System"
-            color: Tokens.textPrimary
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontHeadline
-            font.bold: true
-        }
-        Text {
-            width: parent.width
-            text: Network.online ? "Online" : (Network.available ? "Disconnected" : "NM absent")
-            color: Tokens.textSecondary
-            font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontCaption
-            elide: Text.ElideRight
+            active: Network.online
+
+            Text {
+                width: parent.width
+                text: "System"
+                color: Tokens.textPrimary
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontHeadline
+                font.weight: Font.DemiBold
+                elide: Text.ElideRight
+            }
+
+            Text {
+                width: parent.width
+                text: Network.online ? "Online" : (Network.available ? "Disconnected" : "NM absent")
+                color: Tokens.textSecondary
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontCaption
+                elide: Text.ElideRight
+            }
         }
 
-        Item { width: 1; height: Tokens.spaceSm }
+        Item { width: 1; height: Tokens.spaceXs }
 
         Repeater {
             model: root.sections
-            Rectangle {
+            ShrekButton {
                 required property var modelData
                 width: nav.width
-                height: 34
-                radius: Tokens.radius
-                color: UI.systemSection === modelData.id ? Tokens.accentDim : (hover.containsMouse ? Tokens.surfaceRaised : "transparent")
-                border.width: UI.systemSection === modelData.id ? 1 : 0
-                border.color: Tokens.outline
-                Text {
-                    anchors.left: parent.left
-                    anchors.leftMargin: Tokens.spaceSm
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: parent.width - 2 * Tokens.spaceSm
-                    text: modelData.label
-                    color: UI.systemSection === modelData.id ? Tokens.textPrimary : Tokens.textSecondary
-                    font.family: Tokens.fontFamily
-                    font.pixelSize: Tokens.fontBody
-                    elide: Text.ElideRight
-                }
-                MouseArea {
-                    id: hover
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onClicked: UI.openSystem(modelData.id)
-                }
+                text: modelData.label
+                kind: UI.systemSection === modelData.id ? "primary" : "ghost"
+                compact: true
+                horizontalAlignment: Text.AlignLeft
+                onActivated: UI.openSystem(modelData.id)
             }
         }
     }
 
-    Rectangle {
+    ShrekDivider {
         anchors.left: nav.right
         anchors.leftMargin: Tokens.spaceMd
         anchors.top: parent.top
         anchors.bottom: parent.bottom
         width: 1
-        color: Tokens.outline
     }
 
     Loader {

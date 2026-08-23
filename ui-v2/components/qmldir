@@ -1,0 +1,10 @@
+ShrekButton 1.0 ShrekButton.qml
+ShrekIconButton 1.0 ShrekIconButton.qml
+ShrekToggle 1.0 ShrekToggle.qml
+ShrekSlider 1.0 ShrekSlider.qml
+ShrekSection 1.0 ShrekSection.qml
+ShrekSettingRow 1.0 ShrekSettingRow.qml
+ShrekCard 1.0 ShrekCard.qml
+ShrekPanel 1.0 ShrekPanel.qml
+ShrekTooltip 1.0 ShrekTooltip.qml
+ShrekDivider 1.0 ShrekDivider.qml
