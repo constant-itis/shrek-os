@@ -8,50 +8,39 @@ import "../../services"
 // text-first (no icon font in the layer yet); a dot carries on/off where a word would be noise.
 Item {
     id: root
-    implicitWidth: row.implicitWidth
-    implicitHeight: Tokens.barHeight
+    implicitWidth: col.implicitWidth
+    implicitHeight: col.implicitHeight
 
-    Row {
-        id: row
+    Column {
+        id: col
         anchors.centerIn: parent
-        spacing: Tokens.spaceMd
+        spacing: Tokens.spaceSm
 
         // audio
         Text {
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: parent.horizontalCenter
             visible: Audio.ready
-            text: Audio.muted ? "muted" : Math.round(Audio.volume * 100) + "%"
+            text: Audio.muted ? "mute" : Math.round(Audio.volume * 100) + "%"
             color: Audio.muted ? Tokens.notice : Tokens.textDim
             font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontSmall
+            font.pixelSize: Tokens.fontCaption
         }
 
-        // network
-        Row {
-            anchors.verticalCenter: parent.verticalCenter
-            spacing: Tokens.spaceXs
-            Rectangle {
-                anchors.verticalCenter: parent.verticalCenter
-                width: 7; height: 7; radius: 3.5
-                color: Network.online ? Tokens.accent : Tokens.textFaint
-            }
-            Text {
-                anchors.verticalCenter: parent.verticalCenter
-                text: "net"
-                color: Tokens.textDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontSmall
-            }
+        // network — a dot carries on/off where a word would be noise in the narrow rail
+        Rectangle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: 7; height: 7; radius: 3.5
+            color: Network.online ? Tokens.accent : Tokens.textFaint
         }
 
         // bluetooth (only when an adapter exists)
         Text {
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: parent.horizontalCenter
             visible: Bluetooth.available
             text: "bt"
             color: Bluetooth.enabled ? Tokens.textDim : Tokens.textFaint
             font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontSmall
+            font.pixelSize: Tokens.fontCaption
         }
     }
 

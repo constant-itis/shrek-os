@@ -6,14 +6,14 @@ import "../../state"
 // BarActions — mouse affordances at the far left of the bar so the desktop is fully operable WITHOUT the
 // keyboard (a host compositor easily swallows the Super key). Apps button opens the launcher; terminal
 // button spawns foot. Ordinary user actions; no authority.
-Row {
+Column {
     id: root
     spacing: Tokens.spaceSm
 
     // apps / launcher
     Rectangle {
-        anchors.verticalCenter: parent.verticalCenter
-        width: 30; height: 24; radius: Tokens.radiusSm
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 30; height: 26; radius: Tokens.radius
         color: appsMa.containsMouse ? Tokens.accentDim : Tokens.accent
 
         Grid {
@@ -36,7 +36,7 @@ Row {
             // reachable even when windows cover the bare desktop.
             onClicked: (m) => {
                 if (m.button === Qt.RightButton)
-                    ShellState.openMenu(Tokens.spaceMd, Tokens.barHeight + 2 * Tokens.spaceSm, Menus.root())
+                    ShellState.openMenu(Tokens.railWidth + 2 * Tokens.spaceSm, Tokens.spaceLg, Menus.root())
                 else
                     ShellState.toggleLauncher()
             }
@@ -45,8 +45,8 @@ Row {
 
     // terminal
     Rectangle {
-        anchors.verticalCenter: parent.verticalCenter
-        width: 30; height: 24; radius: Tokens.radiusSm
+        anchors.horizontalCenter: parent.horizontalCenter
+        width: 30; height: 26; radius: Tokens.radius
         color: termMa.containsMouse ? Tokens.surfaceAlt : Tokens.surface
         border.color: Tokens.border
 

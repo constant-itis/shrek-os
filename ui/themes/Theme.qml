@@ -45,6 +45,23 @@ QtObject {
     // overrides win over base; base fills the rest; the shrek-dark floor fills anything still missing.
     readonly property var c: Palettes.complete(Palettes.merge(root.base, root.overrides), Palettes.BOOTSTRAP)
 
+    // Appearance cycle order for the rail's theme toggle (dynamic is the default/recommended first stop).
+    readonly property var _cycle: ["dynamic", "shrek-dark", "shrek-light", "high-contrast"]
+
+    // Write the mode into the user config (preserving overrides) and update live. Persists via FileView so
+    // the choice survives a restart; the running shell repaints through the normal watch path.
+    function setMode(m) {
+        var cfg = {};
+        try { cfg = JSON.parse(_cfgFv.text() || "{}") || ({}); } catch (e) { cfg = ({}); }
+        cfg.mode = m;
+        _cfgFv.setText(JSON.stringify(cfg));
+        root._cfg = cfg;
+    }
+    function cycleAppearance() {
+        var i = _cycle.indexOf(root.mode);
+        setMode(_cycle[(i + 1) % _cycle.length]);
+    }
+
     function _loadCfg()  { try { root._cfg = JSON.parse(_cfgFv.text() || "{}") || ({}); }  catch (e) { root._cfg = ({}); } }
     function _loadBase() { try { root._baseFile = JSON.parse(_baseFv.text() || "{}") || ({}); } catch (e) { root._baseFile = ({}); } }
 

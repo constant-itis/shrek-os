@@ -7,7 +7,7 @@ import "../../services"
 // the item's own platform menu popped by Quickshell's display(), scroll = the item's scroll action.
 // Hidden entirely when no app has registered a tray icon. Presentation + the item's own actions only —
 // no authority is read or minted here.
-Row {
+Column {
     id: cluster
 
     // The bar PanelWindow, passed from Bar.qml — the parent window the platform menu anchors to.
@@ -22,7 +22,7 @@ Row {
         delegate: Item {
             width: 18
             height: 18
-            anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+            anchors.horizontalCenter: parent ? parent.horizontalCenter : undefined
 
             Image {
                 anchors.fill: parent
@@ -43,7 +43,8 @@ Row {
 
                 function popMenu() {
                     if (!modelData.hasMenu) { modelData.activate(); return }
-                    var p = ma.mapToItem(null, 0, ma.height)
+                    // anchor to the right of the icon (rail is on the left edge)
+                    var p = ma.mapToItem(null, ma.width, 0)
                     modelData.display(cluster.window, p.x, p.y)
                 }
 

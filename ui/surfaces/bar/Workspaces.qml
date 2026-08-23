@@ -5,7 +5,7 @@ import "../../services"
 // Workspaces — live Sway workspaces from the Sway service (native i3/Sway IPC). Focused = accent fill;
 // active-on-another-output = raised; urgent = notice border. Click switches. Reacts to Sway events; no
 // polling.
-Row {
+Column {
     id: root
     spacing: Tokens.spaceSm
 
@@ -13,7 +13,7 @@ Row {
         model: Sway.workspaces
 
         Item {
-            implicitWidth: Math.max(24, label.implicitWidth + Tokens.spaceMd)
+            implicitWidth: 26
             implicitHeight: 22
 
             Rectangle {

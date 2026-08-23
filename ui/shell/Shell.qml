@@ -4,6 +4,7 @@ import QtQuick
 import "../providers"
 import "../services"
 import "../state"
+import "../themes"
 import "../surfaces/desktop"
 import "../surfaces/bar"
 import "../surfaces/launcher"
@@ -75,7 +76,7 @@ ShellRoot {
     }
     // `menu open` drops the root context menu just under the bar — for the Super+M keybind and for
     // scripting/preview (right-click builds it with a cursor position instead).
-    IpcHandler { target: "menu";     function open(): void { ShellState.openMenu(16, 52, Menus.root()) } }
+    IpcHandler { target: "menu";     function open(): void { ShellState.openMenu(Tokens.railWidth + 2 * Tokens.spaceSm, 16, Menus.root()) } }
 
     // Load marker the desktop smoke test greps for.
     Component.onCompleted: console.log("SHREK-DESKTOP shell surfaces instantiated")

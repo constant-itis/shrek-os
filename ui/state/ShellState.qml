@@ -1,5 +1,6 @@
 pragma Singleton
 import QtQuick
+import "../themes"
 
 // ShellState — global UI state for the shell (Desktop Slice 1). Which drawer/overlay is open. This is
 // presentation state only: it holds NO authority and reads NO gatekeeperd records. One drawer is open
@@ -27,4 +28,8 @@ QtObject {
     function toggleClipboard() { var v = !clipboardOpen; _closeAll(); clipboardOpen = v }
     function openMenu(x, y, items) { _closeAll(); menuX = x; menuY = y; menuItems = items; menuOpen = true }
     function closeAll()       { _closeAll() }
+
+    // Theme control routed through state (surfaces never touch the Theme controller directly — the
+    // check-tokens gate enforces that). Cycles the appearance mode: dynamic -> dark -> light -> high-contrast.
+    function cycleTheme() { Theme.cycleAppearance() }
 }

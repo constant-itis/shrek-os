@@ -51,6 +51,6 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
-        onClicked: ShellState.openMenu(99999, Tokens.barHeight + 2 * Tokens.spaceSm, Menus.root())
+        onClicked: ShellState.openMenu(Tokens.railWidth + 2 * Tokens.spaceSm, 99999, Menus.root())
     }
 }

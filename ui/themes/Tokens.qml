@@ -66,6 +66,7 @@ QtObject {
 
     // ── surface sizing ────────────────────────────────────────────────────────────────────────────
     readonly property int barHeight:   34
+    readonly property int railWidth:   46    // vertical left rail width (the spine)
     readonly property int drawerWidth: 340
 
     // ── animation timing (ms) ─────────────────────────────────────────────────────────────────────

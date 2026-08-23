@@ -9,18 +9,18 @@ Item {
     property var session
     readonly property int count: session ? session.sessions.length : 0
 
-    implicitWidth: row.implicitWidth
-    implicitHeight: Tokens.barHeight
+    implicitWidth: col.implicitWidth
+    implicitHeight: col.implicitHeight
 
-    Row {
-        id: row
+    Column {
+        id: col
         anchors.centerIn: parent
-        spacing: Tokens.spaceSm
+        spacing: Tokens.spaceXs
 
         // live indicator: a calm accent dot; when sandboxed sessions are running it gains a soft
         // pulsing halo so the eye catches active work without noise.
         Item {
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.horizontalCenter: parent.horizontalCenter
             width: 12; height: 12
 
             Rectangle {
@@ -52,11 +52,12 @@ Item {
         }
 
         Text {
-            anchors.verticalCenter: parent.verticalCenter
-            text: root.count > 0 ? "Work " + root.count : "Work"
-            color: root.count > 0 ? Tokens.text : Tokens.textDim
+            anchors.horizontalCenter: parent.horizontalCenter
+            visible: root.count > 0
+            text: root.count
+            color: Tokens.text
             font.family: Tokens.fontFamily
-            font.pixelSize: Tokens.fontSmall
+            font.pixelSize: Tokens.fontCaption
         }
     }
 

@@ -3,16 +3,18 @@ import Quickshell.Wayland
 import QtQuick
 import "../../themes"
 
-// Bar — the always-present top spine (Desktop Slice 1). A FLOATING, rounded, elevated bar inset from the
-// screen edges over the wallpaper. Quickshell owns this surface (Sway draws no bar). Left: apps/terminal
-// actions + live Sway workspaces. Center: focused-window title. Right: status cluster + Work pill + clock.
-// Sub-components live in this directory and are auto-visible by name.
+// Bar — the always-present left SPINE (Desktop Slice 1, vertical-rail pass). A FLOATING, rounded, elevated
+// rail inset from the screen edges over the wallpaper. Quickshell owns this surface (Sway draws no bar).
+// Top cluster: apps/terminal actions + live Sway workspaces. Bottom cluster: status glances + tray + Work
+// pill + stacked clock + power. The horizontal taskbar (WindowList) and media pill do NOT live in the rail
+// — window nav is workspaces + Super+Tab, media moves to the dashboard. Sub-components live in this
+// directory (vertical variants) and are auto-visible by name.
 PanelWindow {
     id: bar
     WlrLayershell.layer: WlrLayer.Top
-    anchors { top: true; left: true; right: true }
-    implicitHeight: Tokens.barHeight + 2 * Tokens.spaceSm
-    exclusiveZone: Tokens.barHeight + Tokens.spaceSm
+    anchors { top: true; left: true; bottom: true }
+    implicitWidth: Tokens.railWidth + 2 * Tokens.spaceSm
+    exclusiveZone: Tokens.railWidth + Tokens.spaceSm
     color: "transparent"
 
     // read-only session view injected from Shell.qml (drives the Work affordance count)
@@ -21,42 +23,34 @@ PanelWindow {
     Rectangle {
         id: body
         anchors {
-            left: parent.left; right: parent.right; top: parent.top
-            leftMargin: Tokens.spaceMd; rightMargin: Tokens.spaceMd; topMargin: Tokens.spaceSm
+            left: parent.left; top: parent.top; bottom: parent.bottom
+            leftMargin: Tokens.spaceSm; topMargin: Tokens.spaceSm; bottomMargin: Tokens.spaceSm
         }
-        height: Tokens.barHeight
+        width: Tokens.railWidth
         radius: Tokens.radiusLg
         color: Tokens.barBg
         border.color: Tokens.border
         border.width: 1
 
-        // left module
-        Row {
-            anchors { left: parent.left; verticalCenter: parent.verticalCenter; leftMargin: Tokens.spaceMd }
+        // top cluster — identity/actions + theme toggle + workspaces
+        Column {
+            anchors { top: parent.top; horizontalCenter: parent.horizontalCenter; topMargin: Tokens.spaceMd }
             spacing: Tokens.spaceMd
-            BarActions { anchors.verticalCenter: parent.verticalCenter }
-            Workspaces { anchors.verticalCenter: parent.verticalCenter }
+            BarActions { anchors.horizontalCenter: parent.horizontalCenter }
+            ThemeToggle { anchors.horizontalCenter: parent.horizontalCenter }
+            Workspaces { anchors.horizontalCenter: parent.horizontalCenter }
         }
 
-        // centre: live window list (taskbar) — click to focus, middle-click to close
-        WindowList {
-            anchors.centerIn: parent
-            width: Math.min(implicitWidth, body.width * 0.46)
-            clip: true
-        }
-
-        // right module
-        Row {
-            anchors { right: parent.right; verticalCenter: parent.verticalCenter; rightMargin: Tokens.spaceMd }
-            spacing: Tokens.spaceLg
-            // Media transport + system tray — each hides itself when empty (no player / no tray items), so
-            // the common case is just the status cluster + work + clock + power (no gap reserved).
-            MediaControl { anchors.verticalCenter: parent.verticalCenter }
-            TrayCluster { anchors.verticalCenter: parent.verticalCenter; window: bar }
-            StatusCluster { anchors.verticalCenter: parent.verticalCenter }
-            WorkPill { anchors.verticalCenter: parent.verticalCenter; session: bar.session }
-            Clock { anchors.verticalCenter: parent.verticalCenter }
-            PowerButton { anchors.verticalCenter: parent.verticalCenter }
+        // bottom cluster — system glances + tray + work + clock + power. Tray hides itself when empty, so
+        // the common case is status + work + clock + power (no gap reserved).
+        Column {
+            anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter; bottomMargin: Tokens.spaceMd }
+            spacing: Tokens.spaceMd
+            StatusCluster { anchors.horizontalCenter: parent.horizontalCenter }
+            TrayCluster { anchors.horizontalCenter: parent.horizontalCenter; window: bar }
+            WorkPill { anchors.horizontalCenter: parent.horizontalCenter; session: bar.session }
+            Clock { anchors.horizontalCenter: parent.horizontalCenter }
+            PowerButton { anchors.horizontalCenter: parent.horizontalCenter }
         }
     }
 }
