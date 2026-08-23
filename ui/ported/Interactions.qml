@@ -96,9 +96,8 @@ MouseArea {
             bar.closeTray()
         }
 
-        const rightHot = x > width - Math.max(Tokens.spaceLg, borderThickness + 8)
-        if (!rightShortcutActive)
-            ShellState.rightEdgeHot = rightHot || inRightPanel(panels.edgeDock, x, y)
+        if (!rightShortcutActive && !inRightPanel(panels.edgeDock, x, y))
+            ShellState.rightEdgeHot = false
 
         if (!dashboardShortcutActive)
             ShellState.dashboardOpen = inTopPanel(panels.dashboard, x, y)

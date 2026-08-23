@@ -94,30 +94,13 @@ Item {
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottom: parent.bottom
         width: Math.min(640, parent.width - 2 * Tokens.spaceXl)
-        height: 420
+        height: 480
         open: root.active && ShellState.launcherOpen
         edge: "bottom"
 
-        Column {
+        LauncherContent {
             anchors.fill: parent
-            anchors.margins: Tokens.spaceLg
-            spacing: Tokens.spaceMd
-
-            Text {
-                text: "Launcher"
-                color: Tokens.text
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontTitle
-                font.bold: true
-            }
-            Text {
-                width: parent.width
-                text: "Launcher content will be mounted here after the content-window port proves the geometry."
-                color: Tokens.textDim
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontBody
-                wrapMode: Text.WordWrap
-            }
+            active: launcher.open
         }
     }
 

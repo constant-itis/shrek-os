@@ -191,6 +191,7 @@ PanelWindow {
         required property Item panel
         property real deformAmount: 0.15
 
+        visible: panel.visible
         group: blobGroup
         x: panel.x + bar.implicitWidth - root.borderThickness
         y: panel.y
