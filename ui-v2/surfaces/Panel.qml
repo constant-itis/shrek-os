@@ -32,10 +32,10 @@ PanelWindow {
 
     ShrekPanel {
         id: card
-        x: panel.vertical ? (Config.panelEdge === "left" ? Config.railWidth + Config.gap : parent.width - width - Config.railWidth - Config.gap) : Config.gap
+        x: panel.vertical ? (Config.panelEdge === "left" ? Config.railWidth + Config.gap : parent.width - width - Config.railWidth - Config.gap) : Math.round((parent.width - width) / 2)
         y: panel.vertical ? Config.gap : (Config.panelEdge === "top" ? Config.railWidth + Config.gap : parent.height - height - Config.railWidth - Config.gap)
-        width: panel.vertical ? (UI.panelOpen ? Config.systemWidth : 0) : parent.width - Config.gap * 2
-        height: panel.vertical ? parent.height - Config.gap * 2 : (UI.panelOpen ? Config.systemWidth : 0)
+        width: panel.vertical ? (UI.panelOpen ? Config.systemWidth : 0) : Math.min(Config.systemWidth, parent.width - Config.gap * 2)
+        height: panel.vertical ? parent.height - Config.gap * 2 : (UI.panelOpen ? Math.min(Config.systemWidth, parent.height - Config.railWidth - Config.gap * 3) : 0)
         opacity: UI.panelOpen ? 1 : 0
 
         Behavior on width   { NumberAnimation { duration: Config.animMs; easing.type: Easing.OutCubic } }

@@ -26,9 +26,21 @@ PanelWindow {
     implicitWidth: rail.vertical ? Config.railWidth : 1
     implicitHeight: rail.vertical ? 1 : Config.railWidth
     exclusionMode: Config.reserveBarSpace ? ExclusionMode.Auto : ExclusionMode.Ignore
-    color: Tokens.surface
+    color: "transparent"
 
     Component.onCompleted: if (this.WlrLayershell != null) this.WlrLayershell.layer = WlrLayer.Top
+
+    Rectangle {
+        anchors.fill: parent
+        anchors.leftMargin: rail.vertical ? Config.gap : Tokens.spaceLg
+        anchors.rightMargin: rail.vertical ? Config.gap : Tokens.spaceLg
+        anchors.topMargin: rail.vertical ? Tokens.spaceLg : Config.gap
+        anchors.bottomMargin: rail.vertical ? Tokens.spaceLg : Config.gap
+        radius: Tokens.radiusLg
+        color: Tokens.surface
+        border.width: 1
+        border.color: Tokens.outline
+    }
 
     Timer {
         interval: 15000
@@ -147,9 +159,10 @@ PanelWindow {
 
             Loader {
                 required property string modelData
-                height: parent.height
+                height: modelData === "divider" ? 24 : 36
                 width: modelData === "workspaces" ? implicitWidth : (modelData === "divider" ? 1 : (Config.compactBar ? 44 : 104))
                 active: true
+                anchors.verticalCenter: parent.verticalCenter
                 sourceComponent: modelData === "divider" ? dividerComponent :
                                  modelData === "workspaces" ? workspacesComponent : buttonComponent
                 property string widgetId: modelData
@@ -290,8 +303,18 @@ PanelWindow {
     PrimaryRow {
         visible: !rail.vertical
         anchors.left: parent.left
-        anchors.leftMargin: Config.gap
+        anchors.leftMargin: Tokens.spaceXl
         anchors.verticalCenter: parent.verticalCenter
+    }
+
+    Text {
+        visible: !rail.vertical
+        anchors.centerIn: parent
+        text: "shrek-os  ·  ~/projects/shrek-os"
+        color: Tokens.textSecondary
+        font.family: Tokens.fontFamily
+        font.pixelSize: Tokens.fontSmall
+        elide: Text.ElideRight
     }
 
     StatusStack {
@@ -304,7 +327,7 @@ PanelWindow {
     StatusRow {
         visible: !rail.vertical
         anchors.right: parent.right
-        anchors.rightMargin: Config.gap
+        anchors.rightMargin: Tokens.spaceXl
         anchors.verticalCenter: parent.verticalCenter
     }
 }
