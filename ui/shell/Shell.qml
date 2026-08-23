@@ -5,19 +5,12 @@ import "../providers"
 import "../services"
 import "../state"
 import "../themes"
+import "../ported"
 import "../surfaces/desktop"
-import "../surfaces/frame"
-import "../surfaces/bar"
-import "../surfaces/dashboard"
-import "../surfaces/dock"
-import "../surfaces/launcher"
 import "../surfaces/clipboard"
-import "../surfaces/work"
-import "../surfaces/system"
 import "../surfaces/notifications"
 import "../surfaces/osd"
 import "../surfaces/menu"
-import "../surfaces/popout"
 
 // Shell.qml — composition root (loaded by the config-folder entry ui/shell.qml).
 //
@@ -38,30 +31,15 @@ ShellRoot {
     readonly property var activeScreen: Sway.focusedScreen
         || (Quickshell.screens.length > 0 ? Quickshell.screens[0] : null)
 
-    // Per-monitor surfaces — one Bar and one Desktop backdrop on every screen (Variants instantiates the
-    // delegate once per Quickshell.screens entry and injects `modelData` = that ShellScreen).
-    // Rounded desktop frame — created FIRST so it layers under the shell surfaces (and over windows).
+    // Per-monitor surfaces. The Caelestia-derived ContentWindow owns the frame, rail, attached panel
+    // geometry, input regions, and edge interactions as one shell object.
     Variants {
         model: Quickshell.screens
-        ScreenFrame {
+        ContentWindow {
             required property var modelData
             screen: modelData
             activeScreen: shell.activeScreen
             session: sessionProvider
-        }
-    }
-    Variants {
-        model: Quickshell.screens
-        ShellExclusions {
-            required property var modelData
-            screen: modelData
-        }
-    }
-    Variants {
-        model: Quickshell.screens
-        InteractionPlane {
-            required property var modelData
-            screen: modelData
         }
     }
     Variants {
@@ -73,13 +51,7 @@ ShellRoot {
     }
 
     // Single-instance overlays — rendered on the focused output.
-    Launcher { screen: shell.activeScreen }
     ClipboardPicker { screen: shell.activeScreen }
-    WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
-    SystemDrawer { screen: shell.activeScreen }
-    Dashboard { provider: sessionProvider; screen: shell.activeScreen }
-    QuickDock { screen: shell.activeScreen }
-    RailPopout { provider: sessionProvider; screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
     Osd { screen: shell.activeScreen }
     ContextMenu { screen: shell.activeScreen }
