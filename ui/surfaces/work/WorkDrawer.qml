@@ -18,20 +18,13 @@ PanelWindow {
     visible: ShellState.workOpen
     anchors { top: true; right: true; bottom: true }
     implicitWidth: Tokens.drawerWidth
-    color: Tokens.panelBg
+    color: "transparent"
 
     // Entrance motion: 0 closed -> 1 open. Slides in from the right edge + fades. Deferred a tick so
     // the Behavior animates from 0 on each show (layer-shell windows tear down on hide -> entrance only).
     property real anim: 0
     Behavior on anim { NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic } }
     onVisibleChanged: if (visible) { anim = 0; Qt.callLater(function () { anim = 1 }) }
-
-    // left hairline separating the drawer from content
-    Rectangle {
-        anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-        width: 1
-        color: Tokens.border
-    }
 
     Column {
         anchors.fill: parent

@@ -17,6 +17,7 @@ import "../surfaces/system"
 import "../surfaces/notifications"
 import "../surfaces/osd"
 import "../surfaces/menu"
+import "../surfaces/popout"
 
 // Shell.qml — composition root (loaded by the config-folder entry ui/shell.qml).
 //
@@ -45,6 +46,7 @@ ShellRoot {
         ScreenFrame {
             required property var modelData
             screen: modelData
+            activeScreen: shell.activeScreen
         }
     }
     Variants {
@@ -70,6 +72,7 @@ ShellRoot {
     SystemDrawer { screen: shell.activeScreen }
     Dashboard { provider: sessionProvider; screen: shell.activeScreen }
     QuickDock { screen: shell.activeScreen }
+    RailPopout { provider: sessionProvider; screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
     Osd { screen: shell.activeScreen }
     ContextMenu { screen: shell.activeScreen }
@@ -81,6 +84,11 @@ ShellRoot {
     IpcHandler { target: "system";    function toggle(): void { ShellState.toggleSystem() } }
     IpcHandler { target: "clipboard"; function toggle(): void { ShellState.toggleClipboard() } }
     IpcHandler { target: "dashboard"; function toggle(): void { ShellState.toggleDashboard() } }
+    IpcHandler {
+        target: "railpopout"
+        function open(name: string, y: real): void { ShellState.openRailPopout(name, y) }
+        function close(): void { ShellState.closeRailPopout() }
+    }
     // Screenshot (Super+Print / Print via Sway binds, or the context menu). region() drops slurp then
     // grim; screen() captures the whole output. Both save + copy + notify via the Screenshot service.
     IpcHandler {

@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import QtQuick.Shapes
 import "../../themes"
 import "../../state"
 import "../../services"
@@ -63,26 +64,39 @@ PanelWindow {
         MouseArea { anchors.fill: parent; onClicked: launcher.close() }
     }
 
-    Rectangle {
+    Item {
         id: panel
         anchors.horizontalCenter: parent.horizontalCenter
-        anchors.top: parent.top
-        anchors.topMargin: Math.round(parent.height * 0.14)
+        anchors.bottom: parent.bottom
+        anchors.bottomMargin: Tokens.spaceSm
         width: Math.min(640, parent.width - 2 * Tokens.spaceXl)
         height: Math.min(480, Math.round(parent.height * 0.6))
-        radius: Tokens.radiusLg
-        color: Tokens.panelBg
-        border.color: Tokens.border
         // scale up + fade + rise slightly as it opens
         opacity: launcher.anim
         transform: [
             Scale {
-                origin.x: panel.width / 2; origin.y: 0
+                origin.x: panel.width / 2; origin.y: panel.height
                 xScale: 0.96 + 0.04 * launcher.anim
                 yScale: 0.96 + 0.04 * launcher.anim
             },
-            Translate { y: (1 - launcher.anim) * 10 }
+            Translate { y: (1 - launcher.anim) * 16 }
         ]
+
+        Shape {
+            anchors.fill: parent
+            ShapePath {
+                fillColor: Tokens.panelBg
+                strokeColor: Tokens.border
+                strokeWidth: 1
+                startX: Tokens.radiusLg; startY: 0
+                PathLine { x: panel.width - Tokens.radiusLg; y: 0 }
+                PathArc { x: panel.width; y: Tokens.radiusLg; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
+                PathLine { x: panel.width; y: panel.height }
+                PathLine { x: 0; y: panel.height }
+                PathLine { x: 0; y: Tokens.radiusLg }
+                PathArc { x: Tokens.radiusLg; y: 0; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
+            }
+        }
 
         // eat clicks inside the panel so they don't fall through to the close scrim
         MouseArea { anchors.fill: parent }

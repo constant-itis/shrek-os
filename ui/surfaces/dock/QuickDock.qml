@@ -15,6 +15,8 @@ PanelWindow {
     anchors { top: true; right: true; bottom: true }
     implicitWidth: 56
     color: "transparent"
+    visible: !(ShellState.workOpen || ShellState.systemOpen || ShellState.dashboardOpen
+               || ShellState.launcherOpen || ShellState.clipboardOpen || ShellState.menuOpen)
 
     // only the button column is interactive; the rest of the strip passes clicks through to windows
     mask: Region { item: col }

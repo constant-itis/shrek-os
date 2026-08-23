@@ -32,6 +32,8 @@ Column {
             acceptedButtons: Qt.LeftButton | Qt.RightButton
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            onEntered: ShellState.openRailPopout("apps", parent.mapToItem(null, 0, parent.height / 2).y)
+            onExited: ShellState.closeRailPopout("apps")
             // Left = launcher; right = the root context menu, dropped just under the bar so it is
             // reachable even when windows cover the bare desktop.
             onClicked: (m) => {
@@ -62,6 +64,8 @@ Column {
             anchors.fill: parent
             hoverEnabled: true
             cursorShape: Qt.PointingHandCursor
+            onEntered: ShellState.openRailPopout("terminal", parent.mapToItem(null, 0, parent.height / 2).y)
+            onExited: ShellState.closeRailPopout("terminal")
             onClicked: Quickshell.execDetached(["foot", "--font=DejaVu Sans Mono:size=11"])
         }
     }

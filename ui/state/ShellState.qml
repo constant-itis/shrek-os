@@ -19,9 +19,14 @@ QtObject {
     property real menuY:     0
     property var  menuItems: []
 
+    // Rail hover popout. Presentation-only context routed from rail items; no actions are executed here.
+    property bool railPopoutOpen: false
+    property string railPopoutName: ""
+    property real railPopoutY: 0
+
     function _closeAll() {
         launcherOpen = false; workOpen = false; systemOpen = false; clipboardOpen = false
-        dashboardOpen = false; menuOpen = false
+        dashboardOpen = false; menuOpen = false; railPopoutOpen = false
     }
 
     function toggleLauncher()  { var v = !launcherOpen;  _closeAll(); launcherOpen = v }
@@ -31,6 +36,17 @@ QtObject {
     function toggleDashboard() { var v = !dashboardOpen; _closeAll(); dashboardOpen = v }
     function openMenu(x, y, items) { _closeAll(); menuX = x; menuY = y; menuItems = items; menuOpen = true }
     function closeAll()       { _closeAll() }
+    function openRailPopout(name, y) {
+        if (launcherOpen || workOpen || systemOpen || clipboardOpen || dashboardOpen || menuOpen)
+            return
+        railPopoutName = name
+        railPopoutY = y
+        railPopoutOpen = true
+    }
+    function closeRailPopout(name) {
+        if (name === undefined || railPopoutName === name)
+            railPopoutOpen = false
+    }
 
     // Theme control routed through state (surfaces never touch the Theme controller directly — the
     // check-tokens gate enforces that). Cycles the appearance mode: dynamic -> dark -> light -> high-contrast.

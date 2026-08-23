@@ -15,18 +15,18 @@ PanelWindow {
     visible: ShellState.systemOpen
     anchors { top: true; right: true; bottom: true }
     implicitWidth: Tokens.drawerWidth
-    color: Tokens.panelBg
+    color: "transparent"
 
-    Rectangle {
-        anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-        width: 1
-        color: Tokens.border
-    }
+    property real anim: 0
+    Behavior on anim { NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic } }
+    onVisibleChanged: if (visible) { anim = 0; Qt.callLater(function () { anim = 1 }) }
 
     Column {
         id: top
         anchors { top: parent.top; left: parent.left; right: parent.right; margins: Tokens.spaceLg }
         spacing: Tokens.spaceLg
+        opacity: sys.anim
+        transform: Translate { x: (1 - sys.anim) * 24 }
 
         Text {
             text: "System"
@@ -243,6 +243,8 @@ PanelWindow {
     Row {
         anchors { left: parent.left; right: parent.right; bottom: parent.bottom; margins: Tokens.spaceLg }
         spacing: Tokens.spaceSm
+        opacity: sys.anim
+        transform: Translate { x: (1 - sys.anim) * 24 }
 
         component PowerBtn: Rectangle {
             property string label: ""

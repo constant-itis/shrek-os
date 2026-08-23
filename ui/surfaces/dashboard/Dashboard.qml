@@ -1,6 +1,7 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import QtQuick.Shapes
 import "../../themes"
 import "../../state"
 import "../../services"
@@ -50,19 +51,31 @@ PanelWindow {
         focus: true
         Keys.onEscapePressed: ShellState.closeAll()
 
-        Rectangle {
+        Item {
             id: panel
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.top: parent.top
-            anchors.topMargin: Tokens.spaceXl
+            anchors.topMargin: Tokens.spaceSm
             width: 660
             height: col.implicitHeight + 2 * Tokens.spaceLg
-            radius: Tokens.radiusLg
-            color: Tokens.panelBg
-            border.color: Tokens.border
-            border.width: 1
             opacity: dash.anim
             transform: Translate { y: (1 - dash.anim) * -16 }
+
+            Shape {
+                anchors.fill: parent
+                ShapePath {
+                    fillColor: Tokens.panelBg
+                    strokeColor: Tokens.border
+                    strokeWidth: 1
+                    startX: 0; startY: 0
+                    PathLine { x: panel.width; y: 0 }
+                    PathLine { x: panel.width; y: panel.height - Tokens.radiusLg }
+                    PathArc { x: panel.width - Tokens.radiusLg; y: panel.height; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
+                    PathLine { x: Tokens.radiusLg; y: panel.height }
+                    PathArc { x: 0; y: panel.height - Tokens.radiusLg; radiusX: Tokens.radiusLg; radiusY: Tokens.radiusLg; direction: PathArc.Clockwise }
+                    PathLine { x: 0; y: 0 }
+                }
+            }
 
             Column {
                 id: col

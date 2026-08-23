@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Render the Shrek shell headless and SCREENSHOT it — DEV ONLY, for visual iteration without a VM
 # cold-boot. Reuses the cached Quickshell binary (build it first via scripts/qml-check.sh). Boots a
-# headless Sway, loads ui/shell.qml, and grabs PNGs of the bar, the launcher, and the system drawer into
-# out/preview/. Software render (pixman/llvmpipe), so it matches the VM's NOGL path.
+# headless Sway, loads ui/shell.qml, and grabs PNGs of the bar, launcher, Work/System drawers, and
+# dashboard into out/preview/. Software render (pixman/llvmpipe), so it matches the VM's NOGL path.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 CACHE=out/qs-cache
@@ -42,9 +42,15 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     foot --title=logs   sh -c "exec sleep 600" >/tmp/foot2.log 2>&1 &
     sleep 4
     shot bar
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call railpopout open system 120 >/dev/null 2>&1 || true
+    sleep 1; shot rail-popout
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call railpopout close >/dev/null 2>&1 || true
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call launcher toggle >/dev/null 2>&1 || true
     sleep 2; shot launcher
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call launcher toggle >/dev/null 2>&1 || true
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call work toggle >/dev/null 2>&1 || true
+    sleep 2; shot work
+    "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call work toggle >/dev/null 2>&1 || true
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call system toggle >/dev/null 2>&1 || true
     sleep 2; shot system
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml ipc call system toggle >/dev/null 2>&1 || true   # close the system drawer

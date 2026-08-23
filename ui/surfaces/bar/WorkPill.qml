@@ -63,7 +63,10 @@ Item {
 
     MouseArea {
         anchors.fill: parent
+        hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        onEntered: ShellState.openRailPopout("work", root.mapToItem(null, 0, root.height / 2).y)
+        onExited: ShellState.closeRailPopout("work")
         onClicked: ShellState.toggleWork()
     }
 }

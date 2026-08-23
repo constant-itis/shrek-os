@@ -20,7 +20,14 @@ Item {
         Text { id: hh; anchors.horizontalCenter: parent.horizontalCenter; color: Tokens.text; font.family: Tokens.fontFamily; font.pixelSize: Tokens.fontBody }
         Text { id: mm; anchors.horizontalCenter: parent.horizontalCenter; color: Tokens.textDim; font.family: Tokens.fontFamily; font.pixelSize: Tokens.fontBody }
     }
-    MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: ShellState.toggleDashboard() }
+    MouseArea {
+        anchors.fill: parent
+        hoverEnabled: true
+        cursorShape: Qt.PointingHandCursor
+        onEntered: ShellState.openRailPopout("clock", root.mapToItem(null, 0, root.height / 2).y)
+        onExited: ShellState.closeRailPopout("clock")
+        onClicked: ShellState.toggleDashboard()
+    }
     Component.onCompleted: refresh()
     Timer { interval: 10000; running: true; repeat: true; onTriggered: root.refresh() }
 }

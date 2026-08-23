@@ -20,17 +20,13 @@ PanelWindow {
     // read-only session view injected from Shell.qml (drives the Work affordance count)
     property var session
 
-    Rectangle {
+    Item {
         id: body
         anchors {
             left: parent.left; top: parent.top; bottom: parent.bottom
             leftMargin: Tokens.spaceSm; topMargin: Tokens.spaceSm; bottomMargin: Tokens.spaceSm
         }
         width: Tokens.railWidth
-        radius: Tokens.radiusLg
-        color: Tokens.barBg
-        border.color: Tokens.border
-        border.width: 1
 
         // top cluster — identity/actions + theme toggle + workspaces
         Column {
