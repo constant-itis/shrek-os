@@ -27,6 +27,16 @@ Rectangle {
     Behavior on color { ColorAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
     Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
+    Rectangle {
+        anchors.fill: parent
+        radius: parent.radius
+        color: root.kind === "primary" ? Tokens.accentText : Tokens.textPrimary
+        opacity: press.pressed ? 0.16 : (press.containsMouse ? 0.08 : 0)
+        visible: opacity > 0
+
+        Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
+    }
+
     Text {
         id: label
         anchors.verticalCenter: parent.verticalCenter

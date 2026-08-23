@@ -1,42 +1,49 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import "../components"
 import "../config"
 import "../state"
 import "../theme"
 import "system"
 
-// Panel — the Shrek System center. Left edge attached, ordinary desktop state only.
+// Panel — the Shrek System center. Edge/size behavior follows Config; ordinary desktop state only.
 PanelWindow {
-    anchors { left: true; top: true; bottom: true }
-    implicitWidth: Config.railWidth + Config.gap + Config.systemWidth
+    id: panel
+
+    readonly property bool vertical: Config.edgeVertical
+    readonly property int openWidth: vertical ? Config.railWidth + Config.gap + Config.systemWidth : 1
+    readonly property int openHeight: vertical ? 1 : Config.railWidth + Config.gap + Config.systemWidth
+
+    anchors {
+        left: Config.panelEdge === "left" || !panel.vertical
+        right: Config.panelEdge === "right" || !panel.vertical
+        top: Config.panelEdge === "top" || panel.vertical
+        bottom: Config.panelEdge === "bottom" || panel.vertical
+    }
+
+    implicitWidth: openWidth
+    implicitHeight: openHeight
     exclusionMode: ExclusionMode.Ignore
     color: "transparent"
     mask: Region { item: card }
 
     Component.onCompleted: if (this.WlrLayershell != null) this.WlrLayershell.layer = WlrLayer.Top
 
-    Rectangle {
+    ShrekPanel {
         id: card
-        x: Config.railWidth + Config.gap
-        anchors.top: parent.top
-        anchors.bottom: parent.bottom
-        anchors.topMargin: Config.gap
-        anchors.bottomMargin: Config.gap
-        width: UI.panelOpen ? Config.systemWidth : 0
+        x: panel.vertical ? (Config.panelEdge === "left" ? Config.railWidth + Config.gap : parent.width - width - Config.railWidth - Config.gap) : Config.gap
+        y: panel.vertical ? Config.gap : (Config.panelEdge === "top" ? Config.railWidth + Config.gap : parent.height - height - Config.railWidth - Config.gap)
+        width: panel.vertical ? (UI.panelOpen ? Config.systemWidth : 0) : parent.width - Config.gap * 2
+        height: panel.vertical ? parent.height - Config.gap * 2 : (UI.panelOpen ? Config.systemWidth : 0)
         opacity: UI.panelOpen ? 1 : 0
-        clip: true
-        radius: Config.frameRadius
-        color: Tokens.panelBg
-        border.width: 1
-        border.color: Tokens.outline
 
         Behavior on width   { NumberAnimation { duration: Config.animMs; easing.type: Easing.OutCubic } }
+        Behavior on height  { NumberAnimation { duration: Config.animMs; easing.type: Easing.OutCubic } }
         Behavior on opacity { NumberAnimation { duration: Config.animMs } }
 
         SystemCenter {
             anchors.fill: parent
-            anchors.margins: Tokens.spaceLg
             visible: UI.panelOpen
         }
     }

@@ -64,14 +64,15 @@ QtObject {
     readonly property int spaceXl: 24
 
     // ── component metrics (fixed identity) ──────────────────────────────────────────────────────────
-    readonly property int controlHeightSm: 30
+    readonly property int controlHeightSm: 32
     readonly property int controlHeight:   36
     readonly property int iconButtonSize:  36
-    readonly property int rowHeight:       52
+    readonly property int tileHeightSm:    48
+    readonly property int rowHeight:       60
     readonly property int panelPadding:    16
     readonly property int toggleWidth:     48
     readonly property int toggleHeight:    26
-    readonly property int sliderHeight:    28
+    readonly property int sliderHeight:    40
     readonly property int sliderTrack:      8
 
     // ── rounding (fixed identity) ───────────────────────────────────────────────────────────────────

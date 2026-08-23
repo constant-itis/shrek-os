@@ -6,15 +6,48 @@ Item {
 
     property real value: 0
     property bool muted: false
+    property string icon: ""
+    property string valueText: ""
     signal moved(real value)
 
+    width: parent ? parent.width : 260
     implicitHeight: Tokens.sliderHeight
+    height: implicitHeight
     opacity: enabled ? 1 : 0.45
 
     Rectangle {
-        id: track
+        id: iconButton
+        width: root.icon.length > 0 ? Tokens.tileHeightSm - Tokens.spaceSm : 0
+        height: Tokens.tileHeightSm - Tokens.spaceSm
         anchors.left: parent.left
-        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        radius: Tokens.radiusFull
+        color: iconHover.containsMouse ? Tokens.accentDim : "transparent"
+        visible: root.icon.length > 0
+
+        Text {
+            anchors.centerIn: parent
+            text: root.icon
+            color: root.muted ? Tokens.textSecondary : Tokens.accent
+            font.family: Tokens.fontFamily
+            font.pixelSize: Tokens.fontTitle
+            font.weight: Font.DemiBold
+        }
+
+        MouseArea {
+            id: iconHover
+            anchors.fill: parent
+            hoverEnabled: true
+            enabled: false
+        }
+    }
+
+    Rectangle {
+        id: track
+        anchors.left: iconButton.visible ? iconButton.right : parent.left
+        anchors.leftMargin: iconButton.visible ? Tokens.spaceSm : 0
+        anchors.right: valueLabel.visible ? valueLabel.left : parent.right
+        anchors.rightMargin: valueLabel.visible ? Tokens.spaceSm : 0
         anchors.verticalCenter: parent.verticalCenter
         height: Tokens.sliderTrack
         radius: Tokens.radiusFull
@@ -39,7 +72,7 @@ Item {
         height: 18
         radius: Tokens.radiusFull
         anchors.verticalCenter: track.verticalCenter
-        x: Math.max(0, Math.min(root.width - width, root.value * root.width - width / 2))
+        x: track.x + Math.max(0, Math.min(track.width - width, root.value * track.width - width / 2))
         color: Tokens.textPrimary
         border.width: 1
         border.color: Tokens.outlineStrong
@@ -50,7 +83,10 @@ Item {
 
     MouseArea {
         id: drag
-        anchors.fill: parent
+        anchors.left: track.left
+        anchors.right: track.right
+        anchors.top: parent.top
+        anchors.bottom: parent.bottom
         enabled: root.enabled
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
@@ -59,5 +95,17 @@ Item {
             if (pressed)
                 root.moved(Math.max(0, Math.min(1, m.x / width)))
         }
+    }
+
+    Text {
+        id: valueLabel
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        visible: root.valueText.length > 0
+        text: root.valueText
+        color: Tokens.textSecondary
+        font.family: Tokens.fontFamily
+        font.pixelSize: Tokens.fontCaption
+        horizontalAlignment: Text.AlignRight
     }
 }

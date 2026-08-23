@@ -4,22 +4,18 @@ import "../theme"
 Rectangle {
     id: root
 
-    property string icon: ""
-    property string tooltip: ""
+    property string label: ""
     property bool active: false
-    property int buttonSize: Tokens.iconButtonSize
-    property int iconSize: 18
+    property bool compact: true
+    property bool vertical: true
     signal activated()
 
-    width: buttonSize
-    height: buttonSize
+    width: vertical ? (compact ? 36 : 44) : (compact ? 44 : 104)
+    height: vertical ? (compact ? 36 : 44) : 36
     radius: active ? Tokens.radius : Tokens.radiusLg
-    color: !enabled ? Tokens.surface :
-           active ? Tokens.accentDim :
-           press.containsMouse ? Tokens.surfaceRaised : "transparent"
-    border.width: active || press.containsMouse ? 1 : 0
+    color: active ? Tokens.accent : (hover.containsMouse ? Tokens.surfaceRaised : Tokens.surface)
+    border.width: active ? 1 : (hover.containsMouse ? 1 : 0)
     border.color: active ? Tokens.accent : Tokens.outline
-    opacity: enabled ? 1 : 0.45
 
     Behavior on color { ColorAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
     Behavior on radius { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
@@ -27,8 +23,8 @@ Rectangle {
     Rectangle {
         anchors.fill: parent
         radius: parent.radius
-        color: root.active ? Tokens.accentText : Tokens.textPrimary
-        opacity: press.pressed ? 0.18 : (press.containsMouse ? 0.10 : 0)
+        color: active ? Tokens.accentText : Tokens.textPrimary
+        opacity: hover.pressed ? 0.16 : (hover.containsMouse ? 0.08 : 0)
         visible: opacity > 0
 
         Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
@@ -36,18 +32,19 @@ Rectangle {
 
     Text {
         anchors.centerIn: parent
-        text: root.icon
-        color: root.active ? Tokens.textPrimary : Tokens.textSecondary
+        width: parent.width - Tokens.spaceSm
+        text: root.label
+        color: root.active ? Tokens.accentText : Tokens.textPrimary
         font.family: Tokens.fontFamily
-        font.pixelSize: root.iconSize
+        font.pixelSize: root.compact ? Tokens.fontBody : Tokens.fontSmall
+        font.weight: root.active ? Font.DemiBold : Font.Medium
         horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
+        elide: Text.ElideRight
     }
 
     MouseArea {
-        id: press
+        id: hover
         anchors.fill: parent
-        enabled: root.enabled
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
         onClicked: root.activated()

@@ -1,25 +1,32 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import "../components"
 import "../config"
 import "../state"
 import "../theme"
 import "../services"
 
-// Rail — one per screen. A left-anchored vertical bar that RESERVES its width: exactly three connected
-// anchors (left+top+bottom) trigger ExclusionMode.Auto, which reserves precisely implicitWidth. Fully
-// interactive (default mask = whole window clickable).
-//
-// Modules (top→bottom): panel toggle, Work toggle (hero surface), then LIVE Sway workspace pips driven by
-// CompositorService — each shows its workspace number, highlights the focused one, and dispatches a
-// workspace switch on click. A window-count badge at the bottom reflects ToplevelManager state. This is
-// the shell's first real compositor-connected surface.
+// Edge bar. Current default is the historical left compact rail, but geometry and widget ordering come
+// from Config so ordinary widgets do not encode that layout as permanent.
 PanelWindow {
     id: rail
-    anchors { left: true; top: true; bottom: true }
-    implicitWidth: Config.railWidth
-    color: Tokens.surface
+
+    readonly property bool vertical: Config.edgeVertical
+    readonly property bool leading: Config.edgeLeading
     property string clockText: ""
+
+    anchors {
+        left: Config.panelEdge === "left" || !rail.vertical
+        right: Config.panelEdge === "right" || !rail.vertical
+        top: Config.panelEdge === "top" || rail.vertical
+        bottom: Config.panelEdge === "bottom" || rail.vertical
+    }
+
+    implicitWidth: rail.vertical ? Config.railWidth : 1
+    implicitHeight: rail.vertical ? 1 : Config.railWidth
+    exclusionMode: Config.reserveBarSpace ? ExclusionMode.Auto : ExclusionMode.Ignore
+    color: Tokens.surface
 
     Component.onCompleted: if (this.WlrLayershell != null) this.WlrLayershell.layer = WlrLayer.Top
 
@@ -34,137 +41,270 @@ PanelWindow {
         }
     }
 
-    Column {
-        anchors.top: parent.top
-        anchors.topMargin: Config.gap
-        anchors.horizontalCenter: parent.horizontalCenter
+    function activateWidget(id) {
+        if (id === "panel")
+            UI.togglePanel()
+        else if (id === "work")
+            UI.toggleWork()
+    }
+
+    function widgetLabel(id) {
+        if (id === "panel")
+            return "≡"
+        if (id === "work")
+            return "W"
+        return id
+    }
+
+    function widgetActive(id) {
+        if (id === "panel")
+            return UI.panelOpen
+        if (id === "work")
+            return UI.workOpen
+        return false
+    }
+
+    function openStatus(id) {
+        if (id === "network")
+            UI.openSystem("network")
+        else if (id === "audio")
+            UI.openSystem("audio")
+        else if (id === "bluetooth")
+            UI.openSystem("bluetooth")
+        else if (id === "power")
+            UI.openSystem("power")
+        else if (id === "windows")
+            UI.openSystem("system")
+        else if (id === "time")
+            UI.openSystem("overview")
+    }
+
+    function statusVisible(id) {
+        if (id === "audio")
+            return Audio.ready
+        if (id === "bluetooth")
+            return Bluetooth.available
+        if (id === "power")
+            return Power.present
+        if (id === "windows")
+            return CompositorService.windowCount > 0
+        return true
+    }
+
+    function statusLabel(id) {
+        if (id === "network")
+            return Network.online ? "net" : "--"
+        if (id === "audio")
+            return Audio.muted ? "mut" : "" + Math.round(Audio.volume * 100)
+        if (id === "bluetooth")
+            return "bt"
+        if (id === "power")
+            return "" + Math.round(Power.percentage)
+        if (id === "windows")
+            return "" + CompositorService.windowCount
+        if (id === "time")
+            return rail.clockText
+        return id
+    }
+
+    function statusTint(id) {
+        if (id === "network")
+            return Network.online ? Tokens.accent : Tokens.muted
+        if (id === "audio")
+            return Audio.muted ? Tokens.warning : Tokens.textSecondary
+        if (id === "bluetooth")
+            return Bluetooth.enabled ? Tokens.textSecondary : Tokens.muted
+        if (id === "power")
+            return Power.onBattery ? Tokens.warning : Tokens.textSecondary
+        return Tokens.textSecondary
+    }
+
+    component PrimaryStack: Column {
+        width: Config.railWidth
         spacing: Config.gap
 
-        // Panel trigger — click toggles; hover highlights.
-        Rectangle {
-            width: 36; height: 36; radius: Tokens.radius
-            color: (trig.containsMouse || UI.panelOpen) ? Tokens.accent : Tokens.surfaceRaised
-            Behavior on color { ColorAnimation { duration: Config.animMs } }
-            Text {
-                anchors.centerIn: parent
-                text: "≡"   // ≡
-                font.pixelSize: 20
-                color: (trig.containsMouse || UI.panelOpen) ? Tokens.accentText : Tokens.textPrimary
-            }
-            MouseArea { id: trig; anchors.fill: parent; hoverEnabled: true; onClicked: UI.togglePanel() }
-        }
-
-        // Work trigger — the hero surface (effective-authority view of live agent sessions).
-        Rectangle {
-            width: 36; height: 36; radius: Tokens.radius
-            color: (wtrig.containsMouse || UI.workOpen) ? Tokens.work : Tokens.surfaceRaised
-            Behavior on color { ColorAnimation { duration: Config.animMs } }
-            Text {
-                anchors.centerIn: parent
-                text: "◪"   // ◪ — quadrant square, "isolated work"
-                font.pixelSize: 18
-                color: (wtrig.containsMouse || UI.workOpen) ? Tokens.accentText : Tokens.textPrimary
-            }
-            MouseArea { id: wtrig; anchors.fill: parent; hoverEnabled: true; onClicked: UI.toggleWork() }
-        }
-
-        // Divider.
-        Rectangle { width: 24; height: 1; color: Tokens.outline; anchors.horizontalCenter: parent.horizontalCenter }
-
-        // Live Sway workspace pips.
         Repeater {
-            model: CompositorService.workspaces
-            Rectangle {
-                required property var modelData
-                readonly property bool here: modelData.focused || modelData.active
-                width: 36; height: 36; radius: Tokens.radius
-                color: here ? Tokens.accentDim : (wsm.containsMouse ? Tokens.surfaceRaised : Tokens.surface)
-                border.width: modelData.urgent ? 2 : 0
-                border.color: Tokens.attention
-                Behavior on color { ColorAnimation { duration: Config.animMs } }
-                Text {
-                    anchors.centerIn: parent
-                    text: ("" + (modelData.number > 0 ? modelData.number : modelData.name))
-                    font.family: Tokens.fontMono
-                    font.pixelSize: Tokens.fontBody
-                    font.bold: parent.here
-                    color: parent.here ? Tokens.accentText : Tokens.textSecondary
-                }
-                MouseArea {
-                    id: wsm
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    onClicked: CompositorService.focusWorkspace(modelData.number)
+            model: Config.barWidgets
+
+            Loader {
+                required property string modelData
+                width: modelData === "workspaces" ? parent.width : (modelData === "divider" ? parent.width : (Config.compactBar ? 36 : 44))
+                active: true
+                anchors.horizontalCenter: parent.horizontalCenter
+                sourceComponent: modelData === "divider" ? dividerComponent :
+                                 modelData === "workspaces" ? workspacesComponent : buttonComponent
+                property string widgetId: modelData
+            }
+        }
+    }
+
+    component PrimaryRow: Row {
+        height: Config.railWidth
+        spacing: Config.gap
+
+        Repeater {
+            model: Config.barWidgets
+
+            Loader {
+                required property string modelData
+                height: parent.height
+                width: modelData === "workspaces" ? implicitWidth : (modelData === "divider" ? 1 : (Config.compactBar ? 44 : 104))
+                active: true
+                sourceComponent: modelData === "divider" ? dividerComponent :
+                                 modelData === "workspaces" ? workspacesComponent : buttonComponent
+                property string widgetId: modelData
+            }
+        }
+    }
+
+    component StatusStack: Column {
+        width: Config.railWidth
+        spacing: Tokens.spaceXs
+
+        Repeater {
+            model: Config.statusWidgets
+
+            ShrekStatusCell {
+                required property string modelData
+                visible: rail.statusVisible(modelData)
+                label: rail.statusLabel(modelData)
+                tint: rail.statusTint(modelData)
+                compact: Config.compactBar
+                vertical: rail.vertical
+                onActivated: rail.openStatus(modelData)
+            }
+        }
+    }
+
+    component StatusRow: Row {
+        height: Config.railWidth
+        spacing: Tokens.spaceXs
+
+        Repeater {
+            model: Config.statusWidgets
+
+            ShrekStatusCell {
+                required property string modelData
+                visible: rail.statusVisible(modelData)
+                label: rail.statusLabel(modelData)
+                tint: rail.statusTint(modelData)
+                compact: Config.compactBar
+                vertical: rail.vertical
+                onActivated: rail.openStatus(modelData)
+            }
+        }
+    }
+
+    Component {
+        id: buttonComponent
+
+        ShrekBarButton {
+            label: rail.widgetLabel(widgetId)
+            active: rail.widgetActive(widgetId)
+            compact: Config.compactBar
+            vertical: rail.vertical
+            anchors.horizontalCenter: rail.vertical ? parent.horizontalCenter : undefined
+            anchors.verticalCenter: rail.vertical ? undefined : parent.verticalCenter
+            onActivated: rail.activateWidget(widgetId)
+        }
+    }
+
+    Component {
+        id: dividerComponent
+
+        ShrekDivider {
+            width: rail.vertical ? 24 : 1
+            height: rail.vertical ? 1 : 24
+            anchors.horizontalCenter: rail.vertical ? parent.horizontalCenter : undefined
+            anchors.verticalCenter: rail.vertical ? undefined : parent.verticalCenter
+        }
+    }
+
+    Component {
+        id: workspacesComponent
+
+        Loader {
+            sourceComponent: rail.vertical ? workspaceStackComponent : workspaceRowComponent
+        }
+    }
+
+    Component {
+        id: workspaceStackComponent
+
+        Column {
+            width: Config.railWidth
+            spacing: Config.gap
+
+            Repeater {
+                model: CompositorService.workspaces
+
+                ShrekBarButton {
+                    required property var modelData
+                    readonly property bool here: modelData.focused || modelData.active
+                    label: "" + (modelData.number > 0 ? modelData.number : modelData.name)
+                    active: here
+                    compact: Config.compactBar
+                    vertical: true
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    border.width: modelData.urgent ? 2 : (here ? 1 : 0)
+                    border.color: modelData.urgent ? Tokens.attention : Tokens.accent
+                    onActivated: CompositorService.focusWorkspace(modelData.number)
                 }
             }
         }
     }
 
-    // Compact daily-driver status, pinned to the rail bottom.
-    Column {
+    Component {
+        id: workspaceRowComponent
+
+        Row {
+            height: Config.railWidth
+            spacing: Config.gap
+
+            Repeater {
+                model: CompositorService.workspaces
+
+                ShrekBarButton {
+                    required property var modelData
+                    readonly property bool here: modelData.focused || modelData.active
+                    label: "" + (modelData.number > 0 ? modelData.number : modelData.name)
+                    active: here
+                    compact: Config.compactBar
+                    vertical: false
+                    anchors.verticalCenter: parent.verticalCenter
+                    border.width: modelData.urgent ? 2 : (here ? 1 : 0)
+                    border.color: modelData.urgent ? Tokens.attention : Tokens.accent
+                    onActivated: CompositorService.focusWorkspace(modelData.number)
+                }
+            }
+        }
+    }
+
+    PrimaryStack {
+        visible: rail.vertical
+        anchors.top: parent.top
+        anchors.topMargin: Config.gap
+        anchors.horizontalCenter: parent.horizontalCenter
+    }
+
+    PrimaryRow {
+        visible: !rail.vertical
+        anchors.left: parent.left
+        anchors.leftMargin: Config.gap
+        anchors.verticalCenter: parent.verticalCenter
+    }
+
+    StatusStack {
+        visible: rail.vertical
         anchors.bottom: parent.bottom
         anchors.bottomMargin: Config.gap
         anchors.horizontalCenter: parent.horizontalCenter
-        spacing: Tokens.spaceXs
+    }
 
-        component StatusCell: Rectangle {
-            property string label: ""
-            property color tint: Tokens.textSecondary
-            property var action
-            width: 36; height: 28; radius: Tokens.radiusSm
-            color: hover.containsMouse ? Tokens.surfaceRaised : Tokens.surface
-            border.width: 1
-            border.color: hover.containsMouse ? Tokens.outlineStrong : "transparent"
-            Text {
-                anchors.centerIn: parent
-                text: parent.label
-                color: parent.tint
-                font.family: Tokens.fontFamily
-                font.pixelSize: Tokens.fontCaption
-                font.bold: parent.tint === Tokens.accent
-            }
-            MouseArea {
-                id: hover
-                anchors.fill: parent
-                hoverEnabled: true
-                cursorShape: Qt.PointingHandCursor
-                onClicked: if (parent.action) parent.action()
-            }
-        }
-
-        StatusCell {
-            label: Network.online ? "net" : "--"
-            tint: Network.online ? Tokens.accent : Tokens.muted
-            action: function () { UI.openSystem("network") }
-        }
-        StatusCell {
-            visible: Audio.ready
-            label: Audio.muted ? "mut" : Math.round(Audio.volume * 100)
-            tint: Audio.muted ? Tokens.warning : Tokens.textSecondary
-            action: function () { UI.openSystem("audio") }
-        }
-        StatusCell {
-            visible: Bluetooth.available
-            label: "bt"
-            tint: Bluetooth.enabled ? Tokens.textSecondary : Tokens.muted
-            action: function () { UI.openSystem("bluetooth") }
-        }
-        StatusCell {
-            visible: Power.present
-            label: "" + Math.round(Power.percentage)
-            tint: Power.onBattery ? Tokens.warning : Tokens.textSecondary
-            action: function () { UI.openSystem("power") }
-        }
-        StatusCell {
-            visible: CompositorService.windowCount > 0
-            label: "" + CompositorService.windowCount
-            tint: Tokens.textSecondary
-            action: function () { UI.openSystem("system") }
-        }
-        StatusCell {
-            label: rail.clockText
-            tint: Tokens.textSecondary
-            action: function () { UI.openSystem("overview") }
-        }
+    StatusRow {
+        visible: !rail.vertical
+        anchors.right: parent.right
+        anchors.rightMargin: Config.gap
+        anchors.verticalCenter: parent.verticalCenter
     }
 }

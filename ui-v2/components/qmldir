@@ -8,3 +8,5 @@ ShrekCard 1.0 ShrekCard.qml
 ShrekPanel 1.0 ShrekPanel.qml
 ShrekTooltip 1.0 ShrekTooltip.qml
 ShrekDivider 1.0 ShrekDivider.qml
+ShrekBarButton 1.0 ShrekBarButton.qml
+ShrekStatusCell 1.0 ShrekStatusCell.qml

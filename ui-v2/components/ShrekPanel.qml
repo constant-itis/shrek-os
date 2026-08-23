@@ -4,7 +4,7 @@ import "../theme"
 Rectangle {
     id: root
 
-    default property alias content: body.data
+    default property alias content: contentLayer.data
 
     color: Tokens.panelBg
     radius: Tokens.radiusLg
@@ -12,10 +12,9 @@ Rectangle {
     border.color: Tokens.outline
     clip: true
 
-    Column {
-        id: body
+    Item {
+        id: contentLayer
         anchors.fill: parent
         anchors.margins: Tokens.panelPadding
-        spacing: Tokens.spaceMd
     }
 }

@@ -17,6 +17,16 @@ Rectangle {
 
     Behavior on color { ColorAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
+    Rectangle {
+        anchors.fill: parent
+        radius: parent.radius
+        color: root.active ? Tokens.accentText : Tokens.textPrimary
+        opacity: root.interactive && hover.containsMouse ? 0.06 : 0
+        visible: opacity > 0
+
+        Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
+    }
+
     Column {
         id: body
         anchors.left: parent.left
