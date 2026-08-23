@@ -1,38 +1,45 @@
 pragma Singleton
 import QtQuick
 
-// Shrek design tokens (Desktop Slice 1). A fixed identity palette — calm, protective, organic/layered,
-// developer-oriented. NOT wallpaper-derived (that is a Caelestia/MD3 approach we reject). One source of
-// truth for colour roles, type scale, spacing, rounding, and animation timing so surfaces never
-// hard-code values inline. Kept deliberately small; grow only when a surface actually needs a token.
+// Shrek design tokens (Desktop Slice 1). THE stable semantic contract the shell consumes: colour roles,
+// type scale, spacing, rounding, and animation timing, so surfaces never hard-code values inline. The
+// COLOUR roles are now resolved by the theme SYSTEM (themes/Theme.qml -> Theme.c) rather than fixed here:
+// the active values come from whichever mode is selected — dynamic wallpaper-derived (the default), curated
+// shrek-dark / shrek-light, high-contrast, or user-custom — plus any user overrides. The role NAMES are the
+// contract and stay stable; only their values change per mode. Surfaces must reference these role names
+// ONLY (never a raw colour or a palette source), enforced by scripts/check-tokens.sh, so a mode switch
+// repaints the whole shell through this one chokepoint. Type/spacing/rounding/timing remain fixed identity.
 QtObject {
-    // ── colour roles ──────────────────────────────────────────────────────────────────────────────
-    // Near-black base with a faint cool tint (organic, not flat #000). Raised planes step lighter.
-    readonly property color bg:           "#101014"   // base / root
-    readonly property color surface:      "#17181c"   // bar, cards
-    readonly property color surfaceAlt:   "#1f2127"   // raised row / hover
-    readonly property color overlay:      "#22242b"   // drawers / panels floating over content
-    readonly property color border:       "#2f333b"
-    readonly property color borderStrong: "#3d424c"
+    // ── colour roles (resolved by Theme.c; see themes/Theme.qml + themes/Palettes.js) ───────────────
+    readonly property color bg:           Theme.c.bg           // base / root
+    readonly property color surface:      Theme.c.surface      // bar, cards
+    readonly property color surfaceAlt:   Theme.c.surfaceAlt   // raised row / hover
+    readonly property color overlay:      Theme.c.overlay      // drawers / panels floating over content
+    readonly property color border:       Theme.c.border
+    readonly property color borderStrong: Theme.c.borderStrong
 
-    // Floating surfaces over the wallpaper — slightly translucent for depth (#AARRGGBB).
-    readonly property color barBg:   "#ec1a1b20"   // floating bar
-    readonly property color panelBg: "#f21d1f26"   // launcher / drawers
-    readonly property color rowHi:   "#26311c"     // selected launcher row (accent-tinted)
+    // Floating surfaces over the wallpaper — may be translucent for depth (#AARRGGBB).
+    readonly property color barBg:   Theme.c.barBg     // floating bar
+    readonly property color panelBg: Theme.c.panelBg   // launcher / drawers
+    readonly property color rowHi:   Theme.c.rowHi     // selected launcher row (accent-tinted)
 
-    readonly property color text:      "#e8e8e6"       // primary
-    readonly property color textDim:   "#9aa0a8"       // secondary
-    readonly property color textFaint: "#6b7079"       // tertiary / disabled
+    readonly property color text:      Theme.c.text        // primary
+    readonly property color textDim:   Theme.c.textDim     // secondary
+    readonly property color textFaint: Theme.c.textFaint   // tertiary / disabled
 
-    readonly property color accent:     "#5aa02c"      // swamp green — Shrek identity
-    readonly property color accentDim:  "#47801f"
-    readonly property color accentText: "#0c1206"      // text/icon drawn ON accent fills
+    readonly property color accent:     Theme.c.accent       // swamp green — Shrek identity
+    readonly property color accentDim:  Theme.c.accentDim
+    readonly property color accentText: Theme.c.accentText   // text/icon drawn ON accent fills
 
     // Semantic — used sparingly. ATTENTION is amber (notice), not red (alarm); danger only for
     // genuinely destructive affordances (power off).
-    readonly property color notice: "#d8a657"
-    readonly property color danger: "#e06c75"
-    readonly property color ok:     "#5aa02c"
+    readonly property color notice: Theme.c.notice
+    readonly property color danger: Theme.c.danger
+    readonly property color ok:     Theme.c.ok
+
+    // Danger-row hover tint + modal scrim (previously hard-coded in surfaces; now first-class roles).
+    readonly property color dangerHover: Theme.c.dangerHover
+    readonly property color scrim:       Theme.c.scrim
 
     // ── typography ────────────────────────────────────────────────────────────────────────────────
     readonly property string fontFamily: "DejaVu Sans"       // shipped (fonts-dejavu-core)

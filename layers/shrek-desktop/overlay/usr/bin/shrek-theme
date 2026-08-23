@@ -1,0 +1,70 @@
+#!/bin/sh
+# shrek-theme — select the Shrek desktop theme mode (and optional semantic-token overrides).
+#
+# Writes ~/.config/shrek/theme.json, which the running shell's Theme system watches: it repaints the whole
+# shell live and re-syncs sway window chrome. No daemon, no reload flag — the shell owns resolution.
+#
+#   shrek-theme set <mode> [key=#hex ...]   pick a mode, optionally pin semantic roles
+#   shrek-theme show                        print the current config
+#   shrek-theme apply                       nudge the shell to re-resolve (touches the config)
+#
+#   modes: dynamic (wallpaper-derived, default) | shrek-dark | shrek-light | high-contrast | custom
+#   custom reads its base palette from ~/.config/shrek/custom.json (same {"<role>":"#hex", ...} shape).
+#   overrides merge over ANY mode, so `shrek-theme set dynamic accent=#7cb518` keeps dynamic colours but
+#   pins the accent — the override still flows through the semantic tokens, never around them.
+set -eu
+
+CFG="${SHREK_THEME_CONFIG:-${HOME}/.config/shrek/theme.json}"
+MODES="dynamic shrek-dark shrek-light high-contrast custom"
+
+usage() {
+    cat >&2 <<'EOF'
+usage:
+  shrek-theme set <dynamic|shrek-dark|shrek-light|high-contrast|custom> [key=#hex ...]
+  shrek-theme show
+  shrek-theme apply
+EOF
+    exit "${1:-0}"
+}
+
+valid_mode() { for m in $MODES; do [ "$1" = "$m" ] && return 0; done; return 1; }
+
+cmd="${1:-}"
+[ -n "$cmd" ] || usage 1
+
+case "$cmd" in
+    set)
+        mode="${2:-}"
+        [ -n "$mode" ] || usage 1
+        valid_mode "$mode" || { echo "shrek-theme: unknown mode '$mode' (want: $MODES)" >&2; exit 2; }
+        shift 2
+        ov=""
+        for kv in "$@"; do
+            k="${kv%%=*}"; v="${kv#*=}"
+            [ -n "$k" ] && [ "$k" != "$kv" ] || { echo "shrek-theme: bad override '$kv' (want key=#hex)" >&2; exit 2; }
+            [ -n "$ov" ] && ov="$ov,"
+            ov="$ov\"$k\":\"$v\""
+        done
+        mkdir -p "$(dirname "$CFG")"
+        if [ -n "$ov" ]; then
+            printf '{"mode":"%s","overrides":{%s}}\n' "$mode" "$ov" > "$CFG"
+        else
+            printf '{"mode":"%s"}\n' "$mode" > "$CFG"
+        fi
+        echo "shrek-theme: $mode${ov:+ +overrides}"
+        ;;
+    show)
+        if [ -f "$CFG" ]; then cat "$CFG"; else echo '{"mode":"dynamic"}  (default; no config written)'; fi
+        ;;
+    apply)
+        # The shell re-syncs on config change; touch to retrigger (no-op if the shell isn't running yet —
+        # it also re-syncs at startup).
+        [ -f "$CFG" ] && touch "$CFG" || true
+        ;;
+    -h|--help|help)
+        usage 0
+        ;;
+    *)
+        usage 1
+        ;;
+esac

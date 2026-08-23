@@ -56,7 +56,7 @@ PanelWindow {
 
     Rectangle {
         anchors.fill: parent
-        color: "#000000"
+        color: Tokens.scrim
         opacity: 0.53 * picker.anim
         MouseArea { anchors.fill: parent; onClicked: picker.close() }
     }

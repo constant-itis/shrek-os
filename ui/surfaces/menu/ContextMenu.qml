@@ -80,7 +80,7 @@ PanelWindow {
                         visible: !entry.isSep
                         anchors.fill: parent
                         radius: Tokens.radiusSm
-                        color: rowMa.containsMouse ? (entry.danger ? "#3a1e22" : Tokens.surfaceAlt) : "transparent"
+                        color: rowMa.containsMouse ? (entry.danger ? Tokens.dangerHover : Tokens.surfaceAlt) : "transparent"
 
                         Text {
                             anchors.left: parent.left

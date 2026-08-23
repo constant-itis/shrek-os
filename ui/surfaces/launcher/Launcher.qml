@@ -58,7 +58,7 @@ PanelWindow {
     // dim scrim — fades in with the launcher; click-out closes
     Rectangle {
         anchors.fill: parent
-        color: "#000000"
+        color: Tokens.scrim
         opacity: 0.53 * launcher.anim
         MouseArea { anchors.fill: parent; onClicked: launcher.close() }
     }
