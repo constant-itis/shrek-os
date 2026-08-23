@@ -36,12 +36,7 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     swaymsg output "*" resolution 1440x900 >/dev/null 2>&1 || true
     OUT="$(swaymsg -t get_outputs | grep -oE "HEADLESS-[0-9]+" | head -1)"; OUT="${OUT:-HEADLESS-1}"
     WD="$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v "\.lock$" | head -1)"; WD="$(basename "${WD:-wayland-1}")"
-    export WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland   # grim + quickshell both need the display
-    # Caelestia blobs are a custom QSGMaterial shader — the Qt Quick "software" backend CANNOT paint
-    # custom shaders (they render as nothing). Use the RHI/OpenGL backend over llvmpipe (software GL,
-    # no GPU hardware needed) so the blob surface actually renders. QSG_RENDER_LOOP=basic avoids the
-    # llvmpipe threaded-render-loop segfault. This matches the sealed-image shrek-desktop wrapper.
-    export QSG_RHI_BACKEND=opengl LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe QSG_RENDER_LOOP=basic
+    export WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software   # matches the sealed wrapper
     export QML_IMPORT_PATH="/work/$BLOBS_QML${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
     export QML2_IMPORT_PATH="/work/$BLOBS_QML${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
     "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 &

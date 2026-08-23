@@ -5,13 +5,19 @@ import "../providers"
 import "../services"
 import "../state"
 import "../themes"
-import "../ported"
-import "../surfaces/frame"
 import "../surfaces/desktop"
+import "../surfaces/frame"
+import "../surfaces/bar"
+import "../surfaces/dashboard"
+import "../surfaces/dock"
+import "../surfaces/launcher"
 import "../surfaces/clipboard"
+import "../surfaces/work"
+import "../surfaces/system"
 import "../surfaces/notifications"
 import "../surfaces/osd"
 import "../surfaces/menu"
+import "../surfaces/popout"
 
 // Shell.qml — composition root (loaded by the config-folder entry ui/shell.qml).
 //
@@ -32,26 +38,23 @@ ShellRoot {
     readonly property var activeScreen: Sway.focusedScreen
         || (Quickshell.screens.length > 0 ? Quickshell.screens[0] : null)
 
-    // Per-monitor surfaces. The Caelestia-derived ContentWindow owns the frame, rail, attached panel
-    // geometry, input regions, and edge interactions as one shell object.
+    // Per-monitor surfaces — one Bar and one Desktop backdrop on every screen (Variants instantiates the
+    // delegate once per Quickshell.screens entry and injects `modelData` = that ShellScreen).
+    // Rounded desktop frame — created FIRST so it layers under the shell surfaces (and over windows).
     Variants {
         model: Quickshell.screens
-        ContentWindow {
+        ScreenFrame {
             required property var modelData
             screen: modelData
             activeScreen: shell.activeScreen
-            session: sessionProvider
         }
     }
-    // Reserve the work area so tiled windows sit INSIDE the frame instead of under the bar/border.
-    // Caelestia does this with separate exclusion-zone layers; the full-screen ContentWindow itself
-    // stays exclusionMode=Ignore (drawers overlay windows). Without this, windows tile full-screen and
-    // the bar/frame paints over their left edge (clipped text, stray dark slabs).
     Variants {
         model: Quickshell.screens
-        ShellExclusions {
+        Bar {
             required property var modelData
             screen: modelData
+            session: sessionProvider
         }
     }
     Variants {
@@ -63,7 +66,13 @@ ShellRoot {
     }
 
     // Single-instance overlays — rendered on the focused output.
+    Launcher { screen: shell.activeScreen }
     ClipboardPicker { screen: shell.activeScreen }
+    WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
+    SystemDrawer { screen: shell.activeScreen }
+    Dashboard { provider: sessionProvider; screen: shell.activeScreen }
+    QuickDock { screen: shell.activeScreen }
+    RailPopout { provider: sessionProvider; screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
     Osd { screen: shell.activeScreen }
     ContextMenu { screen: shell.activeScreen }
@@ -79,11 +88,6 @@ ShellRoot {
         target: "railpopout"
         function open(name: string, y: real): void { ShellState.openRailPopout(name, y) }
         function close(): void { ShellState.closeRailPopout() }
-    }
-    IpcHandler {
-        target: "edge"
-        function rightOpen(): void { ShellState.openRightEdge() }
-        function close(): void { ShellState.closeRightEdge() }
     }
     // Screenshot (Super+Print / Print via Sway binds, or the context menu). region() drops slurp then
     // grim; screen() captures the whole output. Both save + copy + notify via the Screenshot service.
