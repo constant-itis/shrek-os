@@ -5,6 +5,8 @@ import QtQuick
 // IPC seam in Shell.qml flips them (Sway keybinds / preview drive the same path).
 QtObject {
     property bool panelOpen: false
+    property string panelMode: "control"
+    property string controlSection: "overview"
     property string systemSection: "overview"
 
     function closeMajor(): void {
@@ -14,7 +16,15 @@ QtObject {
 
     function openSystem(section) {
         workOpen = false
+        panelMode = "settings"
         systemSection = section || "overview"
+        panelOpen = true
+    }
+
+    function openControl(section) {
+        workOpen = false
+        panelMode = "control"
+        controlSection = section || "overview"
         panelOpen = true
     }
 
@@ -23,6 +33,7 @@ QtObject {
             panelOpen = false
         } else {
             workOpen = false
+            panelMode = "control"
             panelOpen = true
         }
     }

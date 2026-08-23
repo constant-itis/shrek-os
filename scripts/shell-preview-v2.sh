@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Render shell-v2 (ui-v2/) headless and screenshot it for fast visual iteration.
 #
-# Captures out/preview-v2/{closed,system,network,audio,appearance,work}.png using headless Sway with pixman and Qt's software
+# Captures out/preview-v2/{closed,control,network-quick,network,audio,appearance,work}.png using headless Sway with pixman and Qt's software
 # backend. The Work shot uses a seeded shrek-session/1 record for visual preview only; the real
 # gatekeeperd writer path is covered by scripts/desktop-session-proof.sh.
 set -euo pipefail
@@ -90,6 +90,12 @@ shot() {
     || echo "grim $1 failed"
 }
 shot closed
+"/work/$CACHE/quickshell" -p /work/ui-v2/shell.qml ipc call ui control >/dev/null 2>&1 || echo "ipc control failed"
+sleep 1
+shot control
+"/work/$CACHE/quickshell" -p /work/ui-v2/shell.qml ipc call ui controlNetwork >/dev/null 2>&1 || echo "ipc control network failed"
+sleep 1
+shot network-quick
 "/work/$CACHE/quickshell" -p /work/ui-v2/shell.qml ipc call ui system >/dev/null 2>&1 || echo "ipc system failed"
 sleep 1
 shot system

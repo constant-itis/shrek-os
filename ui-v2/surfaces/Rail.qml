@@ -55,7 +55,7 @@ PanelWindow {
 
     function activateWidget(id) {
         if (id === "panel")
-            UI.togglePanel()
+            UI.openControl("overview")
         else if (id === "work")
             UI.toggleWork()
     }
@@ -78,17 +78,17 @@ PanelWindow {
 
     function openStatus(id) {
         if (id === "network")
-            UI.openSystem("network")
+            UI.openControl("network")
         else if (id === "audio")
-            UI.openSystem("audio")
+            UI.openControl("overview")
         else if (id === "bluetooth")
-            UI.openSystem("bluetooth")
+            UI.openControl("overview")
         else if (id === "power")
-            UI.openSystem("power")
+            UI.openControl("overview")
         else if (id === "windows")
             UI.openSystem("system")
         else if (id === "time")
-            UI.openSystem("overview")
+            UI.openControl("overview")
     }
 
     function statusVisible(id) {
