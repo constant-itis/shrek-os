@@ -27,9 +27,9 @@ Item {
         ShellState.closeRailPopout()
     }
 
+    // Rail hover-popout is disabled: it only ever showed placeholder content ("Context routed through
+    // the bar wrapper") and rendered as a detached box overlapping windows. Rail items act on click.
     function checkPopout(y: real): void {
-        const localY = Math.max(Tokens.spaceSm, Math.min(y, height - 80))
-        ShellState.openRailPopout("bar", localY)
     }
 
     function handleWheel(y: real, angleDelta: point): void {

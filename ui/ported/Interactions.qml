@@ -105,10 +105,6 @@ MouseArea {
         if (!launcherShortcutActive)
             ShellState.launcherOpen = inBottomPanel(panels.launcher, x, y)
 
-        if (pressed && dragStart.x < bar.implicitWidth && dragX > Tokens.spaceLg) {
-            ShellState.openRailPopout("bar", y)
-        }
-
         if (pressed && dragStart.x > width - Tokens.spaceLg && dragX < -Tokens.spaceLg) {
             ShellState.openRightEdge()
             rightShortcutActive = true
