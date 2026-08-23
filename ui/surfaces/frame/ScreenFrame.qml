@@ -31,19 +31,19 @@ PanelWindow {
     property var session
 
     readonly property bool activeOutput: activeScreen === screen
-    readonly property bool rightDrawerOpen: activeOutput && (ShellState.workOpen || ShellState.systemOpen)
-    property real rightDrawerProgress: rightDrawerOpen ? 1 : 0
-    readonly property bool rightDrawerVisible: rightDrawerOpen || rightDrawerProgress > 0.001
+    readonly property bool mergedPanelOpen: activeOutput && (ShellState.workOpen || ShellState.systemOpen)
+    property real mergedPanelProgress: mergedPanelOpen ? 1 : 0
+    readonly property bool mergedPanelVisible: mergedPanelOpen || mergedPanelProgress > 0.001
     readonly property int inset: Tokens.spaceSm
     readonly property int railTotal: Tokens.railWidth + 2 * Tokens.spaceSm
-    readonly property real drawerSocketWidth: (Tokens.drawerWidth + inset) * rightDrawerProgress
+    readonly property real mergedPanelWidth: (Tokens.drawerWidth + inset) * mergedPanelProgress
     readonly property int rad: 18
     readonly property int socketRad: Tokens.radiusLg
     readonly property color material: Tokens.panelBg
     readonly property color outline: Tokens.border
     readonly property color shadow: Qt.rgba(0, 0, 0, 0.24)
 
-    Behavior on rightDrawerProgress {
+    Behavior on mergedPanelProgress {
         NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic }
     }
 
@@ -82,11 +82,11 @@ PanelWindow {
             }
 
             BlobRect {
-                visible: frame.rightDrawerVisible
+                visible: frame.mergedPanelVisible
                 group: shadowBlobs
-                x: frame.width - frame.drawerSocketWidth
+                x: frame.width - frame.mergedPanelWidth
                 y: frame.inset
-                width: frame.drawerSocketWidth
+                width: frame.mergedPanelWidth
                 height: frame.height - 2 * frame.inset
                 radius: frame.socketRad
                 deformScale: 0.00035
@@ -105,15 +105,15 @@ PanelWindow {
             borderBottom: frame.inset
         }
 
-        // First attached geometry: the right drawer socket. It overlaps the frame border and shares the
-        // BlobGroup, giving the concave/convex join that the previous QML Shape bridge could only fake.
+        // G2 attached geometry: the Work/System content windows draw no panel background of their own.
+        // This animated BlobRect is the panel body, merged into the desktop frame by the shared group.
         BlobRect {
-            id: rightSocket
-            visible: frame.rightDrawerVisible
+            id: mergedPanel
+            visible: frame.mergedPanelVisible
             group: shellBlobs
-            x: frame.width - frame.drawerSocketWidth
+            x: frame.width - frame.mergedPanelWidth
             y: frame.inset
-            width: frame.drawerSocketWidth
+            width: frame.mergedPanelWidth
             height: frame.height - 2 * frame.inset
             radius: frame.socketRad
             deformScale: 0.00035
