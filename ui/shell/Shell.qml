@@ -7,6 +7,7 @@ import "../state"
 import "../themes"
 import "../surfaces/desktop"
 import "../surfaces/bar"
+import "../surfaces/dashboard"
 import "../surfaces/launcher"
 import "../surfaces/clipboard"
 import "../surfaces/work"
@@ -57,6 +58,7 @@ ShellRoot {
     ClipboardPicker { screen: shell.activeScreen }
     WorkDrawer { provider: sessionProvider; screen: shell.activeScreen }
     SystemDrawer { screen: shell.activeScreen }
+    Dashboard { provider: sessionProvider; screen: shell.activeScreen }
     Toasts { screen: shell.activeScreen }
     Osd { screen: shell.activeScreen }
     ContextMenu { screen: shell.activeScreen }
@@ -67,6 +69,7 @@ ShellRoot {
     IpcHandler { target: "work";      function toggle(): void { ShellState.toggleWork() } }
     IpcHandler { target: "system";    function toggle(): void { ShellState.toggleSystem() } }
     IpcHandler { target: "clipboard"; function toggle(): void { ShellState.toggleClipboard() } }
+    IpcHandler { target: "dashboard"; function toggle(): void { ShellState.toggleDashboard() } }
     // Screenshot (Super+Print / Print via Sway binds, or the context menu). region() drops slurp then
     // grim; screen() captures the whole output. Both save + copy + notify via the Screenshot service.
     IpcHandler {

@@ -10,6 +10,7 @@ QtObject {
     property bool workOpen:      false
     property bool systemOpen:    false
     property bool clipboardOpen: false
+    property bool dashboardOpen: false
 
     // Right-click context menu. menuItems is an array of { label, danger?, separator?, action },
     // opened at (menuX, menuY) in screen coordinates. Rendered by surfaces/menu/ContextMenu.qml.
@@ -19,13 +20,15 @@ QtObject {
     property var  menuItems: []
 
     function _closeAll() {
-        launcherOpen = false; workOpen = false; systemOpen = false; clipboardOpen = false; menuOpen = false
+        launcherOpen = false; workOpen = false; systemOpen = false; clipboardOpen = false
+        dashboardOpen = false; menuOpen = false
     }
 
     function toggleLauncher()  { var v = !launcherOpen;  _closeAll(); launcherOpen = v }
     function toggleWork()      { var v = !workOpen;      _closeAll(); workOpen = v }
     function toggleSystem()    { var v = !systemOpen;    _closeAll(); systemOpen = v }
     function toggleClipboard() { var v = !clipboardOpen; _closeAll(); clipboardOpen = v }
+    function toggleDashboard() { var v = !dashboardOpen; _closeAll(); dashboardOpen = v }
     function openMenu(x, y, items) { _closeAll(); menuX = x; menuY = y; menuItems = items; menuOpen = true }
     function closeAll()       { _closeAll() }
 

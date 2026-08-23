@@ -9,3 +9,4 @@ singleton Mpris Mpris.qml
 singleton Tray Tray.qml
 singleton Clipboard Clipboard.qml
 singleton Screenshot Screenshot.qml
+singleton SysMon SysMon.qml
