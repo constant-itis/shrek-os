@@ -66,7 +66,7 @@ systemctl start bluetooth.service 2>/dev/null || true
 b=0; while [ "$b" -lt 20 ]; do [ "$(systemctl is-active bluetooth.service 2>/dev/null)" = active ] && break; sleep 1; b=$((b + 1)); done
 say "bluetooth hci=[$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ')] settled-after=${b}s"
 
-for u in systemd-networkd systemd-resolved bluetooth dbus-broker; do
+for u in NetworkManager systemd-resolved bluetooth dbus-broker; do
     say "SVC system $u=$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
 done
 say "SVC system user@1000.service=$(systemctl is-active user@1000.service 2>/dev/null || echo unknown)"

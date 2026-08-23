@@ -52,7 +52,7 @@ volatile state; `shrek-desktop` is `exec sway -c … → exec quickshell` with *
    Secure Boot keys survive across boots (first boot = SETUP MODE blank vars → systemd-boot
    auto-enrolls → persisted thereafter).
 3. **Normal desktop services/settings.** Whatever a normal interactive Debian session needs and the
-   headless smoke didn't: `systemd-logind` + seat, `systemd-networkd`/resolved (or NM) for real net,
+   headless smoke didn't: `systemd-logind` + seat, NetworkManager/resolved for real net,
    `dbus`, time sync, fonts, PipeWire/WirePlumber for audio, XKB/keymap, locale. Enumerate empirically
    from a first interactive boot; bake the required units/settings into the sealed base or the desktop
    layer.
@@ -125,9 +125,8 @@ explicitly required** — `/usr` stays sealed dm-verity, `/var` stays a volatile
   ACLs** grant the active session its DRM/input devices (no `video`/`render`/`input` group membership
   needed). A `shrek-desktop-ready.service` ordering barrier gates the launcher on login prerequisites
   being resolvable, closing an intermittent tty1-autologin race.
-- **Networking:** `systemd-networkd` DHCP on the virtio NIC via a baked `network/20-wired.network` +
-  `systemd-resolved` (both enabled via `.wants` symlinks; `/etc/resolv.conf` → the resolved stub).
-  Stateless — "returns functional" needs no persisted state.
+- **Networking:** NetworkManager owns host connectivity, with `systemd-resolved` providing DNS. Workload
+  egress remains gatekeeperd+nftables.
 - **Audio + portals:** PipeWire / WirePlumber + `xdg-desktop-portal` run in `dev`'s `systemd --user`
   session (the desktop layer ships the user `pipewire`/`pipewire-pulse` sockets + `wireplumber` enabled);
   `pam_systemd` starts the user manager, `/run/user/1000/bus` is the session bus.

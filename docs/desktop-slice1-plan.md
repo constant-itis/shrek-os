@@ -55,9 +55,8 @@ stable/fast/secure rule those backends link libraries **already shipped in the d
 (`pipewire`, `bluez`, `dbus`, Sway IPC), so this adds native event-driven consumers of daemons we
 already trust, **not** a new dependency closure.
 
-**Networking reality:** the image runs `systemd-networkd` (wired DHCP), not NetworkManager. Slice 1
-shows honest **read-only** link/connectivity state from networkd and **defers** NetworkManager + the
-Wi-Fi picker until real-hardware dogfooding creates that requirement.
+**Networking reality:** the image runs NetworkManager for host/human connectivity. Slice 1 keeps network
+UI dormant unless a surface needs it; NetworkManager is separate from workload egress enforcement.
 
 ---
 
@@ -113,7 +112,7 @@ prompts; no Windows-UAC-style interruption.
   tier/trust/state the provider already carries. **Read-only.**
 - **ATTENTION** — Quickshell notification server → right-stack center + transient toasts. Real
   notifications only; no security nagging.
-- **SYSTEM** — audio (Pipewire), Bluetooth (BlueZ), network **state** (networkd, read-only), power menu
+- **SYSTEM** — audio (Pipewire), Bluetooth (BlueZ), network **state** (NetworkManager, read-only), power menu
   (logout/reboot/poweroff via `loginctl`/`systemctl`), brightness if hardware. Quick controls, not a
   settings app.
 
@@ -135,7 +134,7 @@ ui/
     Audio.qml           Quickshell.Services.Pipewire -> default sink vol/mute
     Bluetooth.qml       Quickshell.Bluetooth -> adapter/devices (empty-OK in VM)
     Power.qml           Quickshell.Services.UPower -> battery (hw-gated, absent in VM)
-    Network.qml         networkd link state (read-only; NM/Wi-Fi deferred)
+    Network.qml         dormant NetworkManager read model (read-only; no network surface yet)
     Notifications.qml   Quickshell.Services.Notifications (server)
     Session.qml         <- providers/SessionProvider.qml (unchanged logic, relocated)
     Ipc.qml             IpcHandler: toggleLauncher/Work/System, power
@@ -171,7 +170,7 @@ build phase:
 | `SERVICE_NOTIFICATIONS` | ON | Quickshell *is* the notif server; one audited surface |
 | `BLUETOOTH` | ON | native BlueZ D-Bus; `bluez` already shipped; empty-adapter-OK |
 | `SERVICE_UPOWER` | ON | battery; cheap, hardware-gated |
-| `SESSION_LOCK` `STATUS_NOTIFIER` `MPRIS` `NETWORK` `PAM` `POLKIT` `GREETD` `SCREENCOPY` `HYPRLAND` | OFF | deferred / not on path / networkd-not-NM; keep closure lean |
+| `SESSION_LOCK` `STATUS_NOTIFIER` `MPRIS` `NETWORK` `PAM` `POLKIT` `GREETD` `SCREENCOPY` `HYPRLAND` | OFF | deferred / not on path; keep closure lean |
 
 Shell-out survives only for `brightnessctl` (no backend; hw-gated). Flag names are `# VERIFY`-at-build
 against the pinned Quickshell tag. Optional identity UI font is a later, non-blocking add.

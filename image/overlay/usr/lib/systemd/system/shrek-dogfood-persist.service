@@ -10,7 +10,7 @@ Description=Shrek Dogfood-0 M1 persistence + services acceptance probe
 Documentation=file:///usr/share/doc/shrek/dogfood-0.md
 # Need /home mounted (persistence check) and the standard services started (functional report). These
 # ordering deps are ignored if a unit is absent (bluetooth ships in the desktop layer).
-After=home.mount systemd-networkd.service systemd-resolved.service bluetooth.service local-fs.target
+After=home.mount NetworkManager.service systemd-resolved.service bluetooth.service local-fs.target
 Wants=home.mount
 ConditionPathExists=/dev/dri/card0
 

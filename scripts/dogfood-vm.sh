@@ -109,7 +109,7 @@ fi
 grep -qa 'SHREK-DOGFOOD MARKER-WRITTEN' "$LOG" && ok "marker written on the first boot (reboot cycle ran)" \
   || bad "marker-written line absent (persist probe did not run on boot1)"
 
-svc systemd-networkd '^active'
+svc NetworkManager '^active'
 svc systemd-resolved '^active'
 svc bluetooth        '^active'
 svc dbus-broker      '^active'

@@ -6,7 +6,7 @@ import "../../state"
 import "../../services"
 
 // SystemDrawer — the SYSTEM zone (Desktop Slice 1, Phase 3). Quick controls over mature Linux services:
-// audio (PipeWire), network state (read-only, systemd-networkd), Bluetooth (BlueZ), battery (UPower),
+// audio (PipeWire), network state (read-only, NetworkManager), Bluetooth (BlueZ), battery (UPower),
 // and a power menu. Toggled with Super+S / the bar status cluster. Ordinary user actions only — no
 // authority is read or minted here. Empty/absent hardware degrades honestly (no adapter, no battery).
 PanelWindow {

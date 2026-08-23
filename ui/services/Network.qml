@@ -2,9 +2,8 @@ pragma Singleton
 import QtQuick
 import Quickshell.Io
 
-// Network — honest READ-ONLY link/connectivity state for Desktop Slice 1. The image runs
-// systemd-networkd (not NetworkManager), and the VM has no Wi-Fi, so this reports link state only; a
-// Wi-Fi picker + NetworkManager are deferred to real-hardware dogfooding (docs/desktop-slice1-plan.md).
+// Network — legacy read-only link/connectivity state from the pre-NetworkManager shell.
+// ui-v2/services/Network.qml is the current dormant NetworkManager adapter.
 // Reads /proc/net/route (default route) + /sys/class/net (operstate) + optional `ip` for the address —
 // no daemon control, no parsing of a mutable CLI's formatted tables. Same read-only Process idiom as
 // SessionProvider.
