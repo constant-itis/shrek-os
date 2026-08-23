@@ -51,6 +51,8 @@ Item {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        onEntered: ShellState.openRailPopout("power", root.mapToItem(null, 0, root.height / 2).y)
+        onExited: ShellState.closeRailPopout("power")
         onClicked: ShellState.openMenu(Tokens.railWidth + 2 * Tokens.spaceSm, 99999, Menus.root())
     }
 }

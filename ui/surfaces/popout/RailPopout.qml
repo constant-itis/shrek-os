@@ -1,10 +1,10 @@
 import Quickshell
 import Quickshell.Wayland
 import QtQuick
+import Caelestia.Blobs
 import "../../themes"
 import "../../state"
 import "../../services"
-import "../../geometry"
 
 // RailPopout — contextual rail hover surface. This is the QML bridge for the Caelestia-style bar popout
 // route: rail items set a semantic popout name and anchor, while this edge-attached surface renders the
@@ -12,6 +12,7 @@ import "../../geometry"
 PanelWindow {
     id: pop
     WlrLayershell.layer: WlrLayer.Overlay
+    WlrLayershell.exclusionMode: ExclusionMode.Ignore
     anchors { top: true; bottom: true; left: true; right: true }
     exclusiveZone: 0
     color: "transparent"
@@ -35,9 +36,38 @@ PanelWindow {
         Behavior on y { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
         Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
-        EdgePanelShape {
+        BlobGroup {
+            id: popoutBlobs
+            color: Tokens.overlay
+            smoothing: 24
+        }
+
+        BlobRect {
+            group: popoutBlobs
+            x: -10
+            y: 6
+            width: 28
+            height: parent.height - 12
+            radius: Tokens.radiusLg
+            deformScale: 0.00035
+        }
+
+        BlobRect {
+            group: popoutBlobs
+            x: 0
+            y: 0
+            width: parent.width
+            height: parent.height
+            radius: Tokens.radiusLg
+            deformScale: 0.00035
+        }
+
+        Rectangle {
             anchors.fill: parent
-            edge: "left"
+            radius: Tokens.radiusLg
+            color: "transparent"
+            border.color: Tokens.border
+            border.width: 1
         }
 
         Column {
@@ -51,6 +81,8 @@ PanelWindow {
                     : pop.name === "work" ? "Work"
                     : pop.name === "clock" ? Qt.formatDateTime(new Date(), "dddd, MMM d")
                     : pop.name === "terminal" ? "Terminal"
+                    : pop.name === "theme" ? "Theme"
+                    : pop.name === "power" ? "Session"
                     : "Applications"
                 color: Tokens.text
                 font.family: Tokens.fontFamily
@@ -69,6 +101,10 @@ PanelWindow {
                       ? Qt.formatDateTime(new Date(), "HH:mm")
                     : pop.name === "terminal"
                       ? "Open a user terminal"
+                    : pop.name === "theme"
+                      ? "Cycle dynamic, dark, light, and high-contrast"
+                    : pop.name === "power"
+                      ? "Open session and power actions"
                     : "Open launcher or right-click for menu"
                 color: Tokens.textDim
                 font.family: Tokens.fontFamily

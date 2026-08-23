@@ -29,6 +29,8 @@ Rectangle {
         anchors.fill: parent
         hoverEnabled: true
         cursorShape: Qt.PointingHandCursor
+        onEntered: ShellState.openRailPopout("theme", root.mapToItem(null, 0, root.height / 2).y)
+        onExited: ShellState.closeRailPopout("theme")
         onClicked: ShellState.cycleTheme()
     }
 }
