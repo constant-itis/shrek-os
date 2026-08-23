@@ -12,7 +12,7 @@ release      = "trixie"
 # Qt-runtime-coupled → must be compiled against the same Qt6 it will load (staged-binary delivery,
 # NOT a portable supply-pin). See docs/desktop-bootstrap-0.md §Delivery.
 repo           = "https://github.com/quickshell-mirror/quickshell"
-quickshell_tag = "v0.3.1"             # bring-up resolved 2026-08-21 (was AUTO-FIRST-BUILD); newest tag at first smoke
+quickshell_tag = "0fed22a2c47d9568ddf13cf61586b3f2ac4378a2" # Caelestia shell flake.lock pin; validated with Shrek I3/Sway flags
 
 [uwsm]
 # trixie-backports only (shell-architecture.md caveat); NOT a stable-suite guarantee.
