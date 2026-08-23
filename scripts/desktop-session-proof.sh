@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Desktop Slice-1 session-view proof — prove the REAL SessionProvider reads a gatekeeperd-authored
 # shrek-session/1 record into the Quickshell Work drawer (Phase-8 Slice-1, "go C"). The WRITER is the
-# real `gatekeeperd session-view` CLI (host); the READER is ui/providers/SessionProvider.qml running
+# real `gatekeeperd session-view` CLI (host); the READER is ui-v2/providers/SessionProvider.qml running
 # under the actual Sway + source-built Quickshell stack (container, headless/software, same idiom as
 # scripts/desktop-smoke.sh). One schema, writer and reader identical — that identity IS the acceptance.
 #
@@ -50,7 +50,7 @@ docker run --rm --privileged \
       git cmake ninja-build build-essential pkg-config \
       qt6-base-dev qt6-base-private-dev qt6-declarative-dev qt6-declarative-private-dev \
       qt6-wayland-dev qt6-wayland-private-dev qt6-shadertools-dev libwayland-dev libwayland-bin \
-      wayland-protocols libcli11-dev libdrm-dev
+      wayland-protocols libcli11-dev libdrm-dev libxcb1-dev libpipewire-0.3-dev
     for p in qml6-module-qtquick-window qml6-module-qtquick-layouts qml6-module-qtquick-shapes \
              qml6-module-qtquick-controls qt6-declarative-dev-tools fonts-dejavu-core libgl1-mesa-dri; do
       apt-get install -y --no-install-recommends -qq "$p" >/dev/null 2>&1 || echo "WARN optional pkg missing: $p"
@@ -67,13 +67,14 @@ docker run --rm --privileged \
     WP_DATADIR="$(pkg-config --variable=pkgdatadir wayland-protocols 2>/dev/null || echo /usr/share/wayland-protocols)"
     cp -r /tmp/wp/staging /tmp/wp/stable /tmp/wp/unstable "$WP_DATADIR/" 2>/dev/null || echo "WARN wp overlay copy partial"
 
-    # build Quickshell from the pinned tag (minimal feature set; keep WAYLAND + WLR layer-shell)
+    # build Quickshell from the pinned tag with the APIs shell-v2 imports:
+    # Quickshell.I3 (I3=ON, X11=ON) and ToplevelManager (WAYLAND_TOPLEVEL_MANAGEMENT=ON).
     git clone --quiet "$QS_REPO" /tmp/qs; cd /tmp/qs
     if [ "$QS_TAG" = "AUTO-FIRST-BUILD" ]; then QS_TAG="$(git tag --sort=-v:refname | head -1)"; fi
     git checkout --quiet "$QS_TAG" || echo "WARN could not checkout $QS_TAG; building default HEAD"
     cmake -S . -B build -GNinja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
-      -DHYPRLAND=OFF -DX11=OFF -DI3=OFF -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
-      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=OFF \
+      -DHYPRLAND=OFF -DX11=ON -DI3=ON -DSCREENCOPY=OFF -DBLUETOOTH=OFF -DNETWORK=OFF \
+      -DWAYLAND_SESSION_LOCK=OFF -DWAYLAND_TOPLEVEL_MANAGEMENT=ON \
       -DSERVICE_STATUS_NOTIFIER=OFF -DSERVICE_PIPEWIRE=OFF -DSERVICE_MPRIS=OFF -DSERVICE_PAM=OFF \
       -DSERVICE_POLKIT=OFF -DSERVICE_GREETD=OFF -DSERVICE_UPOWER=OFF -DSERVICE_NOTIFICATIONS=OFF \
       -DCRASH_HANDLER=OFF -DUSE_JEMALLOC=OFF >/tmp/qs-cmake.log 2>&1 \
@@ -96,7 +97,7 @@ docker run --rm --privileged \
     run_qs() { # $1 = SHREK_SESSION_DIR   $2 = logfile
       [ -n "$QS" ] || { echo "no quickshell binary" > "$2"; return; }
       WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software SHREK_SESSION_DIR="$1" \
-        timeout 20 "$QS" -p /work/ui/shell.qml >"$2" 2>&1 || true
+        timeout 20 "$QS" -p /work/ui-v2/shell.qml >"$2" 2>&1 || true
     }
 
     # --- DS-surfaces + DS-read: a REAL gatekeeperd record renders in the Work drawer ---

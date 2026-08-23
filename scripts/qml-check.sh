@@ -3,8 +3,8 @@
 #
 # The authoritative gate is scripts/desktop-smoke.sh (builds Quickshell from source with that phase's
 # feature flags, headless). That recompile costs minutes per run. This script builds Quickshell ONCE
-# with the FULL Slice-1 feature set into a host cache (out/qs-cache/quickshell — gitignored), then every
-# run loads the real ui/shell.qml under a headless Sway using the CACHED binary: seconds, no recompile.
+# with the shell-v2 feature set into a host cache (out/qs-cache/quickshell, gitignored), then every run
+# loads the real ui-v2/shell.qml under a headless Sway using the cached binary.
 #
 # Use it to catch QML syntax/type/import errors while iterating. Run the real desktop-smoke.sh at each
 # phase boundary before committing (it validates the incremental per-phase flag set from source).
@@ -22,7 +22,6 @@ pin() { grep -E "^[[:space:]]*$1[[:space:]]*=" image/supply/desktop.pins | head 
 QS_REPO="$(pin repo)"; QS_TAG="$(pin quickshell_tag)"
 CACHE=out/qs-cache
 FLAGS="tag=${QS_TAG};I3;X11;TOPLEVEL;PIPEWIRE;BLUETOOTH;UPOWER;NOTIFICATIONS;STATUS_NOTIFIER;MPRIS"
-BLOBS_QML=out/caelestia-blobs/qml
 
 mkdir -p "$CACHE"
 if [ "${FORCE_QS:-0}" = 1 ] || [ ! -x "$CACHE/quickshell" ] || [ "$(cat "$CACHE/flags.txt" 2>/dev/null || true)" != "$FLAGS" ]; then
@@ -62,14 +61,8 @@ if [ "${FORCE_QS:-0}" = 1 ] || [ ! -x "$CACHE/quickshell" ] || [ "$(cat "$CACHE/
   echo "=== cache built: $CACHE/quickshell ==="
 fi
 
-# The Caelestia Shell port uses the upstream GPLv3 Caelestia.Blobs QML module for merged shell geometry.
-# Keep it built even before every surface imports it so the port foundation fails fast.
-if [ ! -f "$BLOBS_QML/Caelestia/Blobs/qmldir" ] || [ "${FORCE_BLOBS:-0}" = 1 ]; then
-  bash scripts/build-caelestia-blobs.sh
-fi
-
 echo "=== fast QML check (cached Quickshell, headless Sway) ==="
-docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work -e CACHE="${CACHE}" -e BLOBS_QML="${BLOBS_QML}" \
+docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work -e CACHE="${CACHE}" \
   debian:trixie bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
@@ -86,23 +79,15 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work -e CACHE="${CACHE}
     swaymsg -t get_version >/dev/null 2>&1 || { echo "QMLCHECK: FAIL (sway did not start)"; sed -n "1,30p" /tmp/sway.log; exit 1; }
     WD="$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v "\.lock$" | head -1)"; WD="$(basename "${WD:-wayland-1}")"
     WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software \
-      QML_IMPORT_PATH="/work/$BLOBS_QML" QML2_IMPORT_PATH="/work/$BLOBS_QML" \
-      timeout 15 "/work/$CACHE/quickshell" -p /work/ui/shell.qml >/tmp/qs.log 2>&1 || true
-    WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software \
-      QML_IMPORT_PATH="/work/$BLOBS_QML" QML2_IMPORT_PATH="/work/$BLOBS_QML" \
-      timeout 5 "/work/$CACHE/quickshell" -p /work/tests/qml/caelestia-blobs-smoke.qml >/tmp/blobs.log 2>&1 || true
+      timeout 15 "/work/$CACHE/quickshell" -p /work/ui-v2/shell.qml >/tmp/qs.log 2>&1 || true
     swaymsg exit >/dev/null 2>&1 || true
     echo "----- quickshell log -----"; cat /tmp/qs.log; echo "--------------------------"
-    echo "----- caelestia blobs smoke log -----"; cat /tmp/blobs.log; echo "-------------------------------------"
     # Scope to QML/config LOAD failures only. Quickshell prints "Failed to load configuration" (+ "caused
     # by @file[l:c]") iff the QML tree fails to load. Runtime service warnings ("Failed to create pipewire
     # context", "Could not connect to DBus" for bluez/upower) are EXPECTED here -- this bare container runs
     # no pipewire/bluez/upower daemon -- and must NOT count as a QML failure.
     if grep -q "Failed to load configuration" /tmp/qs.log; then
       echo "QMLCHECK: FAIL (QML load error)"; grep -A6 "Failed to load configuration" /tmp/qs.log
-    elif grep -q "Failed to load configuration" /tmp/blobs.log || ! grep -q "SHREK-BLOBS-SMOKE loaded" /tmp/blobs.log; then
-      echo "QMLCHECK: FAIL (Caelestia.Blobs import smoke failed)"
-      grep -A8 "Failed to load configuration" /tmp/blobs.log || tail -30 /tmp/blobs.log
     elif grep -q "SHREK-DESKTOP shell surfaces instantiated" /tmp/qs.log && grep -q "Configuration Loaded" /tmp/qs.log; then
       echo "QMLCHECK: PASS"
     else
