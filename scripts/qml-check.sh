@@ -15,6 +15,9 @@
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
+
+# Fail fast on any semantic-token bypass before spending time on the headless QML load.
+"$REPO_ROOT/scripts/check-tokens.sh"
 pin() { grep -E "^[[:space:]]*$1[[:space:]]*=" image/supply/desktop.pins | head -1 | sed 's/#.*//' | cut -d'"' -f2; }
 QS_REPO="$(pin repo)"; QS_TAG="$(pin quickshell_tag)"
 CACHE=out/qs-cache
