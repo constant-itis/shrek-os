@@ -49,10 +49,10 @@ docker run --rm --privileged \
       # libpipewire-0.3-dev: SERVICE_PIPEWIRE (audio). Bluetooth/UPower/Notifications are pure Qt-DBus
       # (no extra native dep, verified in Quickshell v0.3.1 CMake).
 
-    # (1) stage the QML source tree
+    # (1) stage the QML source tree (shell-v2 lives at ui-v2/; staged as /usr/share/shrek/ui)
     rm -rf "/work/$OVL/usr/share/shrek/ui"
     mkdir -p "/work/$OVL/usr/share/shrek/ui"
-    cp -a /work/ui/. "/work/$OVL/usr/share/shrek/ui/"
+    cp -a /work/ui-v2/. "/work/$OVL/usr/share/shrek/ui/"
 
     # (2) build + stage Quickshell (unpackaged in Debian). Staged into the overlay so mkosi copies it
     #     into the sysext /usr; its Qt6 runtime is satisfied by the layer packages.  # VERIFY: the exact
@@ -92,18 +92,8 @@ docker run --rm --privileged \
       DESTDIR="/work/$OVL" ninja -C build install
     fi
 
-    # (2b) Build + stage the GPLv3 Caelestia.Blobs QML module. This is the Caelestia Shell machinery
-    #     Shrek ports directly for merged frame/panel geometry; it is intentionally separate from the
-    #     broader Caelestia service/config plugin.
-    if [ "${FORCE_BLOBS:-0}" != 1 ] && [ -f "/work/$OVL/usr/lib/qt6/qml/Caelestia/Blobs/qmldir" ]; then
-      echo "SHREK-BLOBS-REUSE: staged Caelestia.Blobs present — skipping source build (FORCE_BLOBS=1 to rebuild)"
-    else
-      cmake -S /work/third_party/caelestia-shell -B /tmp/caelestia-blobs-build -GNinja \
-        -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr \
-        -DQT_QML_OUTPUT_DIRECTORY="/work/$OVL/usr/lib/qt6/qml"
-      ninja -C /tmp/caelestia-blobs-build
-    fi
+    # (2b) shell-v2 uses ONLY core Quickshell QML modules (statically linked into the binary) — no
+    #      external QML plugin. The Caelestia.Blobs module was ripped out with the blob-frame approach.
     cd /work
 
     # (3a) base tree for the overlay build. mkosi 25.3 REFUSES to install Packages= into a sysext
