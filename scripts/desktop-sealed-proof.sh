@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Shrek OS Desktop Bootstrap-0 — the SEALED-VM close-out (Pn-desktop). Proves the signed shrek-desktop
-# sysext merges onto the sealed /usr in the KVM gate and the shell surfaces instantiate headless on the
+# sysext merges onto the sealed /usr in the KVM gate and DMS surfaces instantiate headless on the
 # REAL image — the step scripts/desktop-smoke.sh (container smoke) explicitly could not cover.
 # docs/desktop-bootstrap-0.md §Delivery / §Smoke.
 #
 # Pipeline (each stage is skippable/cached so re-runs are cheap):
-#   1. build the signed shrek-desktop DDI            scripts/build-desktop-layer.sh   (heavy; Quickshell-from-source)
+#   1. build the signed shrek-desktop DDI            scripts/build-desktop-layer.sh   (heavy; packaged DMS)
 #   2. bake the sealed root w/ policy + gate baked   scripts/build-in-container.sh 1   (REBUILD_ROOT=1)
 #   3. assemble the layer store w/ shrek-desktop      scripts/build-layers.sh desktop
 #   4. boot the KVM gate w/ the store attached        scripts/boot-vm.sh
@@ -15,8 +15,9 @@
 #
 #   Pn-desktop-merge      oniond/broker MERGED shrek-desktop (sysext) onto sealed /usr
 #   Pn-desktop-sway       Sway came up headless in the sealed boot
-#   Pn-desktop-qs-load    Quickshell loaded shell.qml with no QML error
-#   Pn-desktop-surfaces   the shell surfaces instantiated (SHREK-DESKTOP marker)
+#   Pn-desktop-qs-load    DMS-spawned Quickshell loaded /usr/share/quickshell/dms with no QML error
+#   Pn-desktop-dms-core   DMS session-bus/writable-state managers did not fail at startup
+#   Pn-desktop-surfaces   DMS QML connected to the DMS API
 #   Pn-desktop-logout     clean session teardown
 #   Pn-desktop-regress    shrek-hello + shrek-conf still merge alongside (no regression)
 set -euo pipefail
@@ -31,7 +32,7 @@ REBUILD_ROOT="${REBUILD_ROOT:-1}"       # 1 = rebuild the sealed root (needed on
 
 # --- 1. desktop DDI (heavy; reuse an existing one unless forced) ---
 if [ "${REBUILD_DDI}" = 1 ] || ! ls out/layers/shrek-desktop*.raw >/dev/null 2>&1; then
-  echo "############ 1/5 building the signed shrek-desktop DDI (Quickshell from source) ############"
+  echo "############ 1/5 building the signed shrek-desktop DDI (packaged DMS) ############"
   scripts/build-desktop-layer.sh 2>&1 | tee out/desktop-ddi-build.log
 fi
 ls -l out/layers/shrek-desktop*.raw
@@ -62,8 +63,9 @@ echo "----------------------------------------------------"
 
 has "oniond: shrek-desktop (sysext) -> merged"  && check "Pn-desktop-merge   shrek-desktop MERGED onto sealed /usr" 0 || check "Pn-desktop-merge   shrek-desktop MERGED onto sealed /usr" 1
 has "SHREK_GATE: PASS Pn-desktop-sway"          && check "Pn-desktop-sway    Sway up headless in the sealed boot"   0 || check "Pn-desktop-sway    Sway up headless in the sealed boot"   1
-has "SHREK_GATE: PASS Pn-desktop-qs-load"       && check "Pn-desktop-qs-load Quickshell loaded shell.qml (no error)" 0 || check "Pn-desktop-qs-load Quickshell loaded shell.qml (no error)" 1
-has "SHREK_GATE: PASS Pn-desktop-surfaces"      && check "Pn-desktop-surfaces shell surfaces instantiated"          0 || check "Pn-desktop-surfaces shell surfaces instantiated"          1
+has "SHREK_GATE: PASS Pn-desktop-qs-load"       && check "Pn-desktop-qs-load DMS Quickshell loaded cleanly"          0 || check "Pn-desktop-qs-load DMS Quickshell loaded cleanly"          1
+has "SHREK_GATE: PASS Pn-desktop-dms-core"      && check "Pn-desktop-dms-core session bus + writable state ok"        0 || check "Pn-desktop-dms-core session bus + writable state ok"        1
+has "SHREK_GATE: PASS Pn-desktop-surfaces"      && check "Pn-desktop-surfaces DMS QML connected to API"              0 || check "Pn-desktop-surfaces DMS QML connected to API"              1
 has "SHREK_GATE: PASS Pn-desktop-logout"        && check "Pn-desktop-logout  clean session teardown"               0 || check "Pn-desktop-logout  clean session teardown"               1
 # regression: the previously-proven marker layers must still merge alongside the desktop layer.
 { has "oniond: shrek-hello (sysext) -> merged" && has "oniond: shrek-conf (confext) -> merged"; } \

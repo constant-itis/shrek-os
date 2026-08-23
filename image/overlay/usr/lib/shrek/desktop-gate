@@ -4,14 +4,16 @@
 # Runs INSIDE the sealed KVM boot, AFTER shrek-onion.service has merged the signed shrek-desktop sysext
 # onto /usr (docs/desktop-bootstrap-0.md §Delivery). It proves — headless, GPU-free, on the REAL sealed
 # image (not the container smoke) — that:
-#   Pn-desktop-merge     the layer landed on /usr: sway + quickshell + the wrapper + shell.qml are present
+#   Pn-desktop-merge     the layer landed on /usr: sway + dms + quickshell + wrapper are present
 #   Pn-desktop-sway      Sway comes up on the headless/pixman backend (swaymsg -t get_version)
-#   Pn-desktop-qs-load   Quickshell (autostarted by the delivered sway.config) loads shell.qml, no QML error
-#   Pn-desktop-surfaces  the shell surfaces instantiate (the SHREK-DESKTOP marker fires)
+#   Pn-desktop-dms-api   DMS opens its user API socket
+#   Pn-desktop-qs-load   DMS-spawned Quickshell loads /usr/share/quickshell/dms, no QML error
+#   Pn-desktop-dms-core  DMS core managers that are provable headless did not fail at startup
+#   Pn-desktop-surfaces  DMS QML connects to the DMS API
 #   Pn-desktop-logout    clean session teardown (swaymsg exit → Sway terminates)
 #
 # It drives the ACTUAL delivered session path (/usr/bin/shrek-desktop → sway → sway.config execs
-# quickshell), only supplying the caller-owned headless env the wrapper leaves to us. Emits the same
+# dms), only supplying the caller-owned headless env the wrapper leaves to us. Emits the same
 # `SHREK_GATE: PASS/FAIL <name>` lines as scripts/desktop-smoke.sh so scripts/desktop-sealed-proof.sh
 # can read the verdict off vm-console.log.
 #
@@ -26,8 +28,8 @@ echo "=== shrek-desktop-gate: Desktop Bootstrap-0 sealed-boot surface proof ==="
 
 # --- Pn-desktop-merge: did the signed layer actually land on the sealed /usr? ---
 MERGE_OK=1
-for f in /usr/bin/shrek-desktop /usr/bin/sway /usr/bin/swaymsg /usr/bin/quickshell \
-         /usr/share/shrek/desktop/sway.config /usr/share/shrek/ui/shell.qml \
+for f in /usr/bin/shrek-desktop /usr/bin/sway /usr/bin/swaymsg /usr/bin/dms /usr/bin/quickshell \
+         /usr/share/shrek/desktop/sway.config /usr/share/quickshell/dms/shell.qml \
          /usr/lib/extension-release.d/extension-release.shrek-desktop; do
   if [ ! -e "$f" ]; then echo "  MISSING $f"; MERGE_OK=0; fi
 done
@@ -40,15 +42,25 @@ fi
 
 # --- headless / software env (the wrapper leaves this to the caller; mirror scripts/desktop-smoke.sh) ---
 export XDG_RUNTIME_DIR=/run/shrek-desktop-gate
-mkdir -p "$XDG_RUNTIME_DIR"; chmod 700 "$XDG_RUNTIME_DIR"
+mkdir -p "$XDG_RUNTIME_DIR" /home/dev
+chown dev:dev "$XDG_RUNTIME_DIR" /home/dev 2>/dev/null || true
+chmod 700 "$XDG_RUNTIME_DIR"
 export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1
 export QT_QUICK_BACKEND=software QT_QPA_PLATFORM=wayland QT_LOGGING_RULES="qt.qml*=false"
 export SWAYSOCK="$XDG_RUNTIME_DIR/sway.sock"
 SESSION_LOG="$XDG_RUNTIME_DIR/session.log"
+touch "$SESSION_LOG"
+chown dev:dev "$SESSION_LOG" 2>/dev/null || true
 
-# --- launch the REAL delivered session: /usr/bin/shrek-desktop → sway → (sway.config) quickshell ---
+# --- launch the REAL delivered session: /usr/bin/shrek-desktop → sway → (sway.config) dms run ---
 : > "$SESSION_LOG"
-/usr/bin/shrek-desktop >"$SESSION_LOG" 2>&1 &
+runuser -u dev -- env \
+  HOME=/home/dev USER=dev LOGNAME=dev \
+  XDG_RUNTIME_DIR="$XDG_RUNTIME_DIR" \
+  WLR_BACKENDS="$WLR_BACKENDS" WLR_RENDERER="$WLR_RENDERER" WLR_LIBINPUT_NO_DEVICES="$WLR_LIBINPUT_NO_DEVICES" \
+  QT_QUICK_BACKEND="$QT_QUICK_BACKEND" QT_QPA_PLATFORM="$QT_QPA_PLATFORM" QT_LOGGING_RULES="$QT_LOGGING_RULES" \
+  SWAYSOCK="$SWAYSOCK" \
+  /usr/bin/shrek-desktop >"$SESSION_LOG" 2>&1 &
 SESS_PID=$!
 
 # --- Pn-desktop-sway: Sway answers on the headless backend ---
@@ -56,10 +68,10 @@ for i in $(seq 1 30); do swaymsg -t get_version >/dev/null 2>&1 && break; sleep 
 if swaymsg -t get_version >/dev/null 2>&1; then gate ok Pn-desktop-sway
 else gate no Pn-desktop-sway; echo "--- session.log (head) ---"; sed -n '1,40p' "$SESSION_LOG"; fi
 
-# --- Pn-desktop-surfaces: wait (up to ~40s) for the surfaces marker Quickshell logs on instantiation.
+# --- Pn-desktop-surfaces: wait (up to ~40s) for DMS to start its API and connect its QML shell.
 #     First-run QML compile in the VM is slow; the poweroff-owning shrek-mount-gate is ordered AFTER us
 #     (see its unit) so we are neither CPU-starved nor force-killed mid-instantiation. ---
-for i in $(seq 1 80); do grep -q "SHREK-DESKTOP shell surfaces instantiated" "$SESSION_LOG" && break; sleep 0.5; done
+for i in $(seq 1 80); do grep -q "DMSService:.*Connected" "$SESSION_LOG" && break; sleep 0.5; done
 
 # Always mirror the real desktop session output to the console — evidence for the proof + debugging.
 # Quickshell logs only into the in-VM session.log, which is otherwise invisible from vm-console.log.
@@ -69,14 +81,21 @@ echo "--- end session.log ---"
 
 # --- Pn-desktop-qs-load: Quickshell loaded shell.qml with no QUICKSHELL/QML error. Scope the scan to
 #     quickshell/QML failures — Sway's own benign [ERROR] lines share this log and must NOT count. ---
-if grep -qiE "error while loading shared|is not a type|QQmlApplicationEngine failed|module \"[^\"]*\" is not installed|\.qml:[0-9]+:.*(error|is not)" "$SESSION_LOG"; then
+if grep -qiE "Failed to load configuration|error while loading shared|is not a type|QQmlApplicationEngine failed|module \"[^\"]*\" is not installed|\.qml:[0-9]+:.*(error|is not)" "$SESSION_LOG"; then
   gate no Pn-desktop-qs-load
 else
   gate ok Pn-desktop-qs-load
 fi
 
-# --- Pn-desktop-surfaces verdict ---
-if grep -q "SHREK-DESKTOP shell surfaces instantiated" "$SESSION_LOG"; then gate ok Pn-desktop-surfaces
+# --- DMS/DMS-QML verdicts ---
+if grep -q "DMS API Server listening" "$SESSION_LOG"; then gate ok Pn-desktop-dms-api
+else gate no Pn-desktop-dms-api; fi
+# Headless Sway does not expose every desktop clipboard protocol DMS can use; that is covered by
+# dogfood/visual proof. This gate still catches the regressions we can prove headless: no session bus
+# and no writable XDG cache/state/config.
+if grep -qiE "Failed to initialize dbus manager|failed to get db path|read-only file system" "$SESSION_LOG"; then gate no Pn-desktop-dms-core
+else gate ok Pn-desktop-dms-core; fi
+if grep -q "DMSService:.*Connected" "$SESSION_LOG"; then gate ok Pn-desktop-surfaces
 else gate no Pn-desktop-surfaces; fi
 
 # --- Pn-desktop-logout: clean teardown. swaymsg exit may return nonzero (IPC closes before ack); the

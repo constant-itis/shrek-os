@@ -1,8 +1,8 @@
 #!/bin/sh
 # shrek-desktop — Bootstrap-0 desktop session launcher.
 #
-# Sets the minimum Wayland env and execs Sway; Sway's config execs Quickshell, which owns ALL shell
-# surfaces (bar / launcher / work-drawer). This is deliberately NOT a full login/session stack (no
+# Sets the minimum Wayland env and execs Sway; Sway's config execs DMS, which owns the ordinary desktop
+# shell surfaces (bar / launcher / settings / control center). This is deliberately NOT a full login/session stack (no
 # greetd, no UWSM) — Bootstrap 0 proves the runtime, not the login flow. The caller may override any
 # env (the desktop smoke test sets the headless/software path).
 set -eu
@@ -11,10 +11,21 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
-# Qt Quick renders the shell with the software scenegraph backend — the frame/panels/rail are plain
-# rounded rectangles and QtQuick.Shapes (no custom shaders), so no GPU/EGL is needed. Keeps the sealed
-# shell GPU-free and deterministic. Overridable so the smoke/headless gates can set their own path.
-export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+# The sealed headless proof runs without a persistent /home. Give DMS writable XDG dirs there while
+# leaving the dogfood login's real persistent home alone.
+if [ -n "${HOME:-}" ] && [ ! -w "$HOME" ]; then
+  export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$XDG_RUNTIME_DIR/cache}"
+  export XDG_STATE_HOME="${XDG_STATE_HOME:-$XDG_RUNTIME_DIR/state}"
+  export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$XDG_RUNTIME_DIR/config}"
+  mkdir -p "$XDG_CACHE_HOME" "$XDG_STATE_HOME" "$XDG_CONFIG_HOME" 2>/dev/null || true
+fi
+
+# The sealed/headless gate passes QT_QUICK_BACKEND=software explicitly. Leave interactive dogfood sessions
+# on Qt's normal renderer; DMS relies heavily on animated translucent Qt Quick surfaces, and forcing the
+# software scenegraph in a graphical VM can make hover/reveal layers repaint inconsistently.
+if [ "${WLR_BACKENDS:-}" = "headless" ]; then
+  export QT_QUICK_BACKEND="${QT_QUICK_BACKEND:-software}"
+fi
 
 # Icon theme: the sealed image has no /etc gtk config, so point Qt's generic theme at a gtk settings
 # file baked in /usr (sysext-friendly) via XDG_CONFIG_DIRS. This makes QIcon::fromTheme (Quickshell's

@@ -19,8 +19,8 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 MODE="${1:-good}"
 case "$MODE" in good|select|inject|unsigned|tamper|desktop) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop]" >&2; exit 1 ;; esac
-# Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (Quickshell from
-# source) produced by scripts/build-desktop-layer.sh; this script only ASSEMBLES it into the store, so
+# Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (DMS + Qt runtime)
+# produced by scripts/build-desktop-layer.sh; this script only ASSEMBLES it into the store, so
 # require the DDI to already exist rather than rebuilding it here.
 if [ "$MODE" = "desktop" ] && ! ls out/layers/shrek-desktop*.raw >/dev/null 2>&1; then
   echo "MODE=desktop needs a built desktop DDI — run scripts/build-desktop-layer.sh first" >&2; exit 1
