@@ -23,6 +23,13 @@ export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
 export GALLIUM_DRIVER="${GALLIUM_DRIVER:-llvmpipe}"
 export QSG_RENDER_LOOP="${QSG_RENDER_LOOP:-basic}"
 
+# QML import path. The GPLv3 Caelestia.Blobs module (the shell's frame/panel geometry) is staged into
+# /usr/lib/qt6/qml by scripts/build-desktop-layer.sh, but Debian's Qt6 only scans the multiarch dir
+# (/usr/lib/x86_64-linux-gnu/qt6/qml) by default, so without this the shell fails to load with
+# "module Caelestia.Blobs is not installed" and nothing renders. Add our staging dir explicitly.
+export QML_IMPORT_PATH="/usr/lib/qt6/qml${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+export QML2_IMPORT_PATH="$QML_IMPORT_PATH"
+
 # Icon theme: the sealed image has no /etc gtk config, so point Qt's generic theme at a gtk settings
 # file baked in /usr (sysext-friendly) via XDG_CONFIG_DIRS. This makes QIcon::fromTheme (Quickshell's
 # image://icon provider) resolve real app icons from Papirus-Dark instead of a placeholder.
