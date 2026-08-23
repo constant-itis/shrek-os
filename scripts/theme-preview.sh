@@ -10,10 +10,12 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 CACHE=out/qs-cache
 [ -x "$CACHE/quickshell" ] || { echo "no cached quickshell — run scripts/qml-check.sh first"; exit 1; }
+BLOBS_QML=out/caelestia-blobs/qml
+[ -f "$BLOBS_QML/Caelestia/Blobs/qmldir" ] || bash scripts/build-caelestia-blobs.sh
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 mkdir -p out/preview
 docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
-  -e CACHE="${CACHE}" -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" \
+  -e CACHE="${CACHE}" -e BLOBS_QML="${BLOBS_QML}" -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" \
   debian:trixie bash -euo pipefail -c '
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null
@@ -35,6 +37,8 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     OUT="$(swaymsg -t get_outputs | grep -oE "HEADLESS-[0-9]+" | head -1)"; OUT="${OUT:-HEADLESS-1}"
     WD="$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | grep -v "\.lock$" | head -1)"; WD="$(basename "${WD:-wayland-1}")"
     export WAYLAND_DISPLAY="$WD" QT_QPA_PLATFORM=wayland QT_QUICK_BACKEND=software
+    export QML_IMPORT_PATH="/work/$BLOBS_QML${QML_IMPORT_PATH:+:$QML_IMPORT_PATH}"
+    export QML2_IMPORT_PATH="/work/$BLOBS_QML${QML2_IMPORT_PATH:+:$QML2_IMPORT_PATH}"
     CFGDIR=/tmp/shrek-theme-cfg; mkdir -p "$CFGDIR"
     # a hand-authored custom base palette so the "custom" mode has something to resolve
     export HOME=/root; mkdir -p "$HOME/.config/shrek"

@@ -47,14 +47,14 @@ ShellRoot {
             required property var modelData
             screen: modelData
             activeScreen: shell.activeScreen
+            session: sessionProvider
         }
     }
     Variants {
         model: Quickshell.screens
-        Bar {
+        ShellExclusions {
             required property var modelData
             screen: modelData
-            session: sessionProvider
         }
     }
     Variants {

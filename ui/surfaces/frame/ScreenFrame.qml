@@ -2,25 +2,33 @@ import Quickshell
 import Quickshell.Wayland
 import QtQuick
 import QtQuick.Shapes
+import Caelestia.Blobs
 import "../../themes"
 import "../../state"
+import "../bar"
 
-// ScreenFrame — the per-monitor shell geometry owner. It draws the continuous desktop frame, the left
-// rail material, and the right drawer socket in one click-through layer. Current content surfaces stay
-// in their own PanelWindows, but their visible background material starts here so the shell reads as one
-// inset frame instead of unrelated rounded rectangles.
+// ScreenFrame — the per-monitor shell geometry owner. This file is derivative shell-port work built
+// against the GPLv3 Caelestia.Blobs API vendored under third_party/caelestia-shell; keep the upstream
+// license and Shrek attribution notes with that vendored source.
+//
+// G1 port slice: render the shell material through one BlobGroup. BlobInvertedRect cuts the live desktop
+// hole out of the full-screen material, while attached BlobRects share that group so future drawers and
+// popouts deform/merge with the frame instead of reading as unrelated cards. The window remains
+// click-through; input ownership stays with the content surfaces and the real applications underneath.
 //
 // NOTE: this rounds the SCREEN corners, not individual window corners (per-window rounding is a compositor
 // feature Sway lacks).
 PanelWindow {
     id: frame
     WlrLayershell.layer: WlrLayer.Top
+    WlrLayershell.exclusionMode: ExclusionMode.Ignore
     anchors { top: true; left: true; right: true; bottom: true }
     color: "transparent"
     exclusiveZone: 0
-    mask: Region {}   // empty region → fully click-through, never intercepts the desktop
+    mask: Region { item: railInput }
 
     property var activeScreen
+    property var session
 
     readonly property bool activeOutput: activeScreen === screen
     readonly property bool rightDrawerOpen: activeOutput && (ShellState.workOpen || ShellState.systemOpen)
@@ -28,47 +36,95 @@ PanelWindow {
     readonly property bool rightDrawerVisible: rightDrawerOpen || rightDrawerProgress > 0.001
     readonly property int inset: Tokens.spaceSm
     readonly property int railTotal: Tokens.railWidth + 2 * Tokens.spaceSm
-    readonly property real drawerSocketWidth: Tokens.drawerWidth * rightDrawerProgress
+    readonly property real drawerSocketWidth: (Tokens.drawerWidth + inset) * rightDrawerProgress
     readonly property int rad: 18
     readonly property int socketRad: Tokens.radiusLg
     readonly property color material: Tokens.panelBg
     readonly property color outline: Tokens.border
+    readonly property color shadow: Qt.rgba(0, 0, 0, 0.24)
 
     Behavior on rightDrawerProgress {
         NumberAnimation { duration: Tokens.animMed; easing.type: Easing.OutCubic }
     }
 
+    BlobGroup {
+        id: shellBlobs
+        color: frame.material
+        smoothing: 28
+        cornerFill: true
+    }
+
+    BlobGroup {
+        id: shadowBlobs
+        color: frame.shadow
+        smoothing: shellBlobs.smoothing
+        cornerFill: true
+    }
+
+    Item {
+        id: blobLayer
+        anchors.fill: parent
+
+        // Slight offset duplicate gives the Blob material depth without introducing separate panels.
+        Item {
+            anchors.fill: parent
+            y: 2
+            opacity: 0.7
+
+            BlobInvertedRect {
+                anchors.fill: parent
+                group: shadowBlobs
+                radius: frame.rad
+                borderLeft: frame.railTotal
+                borderRight: frame.inset
+                borderTop: frame.inset
+                borderBottom: frame.inset
+            }
+
+            BlobRect {
+                visible: frame.rightDrawerVisible
+                group: shadowBlobs
+                x: frame.width - frame.drawerSocketWidth
+                y: frame.inset
+                width: frame.drawerSocketWidth
+                height: frame.height - 2 * frame.inset
+                radius: frame.socketRad
+                deformScale: 0.00035
+            }
+        }
+
+        // The actual continuous shell material. The left border is intentionally rail-sized, so the bar is
+        // an occupied part of the same shell frame instead of a floating rectangle.
+        BlobInvertedRect {
+            anchors.fill: parent
+            group: shellBlobs
+            radius: frame.rad
+            borderLeft: frame.railTotal
+            borderRight: frame.inset
+            borderTop: frame.inset
+            borderBottom: frame.inset
+        }
+
+        // First attached geometry: the right drawer socket. It overlaps the frame border and shares the
+        // BlobGroup, giving the concave/convex join that the previous QML Shape bridge could only fake.
+        BlobRect {
+            id: rightSocket
+            visible: frame.rightDrawerVisible
+            group: shellBlobs
+            x: frame.width - frame.drawerSocketWidth
+            y: frame.inset
+            width: frame.drawerSocketWidth
+            height: frame.height - 2 * frame.inset
+            radius: frame.socketRad
+            deformScale: 0.00035
+        }
+    }
+
     Shape {
         anchors.fill: parent
 
-        // Frame ring. The left side of the desktop hole starts AFTER the rail, matching the Sway layer
-        // exclusive zone + outer gap. That is the key architectural change: the rail is part of the
-        // shell frame, not a floating card over the desktop.
-        ShapePath {
-            fillColor: frame.material
-            strokeWidth: 0
-            fillRule: ShapePath.OddEvenFill
-
-            // outer contour: the whole screen
-            startX: 0; startY: 0
-            PathLine { x: frame.width; y: 0 }
-            PathLine { x: frame.width; y: frame.height }
-            PathLine { x: 0; y: frame.height }
-            PathLine { x: 0; y: 0 }
-
-            // inner contour: desktop/work-area hole
-            PathMove { x: frame.railTotal + frame.rad; y: frame.inset }
-            PathLine { x: frame.width - frame.inset - frame.rad; y: frame.inset }
-            PathArc { x: frame.width - frame.inset; y: frame.inset + frame.rad; radiusX: frame.rad; radiusY: frame.rad; direction: PathArc.Clockwise }
-            PathLine { x: frame.width - frame.inset; y: frame.height - frame.inset - frame.rad }
-            PathArc { x: frame.width - frame.inset - frame.rad; y: frame.height - frame.inset; radiusX: frame.rad; radiusY: frame.rad; direction: PathArc.Clockwise }
-            PathLine { x: frame.railTotal + frame.rad; y: frame.height - frame.inset }
-            PathArc { x: frame.railTotal; y: frame.height - frame.inset - frame.rad; radiusX: frame.rad; radiusY: frame.rad; direction: PathArc.Clockwise }
-            PathLine { x: frame.railTotal; y: frame.inset + frame.rad }
-            PathArc { x: frame.railTotal + frame.rad; y: frame.inset; radiusX: frame.rad; radiusY: frame.rad; direction: PathArc.Clockwise }
-        }
-
-        // A subtle inner edge keeps the work-area boundary legible without making the rail a separate card.
+        // A subtle inner edge keeps the work-area boundary legible. Material and joins are Blob-rendered;
+        // this path is only a hairline over the punched-out desktop edge.
         ShapePath {
             fillColor: "transparent"
             strokeColor: frame.outline
@@ -83,20 +139,21 @@ PanelWindow {
             PathLine { x: frame.railTotal; y: frame.inset + frame.rad }
             PathArc { x: frame.railTotal + frame.rad; y: frame.inset; radiusX: frame.rad; radiusY: frame.rad; direction: PathArc.Clockwise }
         }
+    }
 
-        // Right-side socket for Work/System. It is drawn by the frame owner and overlaps the right border,
-        // so the drawer content appears to grow out of the frame rather than sitting on a second rectangle.
-        ShapePath {
-            fillColor: frame.rightDrawerVisible ? frame.material : "transparent"
-            strokeColor: frame.rightDrawerVisible ? frame.outline : "transparent"
-            strokeWidth: frame.rightDrawerVisible ? 1 : 0
-            startX: frame.width; startY: frame.inset
-            PathLine { x: frame.width - frame.drawerSocketWidth + frame.socketRad; y: frame.inset }
-            PathArc { x: frame.width - frame.drawerSocketWidth; y: frame.inset + frame.socketRad; radiusX: frame.socketRad; radiusY: frame.socketRad; direction: PathArc.Counterclockwise }
-            PathLine { x: frame.width - frame.drawerSocketWidth; y: frame.height - frame.inset - frame.socketRad }
-            PathArc { x: frame.width - frame.drawerSocketWidth + frame.socketRad; y: frame.height - frame.inset; radiusX: frame.socketRad; radiusY: frame.socketRad; direction: PathArc.Counterclockwise }
-            PathLine { x: frame.width; y: frame.height - frame.inset }
-            PathLine { x: frame.width; y: frame.inset }
+    Item {
+        id: railInput
+        anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+        width: frame.railTotal
+
+        Rail {
+            anchors {
+                left: parent.left; top: parent.top; bottom: parent.bottom
+                leftMargin: frame.inset; topMargin: frame.inset; bottomMargin: frame.inset
+            }
+            width: Tokens.railWidth
+            session: frame.session
+            window: frame
         }
     }
 }
