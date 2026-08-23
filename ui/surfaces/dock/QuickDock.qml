@@ -4,22 +4,56 @@ import QtQuick
 import "../../themes"
 import "../../state"
 import "../../services"
+import "../../geometry"
 
-// QuickDock — a right-edge cluster of circular quick-action buttons. Purpose-driven for mouse-first use
-// (a host compositor can swallow Super, so surfacing keybind-only actions as visible buttons matters):
-// screenshot region, clipboard history, focus/Do-Not-Disturb. Only the buttons capture input (mask) so
-// the rest of the edge stays click-through to windows. Display + ordinary user actions only — no authority.
+// QuickDock — a right-edge contextual action cluster. It is edge-triggered instead of always visible:
+// the normal desktop should read as a coherent framed stage, while screenshot/clipboard/focus remain
+// available to mouse users when they intentionally touch the right edge.
 PanelWindow {
     id: dock
     WlrLayershell.layer: WlrLayer.Top
     anchors { top: true; right: true; bottom: true }
-    implicitWidth: 56
+    implicitWidth: 64
     color: "transparent"
     visible: !(ShellState.workOpen || ShellState.systemOpen || ShellState.dashboardOpen
                || ShellState.launcherOpen || ShellState.clipboardOpen || ShellState.menuOpen)
 
-    // only the button column is interactive; the rest of the strip passes clicks through to windows
-    mask: Region { item: col }
+    property bool expanded: false
+
+    // The shell only captures the edge trigger while closed, then the revealed notch while open.
+    mask: Region { item: hitRegion }
+
+    Item {
+        id: hitRegion
+        anchors { top: parent.top; right: parent.right; bottom: parent.bottom }
+        width: dock.expanded ? dock.implicitWidth : 6
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            onEntered: dock.expanded = true
+            onExited: dock.expanded = false
+        }
+    }
+
+    Item {
+        id: socket
+        anchors.right: parent.right
+        anchors.verticalCenter: parent.verticalCenter
+        width: 54
+        height: col.implicitHeight + 2 * Tokens.spaceSm
+        opacity: dock.expanded ? 1 : 0
+        transform: Translate { x: dock.expanded ? 0 : 14 }
+
+        Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
+
+        EdgePanelShape {
+            anchors.fill: parent
+            edge: "right"
+            fill: Tokens.panelBg
+            stroke: Tokens.border
+        }
+    }
 
     Column {
         id: col
@@ -27,6 +61,10 @@ PanelWindow {
         anchors.verticalCenter: parent.verticalCenter
         anchors.rightMargin: Tokens.spaceSm
         spacing: Tokens.spaceSm
+        opacity: dock.expanded ? 1 : 0
+        transform: Translate { x: dock.expanded ? 0 : 14 }
+
+        Behavior on opacity { NumberAnimation { duration: Tokens.animFast; easing.type: Easing.OutCubic } }
 
         // a circular action button with a drawn glyph (no icon font in the layer)
         component DockBtn: Rectangle {
@@ -71,6 +109,7 @@ PanelWindow {
                 anchors.fill: parent
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
+                onEntered: dock.expanded = true
                 onClicked: if (btn.act) btn.act()
             }
         }
