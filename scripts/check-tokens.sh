@@ -4,14 +4,16 @@
 # Every surface must express colour ONLY through the Tokens.* role names. It may NOT:
 #   (1) hard-code a raw colour hex literal, or
 #   (2) reach a palette SOURCE directly (Theme / Colours / Palettes).
-# Only ui/themes/** is allowed to hold raw colour or touch the sources. This keeps all five theme modes
-# flowing through one chokepoint (Tokens) so an individual component can never bypass a mode switch.
+# Only the theme dirs (ui/themes/**, ui-v2/theme/**) are allowed to hold raw colour or touch the sources.
+# This keeps all theme modes flowing through one chokepoint (Tokens) so a component can never bypass a
+# mode switch.
 #
 # Runs host-side in milliseconds; wired into scripts/qml-check.sh as a fail-fast pre-step. Exit 1 on any
 # violation (prints file:line), 0 when clean.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
-SCOPE=(ui/surfaces ui/shell)
+# Both shells: the old ui/ (port source) and the live ui-v2/ surfaces + composition root.
+SCOPE=(ui/surfaces ui/shell ui-v2/surfaces ui-v2/shell)
 fail=0
 
 # (1) raw colour hex literals inside quotes: "#RGB" "#RGBA" "#RRGGBB" "#AARRGGBB"

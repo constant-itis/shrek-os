@@ -2,6 +2,7 @@ import Quickshell
 import Quickshell.Wayland
 import QtQuick
 import "../config"
+import "../theme"
 
 // Frame — one per screen. A full-screen, fully click-through overlay on the Background layer that draws
 // the inset rounded desktop border. ExclusionMode.Ignore so it neither reserves space nor is displaced
@@ -22,6 +23,6 @@ PanelWindow {
         color: "transparent"
         radius: Config.frameRadius
         border.width: Config.frameBorder
-        border.color: Swatch.border
+        border.color: Tokens.outline
     }
 }

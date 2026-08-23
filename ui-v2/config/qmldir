@@ -1,2 +1,1 @@
 singleton Config Config.qml
-singleton Swatch Swatch.qml

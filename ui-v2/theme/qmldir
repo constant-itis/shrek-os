@@ -1,0 +1,3 @@
+singleton Tokens Tokens.qml
+singleton Theme Theme.qml
+singleton Colours Colours.qml
