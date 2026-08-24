@@ -47,6 +47,34 @@ if [ ! -e "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json"
   cp /usr/share/shrek/dms/default-session.json "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json" 2>/dev/null || true
 fi
 
+# Self-heal existing installs. The seed above is first-run-only, so a /home created before DMS had a
+# wallpaper default keeps an empty wallpaperPath — DMS then paints its fallback background OVER the swamp
+# sway draws (the double-owner conflict: swamp flashes, then the flat pattern covers it). If the live
+# session.json still has a BLANK wallpaperPath (the user hasn't chosen one), backfill the Shrek swamp so
+# DMS renders it and the two agree. Only empty fields are touched — a user-chosen wallpaper is left
+# alone. Guarded on python3 (base image) for safe in-place JSON; skipped harmlessly if unavailable.
+_shrek_sess="${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json"
+if [ -w "$_shrek_sess" ] && command -v python3 >/dev/null 2>&1; then
+  SHREK_WP=/usr/share/shrek/desktop/wallpaper.jpg python3 - "$_shrek_sess" <<'PY' 2>/dev/null || true
+import json, os, sys
+path, wp = sys.argv[1], os.environ["SHREK_WP"]
+try:
+    data = json.load(open(path))
+except Exception:
+    sys.exit(0)
+changed = False
+for key in ("wallpaperPath", "wallpaperPathDark", "wallpaperPathLight"):
+    if not data.get(key):
+        data[key] = wp
+        changed = True
+if changed:
+    tmp = path + ".shrek.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(data, fh, indent=2)
+    os.replace(tmp, path)
+PY
+fi
+
 if [ -e /usr/share/shrek/installer/live-mode ]; then
   export DMS_DISABLE_MATUGEN="${DMS_DISABLE_MATUGEN:-1}"
 fi
