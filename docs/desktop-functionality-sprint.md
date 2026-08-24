@@ -56,11 +56,23 @@ Confirmed missing → dead widgets:
   agent. The dogfood oracle now proves the whole chain (user → unit active → owns name → `pkcheck`
   grants power-off/reboot/suspend to the session leader).
   **Accept:** Off powers off, Reboot reboots, Suspend suspends. ✓
-- [ ] **S2 · Network (NetworkManager)** *(S–M)* — verify NM is running (it may already be in the base
-  image; prior boots logged NetworkManager). Wire the DMS network center and **persist connection
-  profiles** — volatile `/var` means NM profiles need a `/home`-backed bind (the M1 selective-persistence
-  pattern). **Accept:** lists / toggles / connects. Wi-Fi is only fully testable on real hardware;
-  the virtio NIC + NM state should still show in the VM.
+- [x] **S2 · Network (NetworkManager)** *(S–M)* — **DONE** (dogfood-verified, PASS=29/0). NM is a **base**
+  daemon (`network-manager` in `image/mkosi.conf`), already active + connected in the VM (M4). For the
+  active seat0 user NM already defaults `allow_active=yes` for list / toggle / scan / connect
+  (`network-control`, `enable-disable-{network,wifi}`, `wifi.scan`, `settings.modify.own`); the sealed
+  image broke only two things, both now handled: (1) **authorization** — saving a *system* connection
+  (`settings.modify.system`) defaults `auth_admin_keep`, an admin prompt the sealed single-user session
+  has no graphical polkit agent to answer, so Wi-Fi passwords silently failed to save. A baked rule
+  `/etc/polkit-1/rules.d/49-shrek-nm.rules` (`image/mkosi.postinst`, read-only `/etc` so baked at build)
+  grants that one action to the active+local session. (2) **persistence** — read-only `/etc` means the
+  keyfile store is redirected to `/home` (`20-shrek-persistent-keyfile.conf`), but `NetworkManager.service`
+  ships `ProtectHome=read-only`, which mounts `/home` read-only *inside the daemon namespace* even for
+  root — so the redirected store silently no-op'd on write. A drop-in
+  (`NetworkManager.service.d/10-shrek-home-keyfile.conf`) adds `ReadWritePaths=` for just the keyfile
+  store (rest of `/home` stays read-only to NM). The dogfood oracle now proves the whole chain: keyfile
+  path on `/home` → polkit grants `settings.modify.system` to the seat0 leader → a saved system
+  connection lands in the persistent `/home` store. **Accept:** lists / toggles / connects + profiles
+  persist. ✓ (Wi-Fi is only fully testable on real hardware; the virtio NIC + NM state show in the VM.)
 
 ### Phase B — daily-driver
 
