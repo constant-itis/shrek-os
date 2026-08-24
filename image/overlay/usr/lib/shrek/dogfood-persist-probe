@@ -207,4 +207,35 @@ else
     fi
 fi
 
+# --- Sprint S1: polkit power path (the shutdown/reboot/suspend buttons the owner reported dead) --------
+# DMS's power buttons call logind (org.freedesktop.login1.Manager.PowerOff/Reboot/Suspend); logind
+# delegates the yes/no to polkit. The sealed base shipped NO polkitd; adding it to the desktop layer is
+# necessary but not sufficient, because (a) polkit.service runs User=polkitd and a layer's sysusers.d is
+# applied too late / behind a read-only /etc — so the polkitd user is baked into the base /etc instead
+# (image/mkosi.postinst); and (b) polkit.service is a LAYER unit that merges after systemd/dbus have
+# already read their config, and the merge issues no reload — so shrek-desktop-polkit.service reloads +
+# starts it post-merge. Prove the whole chain here: the user exists, the unit is active/owns the bus
+# name, and polkit GRANTS power-off/reboot/suspend to the REAL active seat0 session. The grant is queried
+# with `pkcheck --process <seat0-active-session-leader>` — that leader is inside dev's graphical seat0
+# session, so polkit evaluates allow_active (a runuser'd caller would NOT be session-tracked and would
+# falsely read "no"); full pid,starttime,uid triple so pkcheck can't reject a bare pid. `timeout` guards
+# a hang and every step is fenced with || so a failure can't kill the probe (set -eu). Non-destructive:
+# pkcheck only asks, it never powers off. login1 .policy defaults allow_active=yes => no graphical agent.
+say "S1 polkitd-user=[$(getent passwd polkitd 2>/dev/null || echo MISSING)]"
+say "S1 polkit-unit load=[$(systemctl show -p LoadState --value polkit.service 2>/dev/null || echo unknown)] active=[$(systemctl is-active polkit.service 2>/dev/null || echo unknown)]"
+say "S1 polkit-busname=[$(busctl --system status org.freedesktop.PolicyKit1 >/dev/null 2>&1 && echo owned || echo unowned)]"
+AS=$(loginctl show-seat seat0 -p ActiveSession --value 2>/dev/null || true)
+LEAD=$(loginctl show-session "$AS" -p Leader --value 2>/dev/null || true)
+say "S1 seat0-active-session=[${AS:-none}] leader=[${LEAD:-none}] state=[$(loginctl show-session "$AS" -p Active -p Seat --value 2>/dev/null | tr '\n' ' ')]"
+if [ -n "$LEAD" ] && [ -r "/proc/$LEAD/stat" ]; then
+    STT=$(sed 's/.*) //' "/proc/$LEAD/stat" 2>/dev/null | awk '{print $20}' || echo 0)   # starttime = field 22 overall (20 after ") ")
+    LUID=$(stat -c %u "/proc/$LEAD" 2>/dev/null || echo 1000)
+    for act in power-off reboot suspend; do
+        rc=0; timeout 15 pkcheck --action-id "org.freedesktop.login1.$act" --process "$LEAD,$STT,$LUID" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 0 ] && say "S1 authz $act=yes" || say "S1 authz $act=no(rc=$rc)"
+    done
+else
+    say "S1 authz power-off=no(no-active-seat0-session-leader)"
+fi
+
 say "DONE boot=$n"

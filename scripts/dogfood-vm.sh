@@ -157,5 +157,32 @@ grep -qa 'SHREK-DOGFOOD M3 record-after-teardown=\[absent\]' "$LOG" \
   && ok "session record removed on teardown (clean lifecycle)" \
   || bad "M3 session record NOT removed after teardown ($(grep -a 'M3 record-after-teardown=' "$LOG" | tail -1))"
 
+# --- Sprint S1: polkit power path — the shutdown/reboot/suspend buttons actually authorize ------------
+# polkitd alone in the desktop layer is not enough: the polkitd user is baked into the sealed /etc
+# (image/mkosi.postinst) and shrek-desktop-polkit.service reloads + starts polkit.service post-merge so
+# it owns the bus name. Prove the whole chain: user exists, unit active + owns the name, and polkit
+# GRANTS power-off/reboot/suspend to the REAL active seat0 session (login1 .policy allow_active=yes; the
+# probe queried it with pkcheck against the session leader, non-destructive). Absent this, the buttons
+# no-op'd. s1sess is echoed into every failure so a regression shows the session state inline.
+s1sess=$(grep -a 'SHREK-DOGFOOD S1 seat0-active-session=' "$LOG" | tail -1 | tr -d '\r')
+grep -a 'SHREK-DOGFOOD S1 polkitd-user=' "$LOG" | tail -1 | grep -qv 'MISSING' \
+  && ok "polkitd user baked into the sealed /etc" \
+  || bad "polkitd user MISSING ($(grep -a 'SHREK-DOGFOOD S1 polkitd-user=' "$LOG" | tail -1 | tr -d '\r'))"
+if grep -a 'SHREK-DOGFOOD S1 polkit-unit' "$LOG" | tail -1 | grep -q 'active=\[active\]'; then
+  ok "polkit.service active after the Onion merge"
+else
+  bad "polkit.service not active ($(grep -a 'SHREK-DOGFOOD S1 polkit-unit' "$LOG" | tail -1 | tr -d '\r'))"
+fi
+grep -qa 'SHREK-DOGFOOD S1 polkit-busname=\[owned\]' "$LOG" \
+  && ok "polkitd owns org.freedesktop.PolicyKit1 on the system bus" \
+  || bad "polkit bus name unowned ($(grep -a 'SHREK-DOGFOOD S1 polkit-busname=' "$LOG" | tail -1 | tr -d '\r'))"
+for act in power-off reboot suspend; do
+  if grep -qa "SHREK-DOGFOOD S1 authz $act=yes" "$LOG"; then
+    ok "polkit grants $act to the active seat0 session"
+  else
+    bad "polkit did NOT grant $act ($(grep -a "SHREK-DOGFOOD S1 authz $act=" "$LOG" | tail -1 | tr -d '\r') | $s1sess)"
+  fi
+done
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }
