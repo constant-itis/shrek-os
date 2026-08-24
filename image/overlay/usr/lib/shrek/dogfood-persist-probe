@@ -109,16 +109,17 @@ rm -rf "$SM" 2>/dev/null || true
 # run` FRONT DOOR cannot construct T2 in this endpoint-free sealed VM by design — it re-derives the band
 # from an integrity anchor (the runsc harness fs-verity, unmeasurable on RO dm-verity /usr, OR a sealed
 # entrypoint, which /bin/sh is not) and fail-highs to T-hostile. The engine call is gatekeeperd's own
-# authorized explicit-trust path; the session record + Work-drawer flow are identical either way.
+# authorized explicit-trust path; DMS-BOOT-0 keeps the session-record lifecycle proof but no longer gates
+# on the old Quickshell-shell Work drawer reading that record.
 GK=/usr/libexec/shrek/gatekeeperd
 SRV=/run/shrek-m3/srv
 rm -rf /run/shrek-m3 2>/dev/null || true
 mkdir -p "$SRV/m3"
 printf 'int main(void){return 0;}\n' > "$SRV/m3/hello.c"
 # native-workload proof: run the sandbox's own tcc on the granted source, then hold long enough for the
-# 2s SessionProvider poll to catch the live record. `;` (not &&) so the hold+DONE run regardless of tcc.
+# live-record probe to catch it. `;` (not &&) so the hold+DONE run regardless of tcc.
 M3WL='/usr/bin/tcc -c /srv/m3/hello.c -o /tmp/hello.o && echo M3-COMPILED || echo M3-COMPILE-FAIL; /bin/busybox sleep 16; echo M3-WORK-DONE'
-# wait for the dev quickshell log to exist (the Work-drawer reader must be running to prove "live")
+# wait for the dev quickshell log if present; this is a legacy marker under DMS, not an acceptance gate.
 QSLOG=; k=0
 while [ "$k" -lt 30 ]; do
     QSLOG=$(ls /run/user/1000/quickshell/by-id/*/log.qslog 2>/dev/null | head -1)
@@ -139,10 +140,10 @@ while [ "$i" -lt 25 ]; do
 done
 say "M3 session-record=[${rec:-absent}] found-after=${i}s ${tier:-}"
 [ -n "$rec" ] && say "M3 record-perms=[$(stat -c '%U:%G %a' "$rec" 2>/dev/null)]"
-# open the Work drawer in the dev session so the screenshot shows the live row (best-effort)
+# nudge the legacy Quickshell shell if present; DMS ignores this path and the VM parser treats it optional.
 runuser -u dev -- env XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 \
     /usr/bin/quickshell ipc call work toggle >/dev/null 2>&1 || true
-# give the 2s SessionProvider poll time to read the record + log the marker, then check the LIVE proof
+# give any legacy SessionProvider poll time to read the record + log the marker
 sleep 5
 if [ -n "$QSLOG" ] && grep -qa 'SHREK-DESKTOP work session' "$QSLOG" 2>/dev/null; then
     say "M3 drawer-marker=yes [$(grep -a 'SHREK-DESKTOP work session' "$QSLOG" | tail -1 | sed 's/.*SHREK-DESKTOP //')]"

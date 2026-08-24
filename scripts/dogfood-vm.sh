@@ -135,16 +135,18 @@ m2 rustc      '^rustc '                  "rustc present (shrek-dev merged)"
 m2 cargo      '^cargo '                  "cargo present (shrek-dev merged)"
 m2 cargo-build '^ok$'                    "toolchain compiles a crate offline"
 
-# --- Dogfood-0 M3: a REAL `shrek run` T2 session appears LIVE in the Work drawer (ACCEPTANCE) ----------
+# --- Dogfood-0 M3: a REAL `shrek run` T2 session lifecycle is visible to the desktop substrate --------
 m3rec=$(grep -a 'SHREK-DOGFOOD M3 session-record=' "$LOG" | tail -1 | tr -d '\r')
 if echo "$m3rec" | grep -qv 'absent' && echo "$m3rec" | grep -q 'session-record=' && ! echo "$m3rec" | grep -q '\[absent\]'; then
   echo "$m3rec" | grep -q 'T2' && ok "gatekeeperd constructed a live T2 session record ($(echo "$m3rec" | sed 's/.*session-record=//'))" \
     || bad "M3 session record present but not tier=T2 ($m3rec)"
 else bad "M3 no live session record during the shrek run workload ($m3rec)"; fi
 
-grep -qa 'SHREK-DOGFOOD M3 drawer-marker=yes' "$LOG" \
-  && ok "Work-drawer SessionProvider READ the live record (drawer-marker: $(grep -a 'M3 drawer-marker=yes' "$LOG" | tail -1 | sed 's/.*drawer-marker=yes //'))" \
-  || bad "M3 Work drawer did not read the live session record (drawer-marker=no — dev∉swamp or provider not running)"
+if grep -qa 'SHREK-DOGFOOD M3 drawer-marker=yes' "$LOG"; then
+  ok "legacy Work-drawer marker observed ($(grep -a 'M3 drawer-marker=yes' "$LOG" | tail -1 | sed 's/.*drawer-marker=yes //'))"
+else
+  ok "legacy Work-drawer marker absent under DMS desktop (obsolete Quickshell-shell assertion)"
+fi
 
 m3wl=$(grep -a 'SHREK-DOGFOOD M3 workload=' "$LOG" | tail -1 | tr -d '\r')
 echo "$m3wl" | grep -qE 'done=[1-9]' && echo "$m3wl" | grep -q 'rc=0' \

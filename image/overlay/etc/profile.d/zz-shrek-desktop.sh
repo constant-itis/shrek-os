@@ -11,10 +11,9 @@
 #   /dev/dri/card0      a real KMS device exists (virtio-gpu in the dogfood VM; absent on the CI std-vga)
 #   shrek-desktop       the shrek-desktop sysext merged onto /usr (oniond ran)
 #
-# WLR_RENDERER=pixman: software render on the VM's virtio-gpu DRM — works with OR without host virgl, so
-# the session lands regardless of the domain's GPU. M1 flips to GLES when the host provides acceleration.
+# Renderer selection belongs to wlroots/Qt in interactive sessions. Headless proofs pass pixman/software
+# explicitly through their own harnesses.
 if [ "${XDG_VTNR:-}" = 1 ] && [ -z "${WAYLAND_DISPLAY:-}" ] \
    && [ -e /dev/dri/card0 ] && command -v shrek-desktop >/dev/null 2>&1; then
-    export WLR_RENDERER="${WLR_RENDERER:-pixman}"
     exec shrek-desktop
 fi
