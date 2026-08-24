@@ -25,15 +25,93 @@ done
 
 case "$TARGET_DISK" in
     /dev/sd*|/dev/vd*|/dev/nvme*n*|/dev/mmcblk*) ;;
+    /dev/loop*) [ "${SHREK_INSTALL_ALLOW_LOOP:-0}" = 1 ] || {
+        echo "refusing loop target outside installer proof harness: $TARGET_DISK" >&2
+        exit 66
+    } ;;
     *) echo "refusing unexpected target disk path: $TARGET_DISK" >&2; exit 66 ;;
 esac
 
-echo "INSTALL-0 dry boundary reached:"
+part_path() {
+    case "$1" in
+        /dev/nvme*n*|/dev/mmcblk*|/dev/loop*) printf '%sp%s\n' "$1" "$2" ;;
+        *) printf '%s%s\n' "$1" "$2" ;;
+    esac
+}
+
+payload_dev=/dev/disk/by-label/shrek-payload
+payload_mnt=/run/shrek-payload
+[ -b "$payload_dev" ] || {
+    echo "missing install payload disk: $payload_dev" >&2
+    echo "Attach the read-only shrek-install-payload.raw image to the installer VM." >&2
+    exit 69
+}
+
+mkdir -p "$payload_mnt"
+if ! findmnt -rn "$payload_mnt" >/dev/null 2>&1; then
+    mount -o ro "$payload_dev" "$payload_mnt"
+fi
+
+base="$payload_mnt/shrek_1_x86-64.raw"
+layers="$payload_mnt/layer-store.raw"
+sums="$payload_mnt/SHA256SUMS"
+[ -f "$base" ] && [ -f "$layers" ] || {
+    echo "payload missing shrek_1_x86-64.raw or layer-store.raw" >&2
+    exit 69
+}
+if [ -f "$sums" ]; then
+    ( cd "$payload_mnt" && sha256sum -c SHA256SUMS )
+fi
+
+target_real=$(readlink -f "$TARGET_DISK")
+payload_real=$(readlink -f "$payload_dev")
+[ "$target_real" != "$payload_real" ] || {
+    echo "refusing to overwrite the install payload disk" >&2
+    exit 66
+}
+
+echo "INSTALL-0 erase/install:"
 echo "  target_disk=$TARGET_DISK"
 echo "  username=$USERNAME"
 echo "  fullname=$FULLNAME"
 echo "  hostname=$HOSTNAME"
-echo
-echo "The destructive image deployment step is intentionally not enabled until the VM blank-disk"
-echo "fixture validates Calamares global-storage target selection against the Shrek layout."
-exit 70
+echo "  payload=$payload_mnt"
+
+for p in $(lsblk -lnpo NAME "$TARGET_DISK" | tail -n +2 | sort -r); do
+    umount "$p" 2>/dev/null || true
+done
+
+echo "copying sealed Shrek disk image to target"
+dd if="$base" of="$TARGET_DISK" bs=16M status=progress conv=fsync
+
+partprobe "$TARGET_DISK" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+
+echo "extending target GPT and appending installed state partitions"
+sgdisk -e "$TARGET_DISK"
+sgdisk -n 7:0:+4G -t 7:8300 -c 7:shrek-layers "$TARGET_DISK"
+sgdisk -n 8:0:0 -t 8:8300 -c 8:shrek-data "$TARGET_DISK"
+partprobe "$TARGET_DISK" 2>/dev/null || true
+partx -u "$TARGET_DISK" 2>/dev/null || partx -a "$TARGET_DISK" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+
+layers_part=$(part_path "$TARGET_DISK" 7)
+home_part=$(part_path "$TARGET_DISK" 8)
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -b "$layers_part" ] && [ -b "$home_part" ] && break
+    sleep 0.2
+done
+[ -b "$layers_part" ] && [ -b "$home_part" ] || {
+    echo "expected appended partitions missing: $layers_part $home_part" >&2
+    exit 67
+}
+
+echo "copying signed layer store"
+dd if="$layers" of="$layers_part" bs=16M status=progress conv=fsync
+e2label "$layers_part" shrek-layers
+
+echo "formatting persistent owner state"
+mkfs.ext4 -F -L shrek-data "$home_part"
+
+sync
+echo "INSTALL-0 complete: remove installer media and boot $TARGET_DISK"

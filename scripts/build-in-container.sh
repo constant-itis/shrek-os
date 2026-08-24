@@ -103,6 +103,7 @@ DOGFOOD_MASKS="image/overlay/etc/systemd/system"
 # removed on a normal build — so the default CI image + scripts/desktop-sealed-proof.sh stay byte-clean.
 LOCALFS_WANTS="image/overlay/usr/lib/systemd/system/local-fs.target.wants"
 MU_WANTS="image/overlay/usr/lib/systemd/system/multi-user.target.wants"
+INSTALLABLE="${INSTALLABLE:-0}"
 if [ "${DOGFOOD:-0}" = "1" ]; then
   echo "!!! DOGFOOD=1: interactive image — masking self-poweroff spike gates (shrek-mount-gate, shrek-desktop-gate) !!!"
   install -d "$DOGFOOD_MASKS"
@@ -114,7 +115,14 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
 else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service"
-  rm -f "$LOCALFS_WANTS/home.mount" "$MU_WANTS/shrek-dogfood-persist.service"
+  rm -f "$MU_WANTS/shrek-dogfood-persist.service"
+  if [ "$INSTALLABLE" = "1" ]; then
+    echo "!!! INSTALLABLE=1: enabling persistent /home (home.mount) without dogfood reboot probe !!!"
+    install -d "$LOCALFS_WANTS"
+    ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
+  else
+    rm -f "$LOCALFS_WANTS/home.mount"
+  fi
 fi
 
 mkdir -p out    # must exist before the bind-mount, or docker creates it root-owned

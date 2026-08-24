@@ -1,10 +1,10 @@
 # Dogfood-0 (M1) — persistence + services acceptance probe (DOGFOOD oracle scaffolding).
 #
-# ENABLED only on DOGFOOD=1 builds (build-in-container.sh stages the multi-user.target.wants symlink,
-# gitignored, removed on a normal build) because the probe REBOOTS the guest to prove /home persistence.
-# The unit file ships in the sealed image but is inert unless that symlink exists — a CI/shipped image
-# never runs it. Verdict is mirrored to the serial console for scripts/dogfood-vm.sh. Spike scaffolding:
-# strip before ship with the other gate units.
+# ENABLED only on DOGFOOD=1 builds (build-in-container.sh stages the multi-user.target.wants symlink)
+# because the probe REBOOTS the guest to prove /home persistence. The unit file ships in the sealed
+# image but has no [Install] section, so systemd presets cannot accidentally enable it. Verdict is
+# mirrored to the serial console for scripts/dogfood-vm.sh. Spike scaffolding: strip before ship with
+# the other gate units.
 [Unit]
 Description=Shrek Dogfood-0 M1 persistence + services acceptance probe
 Documentation=file:///usr/share/doc/shrek/dogfood-0.md
@@ -20,6 +20,3 @@ RemainAfterExit=yes
 ExecStart=/usr/lib/shrek/dogfood-persist-probe
 StandardOutput=journal+console
 StandardError=journal+console
-
-[Install]
-WantedBy=multi-user.target

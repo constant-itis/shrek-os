@@ -6,10 +6,9 @@
 # attached writable+persistent by the daily libvirt domain and the acceptance oracle). This realizes the
 # deferred "sealed /usr + writable /home" model without making root writable.
 #
-# The unit FILE is baked into the sealed image, but is only ENABLED (local-fs.target.wants/home.mount)
-# on DOGFOOD=1 builds — the images that actually attach the data disk. It is WantedBy (not RequiredBy)
-# local-fs.target and carries a short device timeout, so a normal/CI image (no data disk) neither hangs
-# nor fails to boot; it simply skips the mount. The systemd unit name MUST be `home.mount` to match
+# The unit FILE is baked into the sealed image, but is only ENABLED when build-in-container.sh stages
+# local-fs.target.wants/home.mount for a DOGFOOD or INSTALLABLE image. It has no [Install] section, so
+# systemd presets cannot accidentally enable it. The systemd unit name MUST be `home.mount` to match
 # Where=/home.
 [Unit]
 Description=Persistent /home on the shrek-data data disk (Dogfood-0 M1)
@@ -23,6 +22,3 @@ What=/dev/disk/by-label/shrek-data
 Where=/home
 Type=ext4
 Options=nosuid,nodev,x-systemd.device-timeout=10s
-
-[Install]
-WantedBy=local-fs.target

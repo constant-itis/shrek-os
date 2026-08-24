@@ -17,6 +17,7 @@ set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
+INCLUDE_DEV="${INCLUDE_DEV:-0}"
 MODE="${1:-good}"
 case "$MODE" in good|select|inject|unsigned|tamper|desktop|installer) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop|installer]" >&2; exit 1 ;; esac
 # Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (DMS + Qt runtime)
@@ -38,7 +39,7 @@ echo "=== building layer DDIs + store (mode=${MODE}) in debian:trixie ==="
 mkdir -p out/layers
 docker run --rm --privileged \
   -v "${REPO_ROOT}:/work" -w /work \
-  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" \
+  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" -e INCLUDE_DEV="${INCLUDE_DEV}" \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update -qq >/dev/null
@@ -103,10 +104,9 @@ docker run --rm --privileged \
     if [ "$MODE" = "desktop" ] || [ "$MODE" = "installer" ]; then
       cp "$(ls out/layers/shrek-desktop*.raw | head -1)" out/store-stage/extensions/shrek-desktop.raw
     fi
-    if [ "$MODE" = "desktop" ]; then
-      # Dogfood-0 M2: also stage the shrek-dev toolchain sysext WHEN it was built (scripts/build-dev-
-      # layer.sh). Optional — a plain desktop store omits it and the sealed onion-policy just does not
-      # merge the listed-but-absent layer. When present, oniond merges the toolchain onto /usr.
+    if [ "$MODE" = "desktop" ] && [ "${INCLUDE_DEV:-0}" = "1" ]; then
+      # Developer/agent profile: stage the shrek-dev toolchain sysext when it was built
+      # (scripts/build-dev-layer.sh). Plain Desktop omits it even if an old artifact exists in out/.
       if ls out/layers/shrek-dev*.raw >/dev/null 2>&1; then
         cp "$(ls out/layers/shrek-dev*.raw | head -1)" out/store-stage/extensions/shrek-dev.raw
         echo "--- staged shrek-dev toolchain sysext into the store ---"
@@ -128,8 +128,10 @@ docker run --rm --privileged \
     STORE_MB=256
     if [ "$MODE" = "desktop" ] || [ "$MODE" = "installer" ]; then STORE_MB=$(( $(du -sm out/store-stage | cut -f1) * 2 + 128 )); fi
     mkfs.ext4 -q -L shrek-layers -d out/store-stage out/layer-store.raw "${STORE_MB}M"
+    cp out/layer-store.raw "out/layer-store-${MODE}.raw"
     chown -R "${HOST_UID}:${HOST_GID}" out
   '
 echo "=== layer store ready: out/layer-store.raw (label shrek-layers, mode=${MODE}) ==="
+echo "=== mode-specific copy: out/layer-store-${MODE}.raw ==="
 echo "    boot it against the Phase-2 root with:"
 echo "      STORE=out/layer-store.raw RAW=out/shrek_1_x86-64.raw scripts/boot-vm.sh"

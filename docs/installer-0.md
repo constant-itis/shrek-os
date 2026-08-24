@@ -33,6 +33,17 @@ with:
 - `scripts/build-installer-layer.sh`
 - `scripts/build-layers.sh installer`
 
+`scripts/build-layers.sh` writes a mode-specific copy of the store:
+
+- `out/layer-store-installer.raw` is the live installer store and includes `shrek-installer`.
+- `out/layer-store-desktop.raw` is the installed Desktop store and omits `shrek-installer`.
+
+`scripts/build-installer-payload.sh` packages the sealed base image plus `out/layer-store-desktop.raw`
+into `out/shrek-install-payload.raw` with filesystem label `shrek-payload`. The live installer consumes
+that payload read-only, copies the sealed base image to the selected target disk, appends `shrek-layers`
+and `shrek-data`, copies the Desktop layer store to `shrek-layers`, and formats `shrek-data` for
+persistent owner state.
+
 Brand assets are Shrek-owned source assets under `brand/`. `scripts/stage-branding.sh` stages the minimal
 installed subset under `/usr/share/shrek/branding/`:
 
@@ -58,6 +69,7 @@ media with `brand/optimize-media.sh jpg`. It is staged as
 wallpaper seam today; DMS keeps its background transparent and reads only the future wallpaper-derived
 palette file.
 
-The current `shrek-install-target` intentionally stops before writing the disk. The next step is the VM
-blank-disk fixture that confirms Calamares' selected target disk is exposed reliably through global
-storage, then enables the destructive writer against that device.
+`shrek-install-target` refuses unexpected disk paths, refuses loop devices unless
+`SHREK_INSTALL_ALLOW_LOOP=1` is set by the proof harness, verifies the payload checksums, and refuses to
+overwrite the payload disk. Calamares remains the human-facing destructive confirmation and disk-selection
+UI.
