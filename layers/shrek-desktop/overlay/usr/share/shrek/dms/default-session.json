@@ -1,10 +1,10 @@
 {
-  "wallpaperPath": "",
+  "wallpaperPath": "/usr/share/shrek/desktop/wallpaper.jpg",
   "perMonitorWallpaper": false,
   "monitorWallpapers": {},
   "perModeWallpaper": false,
-  "wallpaperPathLight": "",
-  "wallpaperPathDark": "",
+  "wallpaperPathLight": "/usr/share/shrek/desktop/wallpaper.jpg",
+  "wallpaperPathDark": "/usr/share/shrek/desktop/wallpaper.jpg",
   "monitorWallpapersLight": {},
   "monitorWallpapersDark": {},
   "monitorWallpaperFillModes": {},
