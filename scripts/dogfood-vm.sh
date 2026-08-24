@@ -16,7 +16,11 @@
 # hermetic pattern as scripts/boot-vm.sh — beepboop stays untouched.
 #
 # Prereqs (run first): scripts/build-desktop-layer.sh ; DOGFOOD=1 scripts/build-in-container.sh 1 ;
-#                      scripts/build-layers.sh desktop   (produces out/layer-store.raw)
+#                      INCLUDE_DEV=1 scripts/build-layers.sh desktop   (produces out/layer-store.raw)
+# INCLUDE_DEV=1 is REQUIRED here: the M2 stage asserts the shrek-dev toolchain (rustc/cargo/compile),
+# but build-layers.sh omits shrek-dev by default (plain Desktop/installer images ship without it).
+# A store built plain boots fine but fails the 3 M2 checks — the guard below fails fast if it is missing
+# rather than burning the full boot budget to discover it.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"; mkdir -p out
 
@@ -24,6 +28,10 @@ RAW="${RAW:-$(ls -t out/shrek_*_x86-64.raw 2>/dev/null | head -1)}"
 [ -n "$RAW" ] && [ -f "$RAW" ] || { echo "no out/shrek_*_x86-64.raw — run DOGFOOD=1 scripts/build-in-container.sh 1 first" >&2; exit 1; }
 STORE="${STORE:-out/layer-store.raw}"
 [ -f "$STORE" ] || { echo "no $STORE — run scripts/build-layers.sh desktop first" >&2; exit 1; }
+# The M2 stage requires the shrek-dev toolchain sysext staged into the store (INCLUDE_DEV=1). ext4
+# records the staged filename verbatim in a directory block, so a raw grep is a cheap, mount-free probe.
+# Fail fast with the exact fix instead of wasting the ~300s boot budget on a store that can't pass M2.
+grep -qa 'shrek-dev.raw' "$STORE" || { echo "$STORE has no shrek-dev toolchain — M2 will FAIL. Rebuild: INCLUDE_DEV=1 scripts/build-layers.sh desktop" >&2; exit 1; }
 
 # FRESH disposable data disk each run: boot1 must see an EMPTY /home so the probe writes the marker and
 # reboots; a stale marker would short-circuit the persistence proof. (The daily domain uses a persistent
