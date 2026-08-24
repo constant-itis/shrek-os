@@ -89,12 +89,12 @@ else
   rm -f "$POISON"
 fi
 
-# Dogfood-0 (M0): DOGFOOD=1 builds an INTERACTIVE image. The spike acceptance gates run late and then
-# power the VM OFF (shrek-mount-gate owns SuccessAction/FailureAction=poweroff-force) — correct for the
-# headless CI proof, fatal for a machine you want to sit at. Mask both the poweroff-owning mount gate and
-# the now-redundant headless desktop proof (the interactive tty1 session IS the surface proof) via
-# /etc/systemd/system/<unit> → /dev/null, which outranks the /usr unit. These masks are gitignored and
-# REMOVED on a normal build, so the default image + scripts/desktop-sealed-proof.sh are byte-unchanged.
+# Dogfood-0 (M0) and INSTALL-0 live media build INTERACTIVE images. The spike acceptance gates run late
+# and then power the VM OFF (shrek-mount-gate owns SuccessAction/FailureAction=poweroff-force) — correct
+# for the headless CI proof, fatal for a machine you want to sit at. Mask both the poweroff-owning mount
+# gate and the now-redundant headless desktop proof (the interactive tty1 session IS the surface proof)
+# via /etc/systemd/system/<unit> → /dev/null, which outranks the /usr unit. These masks are gitignored
+# and REMOVED on a normal build, so the default image + scripts/desktop-sealed-proof.sh are byte-unchanged.
 DOGFOOD_MASKS="image/overlay/etc/systemd/system"
 # Dogfood-0 (M1): the persistent /home mount + the persistence/services acceptance probe are ENABLED
 # only on DOGFOOD images — they assume the writable shrek-data disk (home.mount would otherwise wait on
@@ -104,6 +104,7 @@ DOGFOOD_MASKS="image/overlay/etc/systemd/system"
 LOCALFS_WANTS="image/overlay/usr/lib/systemd/system/local-fs.target.wants"
 MU_WANTS="image/overlay/usr/lib/systemd/system/multi-user.target.wants"
 INSTALLABLE="${INSTALLABLE:-0}"
+LIVE_INSTALLER="${LIVE_INSTALLER:-0}"
 if [ "${DOGFOOD:-0}" = "1" ]; then
   echo "!!! DOGFOOD=1: interactive image — masking self-poweroff spike gates (shrek-mount-gate, shrek-desktop-gate) !!!"
   install -d "$DOGFOOD_MASKS"
@@ -113,8 +114,16 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   install -d "$LOCALFS_WANTS" "$MU_WANTS"
   ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
   ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
+elif [ "$LIVE_INSTALLER" = "1" ]; then
+  echo "!!! LIVE_INSTALLER=1: interactive live media — masking proof gates and installed-state mounts !!!"
+  install -d "$DOGFOOD_MASKS"
+  ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
+  ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+  ln -sf /dev/null "$DOGFOOD_MASKS/var-lib-swamp.mount"
+  rm -f "$MU_WANTS/shrek-dogfood-persist.service"
+  rm -f "$LOCALFS_WANTS/home.mount"
 else
-  rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+  rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
   if [ "$INSTALLABLE" = "1" ]; then
     echo "!!! INSTALLABLE=1: enabling persistent /home (home.mount) without dogfood reboot probe !!!"

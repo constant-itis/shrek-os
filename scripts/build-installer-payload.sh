@@ -7,7 +7,7 @@
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 
-BASE="${BASE:-out/shrek_1_x86-64.raw}"
+BASE="${BASE:-out/shrek-install-base.raw}"
 LAYERS="${LAYERS:-out/layer-store-desktop.raw}"
 OUT="${OUT:-out/shrek-install-payload.raw}"
 [ -f "$BASE" ] || { echo "missing BASE=$BASE" >&2; exit 1; }

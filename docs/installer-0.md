@@ -38,11 +38,19 @@ with:
 - `out/layer-store-installer.raw` is the live installer store and includes `shrek-installer`.
 - `out/layer-store-desktop.raw` is the installed Desktop store and omits `shrek-installer`.
 
-`scripts/build-installer-payload.sh` packages the sealed base image plus `out/layer-store-desktop.raw`
-into `out/shrek-install-payload.raw` with filesystem label `shrek-payload`. The live installer consumes
-that payload read-only, copies the sealed base image to the selected target disk, appends `shrek-layers`
-and `shrek-data`, copies the Desktop layer store to `shrek-layers`, and formats `shrek-data` for
-persistent owner state.
+The live installer and the installed-system payload intentionally use different base artifacts:
+
+- `out/shrek_1_x86-64.raw` is the live installer boot disk when built with `LIVE_INSTALLER=1`.
+  It masks the headless proof gates and installed-state mounts, and it does not require
+  `/dev/disk/by-label/shrek-data` before installation.
+- `out/shrek-install-base.raw` is the installed-system base, built with `INSTALLABLE=1`.
+  It keeps installed persistence mounts such as `/home` enabled for the target disk layout.
+
+`scripts/build-installer-payload.sh` packages `out/shrek-install-base.raw` plus
+`out/layer-store-desktop.raw` into `out/shrek-install-payload.raw` with filesystem label
+`shrek-payload`. The live installer consumes that payload read-only, copies the sealed base image to the
+selected target disk, appends `shrek-layers` and `shrek-data`, copies the Desktop layer store to
+`shrek-layers`, and formats `shrek-data` for persistent owner state.
 
 Brand assets are Shrek-owned source assets under `brand/`. `scripts/stage-branding.sh` stages the minimal
 installed subset under `/usr/share/shrek/branding/`:
