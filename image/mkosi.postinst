@@ -52,6 +52,25 @@ grep -q '^swamp:' "$BUILDROOT/etc/passwd" || {
 }
 echo "postinst: swamp svc + dev membership -> $(grep '^swamp:' "$BUILDROOT/etc/group")"
 
+# Sprint S1 (power path): the shrek-desktop Onion layer adds polkit, whose polkit.service runs as
+# User=polkitd. A layer ships its sysusers.d INSIDE the sysext — applied at multi-user, AFTER
+# systemd-sysusers already ran at sysinit — and the merged /etc confext is read-only, so the polkitd
+# user can never be created at runtime. Bake it into the sealed base /etc now (same reason as
+# shrek/dev/swamp). uid/gid 701 sits in Shrek's reserved low-custom range (shrek=700), clear of the
+# Debian system-user block. Also pre-create /etc/polkit-1/rules.d (root:polkitd 0750, exactly what
+# polkit's tmpfiles.d would make) since that dir lives under the read-only /etc — same pattern as the
+# /etc/bluetooth pre-create below. polkit's /usr bits (actions/*.policy, the D-Bus own-name policy) ride
+# the sysext merge; only its /etc footprint needs baking here.
+grep -q '^polkitd:' "$BUILDROOT/etc/group" \
+    || echo 'polkitd:x:701:' >> "$BUILDROOT/etc/group"
+grep -q '^polkitd:' "$BUILDROOT/etc/passwd" || {
+    echo 'polkitd:x:701:701:User for polkitd:/:/usr/sbin/nologin' >> "$BUILDROOT/etc/passwd"
+    echo 'polkitd:!*:20000:0:99999:7:::' >> "$BUILDROOT/etc/shadow"
+}
+install -d -o 0 -g 0   -m 0755 "$BUILDROOT/etc/polkit-1"
+install -d -o 0 -g 701 -m 0750 "$BUILDROOT/etc/polkit-1/rules.d"
+echo "postinst: polkitd user -> $(grep '^polkitd:' "$BUILDROOT/etc/passwd") / rules.d $(ls -ldn "$BUILDROOT/etc/polkit-1/rules.d" | awk '{print $1, $3":"$4}')"
+
 # Dogfood-0 (M1) LOGIN-RACE FIX: normalize the shadow files to the Debian-canonical DAC shape.
 # mkosi/sysusers creates /etc/shadow + /etc/gshadow as mode 000 root:root — readable only via
 # CAP_DAC_OVERRIDE. That interacts fatally with the Onion /etc confext merge: overlayfs re-checks

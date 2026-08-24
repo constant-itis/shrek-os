@@ -1,0 +1,35 @@
+# Sprint S1 (power path) — activate polkit after the shrek-desktop Onion layer merges.
+#
+# polkit.service ships INSIDE the shrek-desktop sysext, which merges at multi-user — AFTER systemd read
+# its unit set and dbus-broker read its config, both at sysinit. Nothing in the merge path issues a
+# reload (the dogfood probe hacks around this for bluetooth), so systemd never learns polkit.service
+# exists and dbus never learns the org.freedesktop.PolicyKit1 own-name policy — logind's on-demand
+# activation of polkit then fails and every power-off/reboot/suspend/mount authorization is DENIED
+# (the dead shutdown button the owner reported). Fix, once the merge is settled:
+#   1. `systemctl daemon-reload`      -> systemd sees the merged polkit.service (and any other layer unit)
+#   2. reload dbus (best-effort, `-`) -> dbus re-reads /usr/share/dbus-1/system.d/*PolicyKit1.conf so the
+#                                        polkitd user is allowed to OWN the bus name
+#   3. `systemctl start polkit.service` -> polkitd comes up and OWNS the name up front, so logind reaches
+#                                        it directly with no reliance on late D-Bus activation
+# The polkitd user + /etc/polkit-1/rules.d are baked into the sealed /etc at build (image/mkosi.postinst)
+# because runtime /etc is read-only. ConditionPathExists gates this to boots where the desktop layer is
+# actually merged (a bare base / installer boot has no polkit.service and simply skips).
+[Unit]
+Description=Shrek — activate polkit after the Onion desktop layer merges (S1 power path)
+Documentation=file:///usr/share/doc/shrek/desktop-functionality-sprint.md
+After=shrek-onion.service
+Wants=shrek-onion.service
+Before=shrek-desktop-ready.service
+ConditionPathExists=/usr/lib/systemd/system/polkit.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/systemctl daemon-reload
+ExecStart=-/usr/bin/systemctl reload dbus-broker.service
+ExecStart=/usr/bin/systemctl start polkit.service
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target
