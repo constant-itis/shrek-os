@@ -19,3 +19,7 @@ enable shrek-desktop
 # store omits it (e.g. a plain desktop build), a listed-but-absent layer is simply not merged — no error.
 # docs/dogfood-0.md §M2.
 enable shrek-dev
+# INSTALL-0: live installer media stages this signed sysext to add Calamares and the human-facing
+# "Install Shrek OS" launcher. It does not expose destructive disk authority through agent capability
+# APIs; the installer job runs only from the human-launched Calamares flow.
+enable shrek-installer

@@ -1,0 +1,39 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: shrek-install-target --target-disk DISK --username USER --fullname NAME --hostname HOST" >&2
+    exit 64
+}
+
+TARGET_DISK=
+USERNAME=
+FULLNAME=
+HOSTNAME=
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target-disk) TARGET_DISK="${2:-}"; shift 2 ;;
+        --username) USERNAME="${2:-}"; shift 2 ;;
+        --fullname) FULLNAME="${2:-}"; shift 2 ;;
+        --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+
+[ -n "$TARGET_DISK" ] && [ -n "$USERNAME" ] && [ -n "$HOSTNAME" ] || usage
+[ -b "$TARGET_DISK" ] || { echo "target disk is not a block device: $TARGET_DISK" >&2; exit 66; }
+
+case "$TARGET_DISK" in
+    /dev/sd*|/dev/vd*|/dev/nvme*n*|/dev/mmcblk*) ;;
+    *) echo "refusing unexpected target disk path: $TARGET_DISK" >&2; exit 66 ;;
+esac
+
+echo "INSTALL-0 dry boundary reached:"
+echo "  target_disk=$TARGET_DISK"
+echo "  username=$USERNAME"
+echo "  fullname=$FULLNAME"
+echo "  hostname=$HOSTNAME"
+echo
+echo "The destructive image deployment step is intentionally not enabled until the VM blank-disk"
+echo "fixture validates Calamares global-storage target selection against the Shrek layout."
+exit 70

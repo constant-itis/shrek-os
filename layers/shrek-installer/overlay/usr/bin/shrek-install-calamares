@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/shrek-installer"
+mkdir -p "$LOG_DIR"
+LOG="$LOG_DIR/calamares-$(date -u +%Y%m%dT%H%M%SZ).log"
+
+if command -v pkexec >/dev/null 2>&1; then
+    pkexec /usr/bin/calamares -c /usr/share/shrek/installer/calamares -D8 2>&1 | tee "$LOG"
+else
+    sudo /usr/bin/calamares -c /usr/share/shrek/installer/calamares -D8 2>&1 | tee "$LOG"
+fi

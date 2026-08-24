@@ -18,12 +18,18 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 MODE="${1:-good}"
-case "$MODE" in good|select|inject|unsigned|tamper|desktop) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop]" >&2; exit 1 ;; esac
+case "$MODE" in good|select|inject|unsigned|tamper|desktop|installer) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop|installer]" >&2; exit 1 ;; esac
 # Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (DMS + Qt runtime)
 # produced by scripts/build-desktop-layer.sh; this script only ASSEMBLES it into the store, so
 # require the DDI to already exist rather than rebuilding it here.
 if [ "$MODE" = "desktop" ] && ! ls out/layers/shrek-desktop*.raw >/dev/null 2>&1; then
   echo "MODE=desktop needs a built desktop DDI — run scripts/build-desktop-layer.sh first" >&2; exit 1
+fi
+if [ "$MODE" = "installer" ]; then
+  ls out/layers/shrek-desktop*.raw >/dev/null 2>&1 || {
+    echo "MODE=installer needs a built desktop DDI - run scripts/build-desktop-layer.sh first" >&2; exit 1; }
+  ls out/layers/shrek-installer*.raw >/dev/null 2>&1 || {
+    echo "MODE=installer needs a built installer DDI - run scripts/build-installer-layer.sh first" >&2; exit 1; }
 fi
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
@@ -89,13 +95,15 @@ docker run --rm --privileged \
     if [ "$MODE" = "select" ] || [ "$MODE" = "inject" ]; then
       cp "$(ls out/layers/shrek-extra*.raw | head -1)" out/store-stage/extensions/shrek-extra.raw
     fi
-    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ] || [ "$MODE" = "inject" ] || [ "$MODE" = "desktop" ]; then
+    if [ "$MODE" = "good" ] || [ "$MODE" = "select" ] || [ "$MODE" = "inject" ] || [ "$MODE" = "desktop" ] || [ "$MODE" = "installer" ]; then
       cp "$(ls out/layers/shrek-conf*.raw | head -1)" out/store-stage/confexts/shrek-conf.raw
     fi
-    # desktop: stage the pre-built signed shrek-desktop sysext (scripts/build-desktop-layer.sh) beside
+    # desktop/installer: stage the pre-built signed shrek-desktop sysext (scripts/build-desktop-layer.sh) beside
     # shrek-hello. onion-policy enables it → the broker merges it → shrek-desktop-gate.service proves it.
-    if [ "$MODE" = "desktop" ]; then
+    if [ "$MODE" = "desktop" ] || [ "$MODE" = "installer" ]; then
       cp "$(ls out/layers/shrek-desktop*.raw | head -1)" out/store-stage/extensions/shrek-desktop.raw
+    fi
+    if [ "$MODE" = "desktop" ]; then
       # Dogfood-0 M2: also stage the shrek-dev toolchain sysext WHEN it was built (scripts/build-dev-
       # layer.sh). Optional — a plain desktop store omits it and the sealed onion-policy just does not
       # merge the listed-but-absent layer. When present, oniond merges the toolchain onto /usr.
@@ -103,6 +111,10 @@ docker run --rm --privileged \
         cp "$(ls out/layers/shrek-dev*.raw | head -1)" out/store-stage/extensions/shrek-dev.raw
         echo "--- staged shrek-dev toolchain sysext into the store ---"
       fi
+    fi
+    if [ "$MODE" = "installer" ]; then
+      cp "$(ls out/layers/shrek-installer*.raw | head -1)" out/store-stage/extensions/shrek-installer.raw
+      echo "--- staged shrek-installer sysext into the store ---"
     fi
     # inject: drop the compromised-brain marker oniond reads off the (untrusted) store. World-readable
     # so the unprivileged oniond can read it from the ro mount. The wall (gatekeeperd) must still refuse.
@@ -114,7 +126,7 @@ docker run --rm --privileged \
     # 256M fits the ~1MB marker layers; the desktop sysext (Qt6 + Sway + Mesa closure) is far bigger,
     # so size the store from the staged bytes (2x + headroom) when it is present.
     STORE_MB=256
-    if [ "$MODE" = "desktop" ]; then STORE_MB=$(( $(du -sm out/store-stage | cut -f1) * 2 + 128 )); fi
+    if [ "$MODE" = "desktop" ] || [ "$MODE" = "installer" ]; then STORE_MB=$(( $(du -sm out/store-stage | cut -f1) * 2 + 128 )); fi
     mkfs.ext4 -q -L shrek-layers -d out/store-stage out/layer-store.raw "${STORE_MB}M"
     chown -R "${HOST_UID}:${HOST_GID}" out
   '
