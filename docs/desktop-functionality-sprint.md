@@ -80,8 +80,20 @@ Confirmed missing → dead widgets:
   backend (recompile only if not) + `swayidle` + logind idle→lock + lock-on-suspend. **Knot:** the lock
   screen authenticates the `dev` user, so this needs a working **PAM** path. **Accept:** manual lock +
   auto-lock on idle + resume requires unlock.
-- [ ] **S4 · Storage / mounts (udisks2)** *(S — nearly free after S1)* — plug a disk → it mounts →
-  browsable. VM-testable by attaching a spare virtio disk. **Accept:** attach → mount → open.
+- [x] **S4 · Storage / mounts (udisks2)** *(S — nearly free after S1)* — **DONE** (dogfood-verified,
+  PASS=32/0). udisks2 added to the **base** (not a layer): it has an `/etc` footprint (`udisks2.conf`)
+  and a D-Bus-activated service, both integrated natively at base build — no sysext post-merge dance.
+  Two things needed handling: (1) **authorization** — removable-media actions default `allow_active=yes`,
+  but a NON-removable disk (any internal disk, and the virtio test disk) is a "system" device whose
+  `filesystem-mount-system` defaults `auth_admin_keep` (no graphical agent in the sealed session). A baked
+  rule `/etc/polkit-1/rules.d/49-shrek-udisks.rules` grants the `*-system` mount/unlock/eject/power-off
+  actions to the active+local session. (2) **writable mount base** — udisks uses `/run/media/$USER` for
+  session callers but falls back to `/media/$USER` for session-less ones (a root/service mount), and
+  `/media` is on the read-only dm-verity root → `mkdir /media/<user>` failed. A `media.mount` tmpfs unit
+  (always-enabled) gives `/media` a writable base, same sealed-root pattern as volatile `/var`. The
+  dogfood oracle attaches a labelled `SHREKUSB` virtio disk and proves the chain: udisksd owns its bus
+  name → polkit grants `filesystem-mount-system` to the seat0 leader → the disk mounts via udisks and its
+  seeded marker reads back. **Accept:** attach → mount → open. ✓
 - [ ] **S5 · Dynamic theming (matugen)** *(M)* — stage the `matugen` static binary into
   `layers/shrek-desktop/overlay/usr/bin` (same pattern as the staged `quickshell` binary), flip
   `runUserMatugenTemplates` in the DMS settings. **Biggest visual payoff** — closing the wallpaper →
