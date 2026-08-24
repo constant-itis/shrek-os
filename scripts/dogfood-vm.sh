@@ -192,5 +192,20 @@ for act in power-off reboot suspend; do
   fi
 done
 
+# --- Sprint S2: Network — the DMS network center can manage connections + persist them --------------
+# NM (base daemon) is already asserted active above; S2 adds the DESKTOP-facing capability: the active
+# seat0 user can save a system connection (settings.modify.system, granted by 49-shrek-nm.rules since
+# the sealed session has no graphical polkit agent), and saved connections land in the /home keyfile
+# store (RO /etc is redirected by 20-shrek-persistent-keyfile.conf) so Wi-Fi survives a reboot.
+grep -qa 'SHREK-DOGFOOD S2 nm-keyfile-path=\[/home/' "$LOG" \
+  && ok "NM keyfile store redirected to persistent /home ($(grep -a 'SHREK-DOGFOOD S2 nm-keyfile-path=' "$LOG" | tail -1 | sed 's/.*nm-keyfile-path=//'))" \
+  || bad "NM keyfile path not on /home ($(grep -a 'SHREK-DOGFOOD S2 nm-keyfile-path=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S2 authz modify-system=yes' "$LOG" \
+  && ok "polkit grants NM settings.modify.system to the active seat0 session (Wi-Fi passwords can save)" \
+  || bad "polkit did NOT grant NM settings.modify.system ($(grep -a 'SHREK-DOGFOOD S2 authz modify-system=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S2 conn-persist=ok' "$LOG" \
+  && ok "a saved system connection lands in the persistent /home keyfile store" \
+  || bad "system connection did not persist to /home ($(grep -a 'SHREK-DOGFOOD S2 conn-persist=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

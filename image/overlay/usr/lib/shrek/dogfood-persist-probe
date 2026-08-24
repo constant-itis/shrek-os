@@ -238,4 +238,33 @@ else
     say "S1 authz power-off=no(no-active-seat0-session-leader)"
 fi
 
+# --- Sprint S2: Network (NetworkManager) — the DMS network center can manage + persist connections ----
+# NM is a BASE daemon (already reported active above), so unlike polkit it needs no post-merge activation.
+# The sealed-image gaps for a WORKING network center are (a) AUTHORIZATION and (b) PERSISTENCE:
+#   (a) NM defaults allow_active=yes for list/toggle/scan/connect, but SAVING a system connection
+#       (settings.modify.system) defaults auth_admin_keep — a prompt the sealed session has no graphical
+#       polkit agent to answer. The baked rule /etc/polkit-1/rules.d/49-shrek-nm.rules grants it to the
+#       active+local session. Prove it with pkcheck against the SAME seat0 active-session leader S1 used
+#       ($LEAD/$STT/$LUID from the S1 block; a runuser'd caller is not session-tracked and would read no).
+#   (b) /etc is read-only, so NM's keyfile store is redirected to /home (20-shrek-persistent-keyfile.conf).
+#       Prove NM's effective keyfile path is the /home one AND that adding a system connection actually
+#       writes a keyfile there. The `nmcli add` runs as root (bypasses polkit — the active-user authz is
+#       proven separately by the pkcheck above); this isolates the persistence path from the authz path.
+say "S2 nm-keyfile-path=[$(NetworkManager --print-config 2>/dev/null | sed -n '/^\[keyfile\]/,/^\[/p' | sed -n 's/^[[:space:]]*path[[:space:]]*=[[:space:]]*//p' | head -1)]"
+if [ -n "$LEAD" ] && [ -r "/proc/$LEAD/stat" ]; then
+    rc=0; timeout 15 pkcheck --action-id org.freedesktop.NetworkManager.settings.modify.system --process "$LEAD,$STT,$LUID" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] && say "S2 authz modify-system=yes" || say "S2 authz modify-system=no(rc=$rc)"
+else
+    say "S2 authz modify-system=no(no-active-seat0-session-leader)"
+fi
+PSTORE=/home/.shrek-system/NetworkManager/system-connections
+nmcli connection delete shrek-s2-probe >/dev/null 2>&1 || true   # clean any prior run's leftover
+addout=$(nmcli connection add type ethernet ifname '*' con-name shrek-s2-probe 2>&1) || true
+if [ -f "$PSTORE/shrek-s2-probe.nmconnection" ]; then
+    say "S2 conn-persist=ok path=[$PSTORE/shrek-s2-probe.nmconnection]"
+else
+    say "S2 conn-persist=FAIL store=[$(ls "$PSTORE" 2>&1 | tr '\n' ' ')] add=[$(echo "$addout" | tr '\n' ' ' | tail -c 160)]"
+fi
+nmcli connection delete shrek-s2-probe >/dev/null 2>&1 || true
+
 say "DONE boot=$n"
