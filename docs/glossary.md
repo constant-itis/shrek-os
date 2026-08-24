@@ -12,6 +12,14 @@ The rule that an agent receives precise capabilities, not root or a user account
 
 The unprivileged resolver daemon. It binds identity, checks `caps ⊆ profile`, computes the requested tier from sealed policy, and emits a request for `gatekeeperd` to re-check.
 
+## Agent identity slot
+
+The identity-provisioning slot a Workshop hands a dispatched agent: home dir, `CLAUDE.md`, agent-scoped memory. It collapses **inside** a Workshop and is never called a "workspace" (see [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md)).
+
+## Bench
+
+A **mutable** environment — the mess-with-a-door where you `apt`/`pip`/experiment without touching sealed `/usr`. Classes: scratch, project, personal-dev, untrusted. Instantiated at a **policy-selected tier** (trust is an orthogonal axis, not fixed) with a persistence policy and a default-deny capability profile. Promotes to a Workshop. See [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md).
+
 ## Blast radius
 
 What the workload can reach inside its box: paths, commands, search scope, export scope, and network egress. This is the capability profile.
@@ -32,6 +40,10 @@ The mechanism that realizes an effective tier: `proc_plane` for T0, nspawn/mount
 
 The bytes and metadata a subject can reach through deterministic access control.
 
+## Deployment
+
+A complete bootable Shrek generation: base image + verity identity + UKI + a compatible Onion set, activated via staged `systemd-sysupdate` raw A/B with rollback (see [`adr-001` base-selection](base-selection.md), [`update-model.md`](update-model.md)).
+
 ## Gatekeeperd
 
 The privileged broker and wall. It independently re-checks requests against sealed policy, constructs sandboxes, brokers Onion merges, and must fail closed for agent execution.
@@ -40,9 +52,13 @@ The privileged broker and wall. It independently re-checks requests against seal
 
 A bounded authority extension approved through the grant protocol. The agent never receives a bearer token; the broker applies the capability directly.
 
+## Job
+
+A short-lived, outcome-oriented execution launched from a Workshop or Application with task-specific grants; an ephemeral sandbox instantiated at the **policy-selected tier** with one-shot grants, torn down after completion. See [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md).
+
 ## Onion
 
-The signed system-layer mechanism: dm-verity-authenticated sysext/confext DDIs selected by sealed policy and merged by systemd under a fixed image policy.
+The signed system-layer mechanism: signed, dm-verity-protected sysext/confext DDIs selected by sealed policy and merged by systemd under a fixed image policy. Reserved for functionality that genuinely belongs in the composed OS — **not** the default home for an ordinary user tool.
 
 ## Plane
 
@@ -87,3 +103,15 @@ The human approval surface that the sandbox cannot spoof or capture. The design 
 ## Trust band
 
 The provenance band of code being executed: `T-first`, `T-pinned`, `T-untrust`, `T-hostile`. The broker derives it from sealed evidence; unknown provenance fails high.
+
+## User Tool
+
+A self-contained binary/script that runs as a user process (`~/.local/bin`, on `PATH`), optionally through a registered launcher/profile; needs no host libraries and no privilege. Not everything needs a Bench. A **managed** installation retains source, version, digest, installed paths, exported commands, and removal provenance; an unmanaged `curl | sh` result is allowed but **labelled unmanaged**. See [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md).
+
+## Work
+
+The human-facing management surface for projects, Workshops, Benches, Jobs, agents, and approvals. It is a **UI projection of authoritative state** — not an execution environment and not an authority-owning object. The Quickshell component is the **Work drawer** (read-only until the trusted path lands). Deliberately **not** named "Workspace" (that word collides with Sway/Herdr/IDE/project workspaces). See [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md).
+
+## Workshop
+
+A named, **reproducible** environment built from a declarative recipe that produces an *environment artifact* (base, packages/versions, exports, rebuild provenance) and a *policy artifact* (max filesystem/network/secret-slot requests, devices, persistence). An **authority template**, not an issuer — a runtime activation compiles it into `shrek run`/Gatekeeper enforcement (`declared maximum ⊇ approved activation ⊇ actual session authority`). Human-authorized and curated; the promote-target of a Bench; may be re-engineered into an Onion via an explicit trust-boundary change. See [`adr-002-environment-vocabulary.md`](adr-002-environment-vocabulary.md).
