@@ -43,13 +43,19 @@ Confirmed missing → dead widgets:
 - [ ] **S0 · Triage boot** *(½ loop)* — boot the installed image, click **every** DMS surface, record
   works vs dead. Grounds the sprint in reality instead of package inference. Update the table above with
   findings. Do this first.
-- [ ] **S1 · Power / session (polkit)** *(S)* — the reported bug and a category-opener (also unlocks the
-  auth half of udisks and NetworkManager). Add `polkitd` (`polkit-1`/`policykit-1`) to the desktop
-  layer. The systemd-shipped logind `.policy` files default `allow_active=yes` for
-  poweroff/reboot/suspend, so `polkitd` alone likely suffices with **no** graphical agent — verify.
-  Confirm `/usr/share/polkit-1/actions/org.freedesktop.login1.policy` is present and the `dev` session
-  is `Active=yes` on seat0 (`loginctl session-status`; M1 made it active via pam_systemd).
-  **Accept:** Off powers off, Reboot reboots, Suspend suspends.
+- [x] **S1 · Power / session (polkit)** *(S)* — **DONE** (dogfood-verified + interactive: Off powers off).
+  `polkitd` alone was **not** enough — the sealed image breaks packaged-daemon integration in three
+  places, all now handled (see the build-model reference in mycelium): (1) `polkit.service` runs
+  `User=polkitd`, but a layer's `sysusers.d` applies after `systemd-sysusers` and runtime `/etc` is a
+  read-only confext overlay, so the user is **baked into the base `/etc`** at build (`image/mkosi.postinst`,
+  uid/gid 701) alongside the `/etc/polkit-1/rules.d` dir; (2) the layer's `polkit.service` + dbus
+  own-name policy merge *after* systemd/dbus read config and the merge issues no reload, so
+  `shrek-desktop-polkit.service` does a post-merge `daemon-reload` + dbus reload + `systemctl start
+  polkit.service` so polkitd **owns its bus name** up front (dbus on-demand activation alone fails); (3)
+  the login1 `.policy` `allow_active=yes` then grants an **active seat0** session with no graphical
+  agent. The dogfood oracle now proves the whole chain (user → unit active → owns name → `pkcheck`
+  grants power-off/reboot/suspend to the session leader).
+  **Accept:** Off powers off, Reboot reboots, Suspend suspends. ✓
 - [ ] **S2 · Network (NetworkManager)** *(S–M)* — verify NM is running (it may already be in the base
   image; prior boots logged NetworkManager). Wire the DMS network center and **persist connection
   profiles** — volatile `/var` means NM profiles need a `/home`-backed bind (the M1 selective-persistence
