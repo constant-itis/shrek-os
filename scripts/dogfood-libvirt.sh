@@ -9,7 +9,8 @@
 #                          reboots (unlike the throwaway oracle) — Secure Boot stays enforcing.
 #   out/dogfood-shrek.xml  the domain: OVMF secboot + q35/smm, root raw + signed layer store (both RO,
 #                          they are dm-verity/signed by design), SPICE + virtio-gpu (virgl when the host
-#                          supports it, else plain virtio-gpu/llvmpipe), virtio keyboard + tablet input.
+#                          supports it, else plain virtio-gpu/llvmpipe), virtio keyboard + tablet input,
+#                          and a normal libvirt NAT virtio NIC for human desktop use.
 #
 # This script only GENERATES + prints import steps — it does NOT define the domain (never mutates the
 # owner's libvirt unprompted). Run on the host (beepboop) where libvirt/virt-manager live.
@@ -98,6 +99,14 @@ cat > out/dogfood-shrek.xml <<XML
     <input type='keyboard' bus='virtio'/>
     <input type='tablet' bus='virtio'/>
     <rng model='virtio'><backend model='random'>/dev/urandom</backend></rng>
+    <!-- Human/host desktop networking only: ordinary libvirt NAT + virtio NIC. This is intentionally
+         absent from scripts/boot-vm.sh and the sealed/headless security acceptance topology. -->
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <serial type='pty'><target type='isa-serial' port='0'/></serial>
+    <console type='pty'><target type='serial' port='0'/></console>
     <channel type='spicevmc'><target type='virtio' name='com.redhat.spice.0'/></channel>
 ${VIDEO}
 ${GRAPHICS}
@@ -113,6 +122,6 @@ echo "  virsh --connect qemu:///system define $REPO_ROOT/out/dogfood-shrek.xml"
 echo "  virsh --connect qemu:///system start ${NAME}      # or open it in virt-manager and hit ▶"
 echo
 echo "First boot enrolls the Shrek Secure Boot key into the persistent NVRAM (a reboot), then lands at"
-echo "the Sway + Quickshell desktop over SPICE. NVRAM persists, so later boots skip enrollment."
+echo "the Sway + DMS desktop over SPICE with normal libvirt NAT networking. NVRAM persists, so later boots skip enrollment."
 echo "NOTE: qemu:///system needs the raw + store + data disk + NVRAM readable/writable by libvirt-qemu"
 echo "      (the data disk must be WRITABLE) — or use qemu:///session."

@@ -156,4 +156,54 @@ say "M3 workload=[done=$(grep -ac M3-WORK-DONE /run/m3-run.log 2>/dev/null || ec
 after=$(ls /run/shrek/session/*.json 2>/dev/null | head -1)
 say "M3 record-after-teardown=[${after:-absent}]"
 
+# --- Dogfood-0 M4: host/human VM networking works; no-egress sandbox still cannot reach Internet ------
+# The interactive libvirt dogfood VM has an ordinary NAT virtio NIC so a human desktop can use
+# NetworkManager DHCP. Workload egress remains controlled by gatekeeperd profiles; a sandbox without an
+# egress grant must still be offline even while the host desktop reaches DNS/HTTPS/GitHub.
+route=; i=0
+while [ "$i" -lt 90 ]; do
+    route=$(ip -4 route show default 2>/dev/null | head -1)
+    [ -n "$route" ] && break
+    [ $(( i % 30 )) -eq 0 ] && say "M4 network-wait t=${i}s nm-state=[$(nmcli -t -f STATE general 2>/dev/null || echo nmcli-missing)]"
+    sleep 1; i=$((i + 1))
+done
+
+if [ -z "$route" ]; then
+    say "M4 SKIP no-default-route nm-state=[$(nmcli -t -f STATE general 2>/dev/null || echo nmcli-missing)]"
+else
+    say "M4 default-route=[$route] after=${i}s nm-state=[$(nmcli -t -f STATE general 2>/dev/null || echo nmcli-missing)]"
+    if getent ahostsv4 github.com >/run/m4-dns.out 2>/run/m4-dns.err; then
+        say "M4 dns=ok github.com=[$(head -1 /run/m4-dns.out | awk '{print $1}')]"
+    else
+        say "M4 dns=FAIL err=[$(tr '\n' '|' < /run/m4-dns.err 2>/dev/null)]"
+    fi
+    if command -v git >/dev/null 2>&1; then
+        if runuser -u dev -- env HOME=/home/dev git ls-remote https://github.com/github/gitignore.git HEAD >/run/m4-git.out 2>/run/m4-git.err; then
+            say "M4 github-https=ok head=[$(awk '{print $1}' /run/m4-git.out | head -1)]"
+        else
+            say "M4 github-https=FAIL err=[$(tr '\n' '|' < /run/m4-git.err 2>/dev/null | tail -c 240)]"
+        fi
+    else
+        say "M4 github-https=FAIL git=MISSING"
+    fi
+
+    M4SRV=/run/shrek-m4/srv
+    rm -rf /run/shrek-m4 2>/dev/null || true
+    mkdir -p "$M4SRV/project"
+    printf 'm4 no-egress probe\n' > "$M4SRV/project/marker"
+    M4WL='PATH=/bin:/usr/bin; export PATH; command -v nc >/dev/null 2>&1 && echo M4-SANDBOX-NC-OK || echo M4-SANDBOX-NC-MISSING; if timeout 5 nc -w 2 1.1.1.1 53 </dev/null >/dev/null 2>&1; then echo M4-SANDBOX-EGRESS-LEAK; else echo M4-SANDBOX-NO-EGRESS-OK; fi'
+    if systemd-run --scope --quiet -p Delegate=yes -- "$GK" sandbox --tier T2 --trust T-untrust \
+        --caps C-ro-nosec --profile C-ro-nosec --id m4nonet --anchor "$M4SRV" --grant project \
+        -- /bin/sh -c "$M4WL" >/run/m4-sandbox.out 2>/run/m4-sandbox.err; then
+        if grep -q M4-SANDBOX-NC-OK /run/m4-sandbox.out 2>/dev/null \
+            && grep -q M4-SANDBOX-NO-EGRESS-OK /run/m4-sandbox.out 2>/dev/null; then
+            say "M4 sandbox-no-egress=ok"
+        else
+            say "M4 sandbox-no-egress=FAIL output=[$(tr '\n' '|' < /run/m4-sandbox.out 2>/dev/null)]"
+        fi
+    else
+        say "M4 sandbox-no-egress=FAIL gatekeeper=[$(tr '\n' '|' < /run/m4-sandbox.err 2>/dev/null | tail -c 240)]"
+    fi
+fi
+
 say "DONE boot=$n"
