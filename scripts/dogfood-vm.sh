@@ -54,9 +54,16 @@ docker run --rm --device /dev/kvm \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update -qq >/dev/null
-    apt-get install -y --no-install-recommends -qq qemu-system-x86 ovmf socat netpbm >/dev/null
+    apt-get install -y --no-install-recommends -qq qemu-system-x86 ovmf socat netpbm e2fsprogs >/dev/null
     tmp=$(mktemp -d); mon="$tmp/mon.sock"
     cp /usr/share/OVMF/OVMF_VARS_4M.fd "$tmp/vars.fd"   # SETUP-MODE vars → first boot auto-enrolls the Shrek key
+
+    # Sprint S4: a spare "USB" disk for the udisks2 mount proof — a whole-disk ext4 labelled SHREKUSB with a
+    # marker file seeded in. The probe finds it by label, mounts it via udisks (attach→mount→open), reads
+    # the marker. snapshot=on so the guest cannot dirty the source across re-runs.
+    usbdir=$(mktemp -d); printf "shrek s4 udisks mount proof\n" > "$usbdir/shrek-usb-marker"
+    truncate -s 64M "$tmp/usb.raw"
+    mkfs.ext4 -q -L SHREKUSB -d "$usbdir" "$tmp/usb.raw"
 
     shot() { # $1 = output basename (no ext)
       printf "screendump /work/out/%s.ppm\n" "$1" | socat - "UNIX-CONNECT:$mon" >/dev/null 2>&1 || echo "NOTE screendump $1 failed"
@@ -77,6 +84,7 @@ docker run --rm --device /dev/kvm \
       -drive file="/work/$RAW",format=raw,if=virtio,snapshot=on \
       -drive file="/work/$STORE",format=raw,if=virtio,snapshot=on \
       -drive file="/work/$DATA",format=raw,if=virtio \
+      -drive file="$tmp/usb.raw",format=raw,if=virtio,snapshot=on \
       -device virtio-vga -device virtio-keyboard-pci -device virtio-tablet-pci -device virtio-rng-pci \
       -display none -serial file:/work/'"$LOG"' \
       -monitor "unix:$mon,server,nowait" &
@@ -206,6 +214,20 @@ grep -qa 'SHREK-DOGFOOD S2 authz modify-system=yes' "$LOG" \
 grep -qa 'SHREK-DOGFOOD S2 conn-persist=ok' "$LOG" \
   && ok "a saved system connection lands in the persistent /home keyfile store" \
   || bad "system connection did not persist to /home ($(grep -a 'SHREK-DOGFOOD S2 conn-persist=' "$LOG" | tail -1 | tr -d '\r'))"
+
+# --- Sprint S4: Storage — an attached disk mounts through udisks and its contents are readable ----------
+# udisks2 is a base daemon; S4 adds the file-manager capability: the active seat0 user is authorized to
+# mount a "system" disk (filesystem-mount-system, granted by 49-shrek-udisks.rules since the sealed session
+# has no graphical polkit agent), and the attached SHREKUSB virtio disk actually mounts + reads back.
+grep -qa 'SHREK-DOGFOOD S4 udisks-busname=\[owned\]' "$LOG" \
+  && ok "udisksd owns org.freedesktop.UDisks2 on the system bus" \
+  || bad "udisks bus name unowned ($(grep -a 'SHREK-DOGFOOD S4 udisks-busname=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S4 authz mount-system=yes' "$LOG" \
+  && ok "polkit grants udisks filesystem-mount-system to the active seat0 session" \
+  || bad "polkit did NOT grant udisks filesystem-mount-system ($(grep -a 'SHREK-DOGFOOD S4 authz mount-system=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S4 mount-open=ok' "$LOG" \
+  && ok "attached disk mounts via udisks and its contents are readable (attach->mount->open)" \
+  || bad "attached disk did not mount/open ($(grep -a 'SHREK-DOGFOOD S4 mount-open=' "$LOG" | tail -1 | tr -d '\r'))"
 
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

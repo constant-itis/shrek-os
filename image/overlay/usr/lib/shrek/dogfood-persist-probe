@@ -267,4 +267,37 @@ else
 fi
 nmcli connection delete shrek-s2-probe >/dev/null 2>&1 || true
 
+# --- Sprint S4: Storage / mounts (udisks2) — attach a disk, mount it via the file-manager path, read it -
+# udisks2 is a BASE daemon (D-Bus activated, runs as root) so it needs no post-merge activation. The
+# sealed-image gap is the same shape as S2: a NON-removable disk (the attached virtio disk, like any
+# internal disk) is a "system" device whose filesystem-mount-system defaults auth_admin_keep — unanswerable
+# in a sealed session with no graphical polkit agent. The baked rule 49-shrek-udisks.rules grants the
+# active+local session that action; prove it with pkcheck against the seat0 leader ($LEAD/$STT/$LUID from
+# S1). Then prove the capability end-to-end: mount the attached SHREKUSB disk through udisks and read the
+# marker seeded into it (attach -> mount -> open). The mount runs as root (bypasses polkit — the active-user
+# authz is proven separately by the pkcheck), isolating the daemon/device capability from the authz path.
+say "S4 udisks-unit active=[$(systemctl is-active udisks2.service 2>/dev/null || echo unknown)]"
+udisksctl status >/dev/null 2>&1 || true   # dbus-activate udisksd so it claims its bus name
+say "S4 udisks-busname=[$(busctl --system status org.freedesktop.UDisks2 >/dev/null 2>&1 && echo owned || echo unowned)]"
+if [ -n "$LEAD" ] && [ -r "/proc/$LEAD/stat" ]; then
+    rc=0; timeout 15 pkcheck --action-id org.freedesktop.udisks2.filesystem-mount-system --process "$LEAD,$STT,$LUID" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] && say "S4 authz mount-system=yes" || say "S4 authz mount-system=no(rc=$rc)"
+else
+    say "S4 authz mount-system=no(no-active-seat0-session-leader)"
+fi
+USBDEV=$(readlink -f /dev/disk/by-label/SHREKUSB 2>/dev/null || true)
+if [ -n "$USBDEV" ]; then
+    mout=$(udisksctl mount -b "$USBDEV" 2>&1) || true
+    mp=$(printf '%s' "$mout" | sed -n 's/^Mounted .* at \(.*\)$/\1/p' | tr -d '.' | head -1)
+    [ -z "$mp" ] && mp=$(findmnt -n -o TARGET "$USBDEV" 2>/dev/null | head -1)
+    if [ -n "$mp" ] && [ -f "$mp/shrek-usb-marker" ]; then
+        say "S4 mount-open=ok dev=[$USBDEV] at=[$mp] marker=[$(head -1 "$mp/shrek-usb-marker")]"
+    else
+        say "S4 mount-open=FAIL dev=[$USBDEV] mp=[${mp:-none}] out=[$(printf '%s' "$mout" | tr '\n' ' ' | tail -c 140)]"
+    fi
+    udisksctl unmount -b "$USBDEV" >/dev/null 2>&1 || true
+else
+    say "S4 mount-open=FAIL no-SHREKUSB-disk blk=[$(lsblk -no NAME,LABEL 2>/dev/null | tr '\n' '|')]"
+fi
+
 say "DONE boot=$n"
