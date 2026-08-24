@@ -1,0 +1,26 @@
+# Sprint S4 (storage) — writable /media for the udisks2 mount base on the sealed read-only root.
+#
+# udisks2 mounts attached/removable disks at /run/media/$USER for callers WITH a logind session, but
+# falls back to /media/$USER for session-less callers (e.g. a root or service mount). The sealed root is
+# read-only dm-verity, so that fallback fails "mkdir /media/<user>: Read-only file system" (the exact
+# error the S4 dogfood probe hit mounting as root). Mount a small tmpfs over the base /media mountpoint
+# so the fallback has a writable target; session users keep using /run/media, already a tmpfs. Same
+# sealed-root pattern as the volatile /var. Enabled unconditionally (unlike home.mount) via a static
+# local-fs.target.wants symlink — every boot that runs udisks needs the base present.
+#
+# The systemd unit name MUST be `media.mount` to match Where=/media.
+[Unit]
+Description=Writable /media tmpfs — udisks mount base on the sealed RO root (Sprint S4)
+Documentation=file:///usr/share/doc/shrek/desktop-functionality-sprint.md
+DefaultDependencies=no
+Conflicts=umount.target
+Before=umount.target local-fs.target
+
+[Mount]
+What=tmpfs
+Where=/media
+Type=tmpfs
+Options=mode=0755,nosuid,nodev,strictatime,size=64M
+
+[Install]
+WantedBy=local-fs.target

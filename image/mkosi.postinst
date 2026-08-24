@@ -98,6 +98,33 @@ chown 0:0 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules"
 chmod 0644 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules"
 echo "postinst: NM polkit rule -> $(ls -ln "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules" | awk '{print $1, $3":"$4}')"
 
+# Sprint S4 (storage): the DMS file manager mounts attached disks through udisks2's polkit-gated D-Bus API.
+# Removable-media actions (filesystem-mount, eject-media, power-off-drive, encrypted-unlock) already default
+# allow_active=yes, but a NON-removable disk (any internal disk, and a virtio disk in the VM) is classed as
+# a "system" device whose *-system actions default auth_admin_keep — the same admin prompt the sealed
+# single-user session has no graphical polkit agent to answer, so mounting it from the file manager would
+# silently fail. Grant the *-system disk-management actions to the ACTIVE, LOCAL session (baked into
+# read-only /etc, same as the NM rule). The -other-user/-other-seat variants stay denied — meaningless on a
+# single-user, single-seat sealed desktop. Inert on a bare base boot (no polkitd until the desktop layer).
+cat > "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-udisks.rules" <<'UDRULE'
+// Shrek OS — Sprint S4 (Storage). Let the active, local seat0 session mount / unlock /
+// eject / power-off SYSTEM disks (internal, and virtio disks in the VM) without an admin
+// agent. Removable-media variants already default allow_active=yes; only the *-system
+// actions need this grant so attaching a disk and opening it in the file manager works.
+polkit.addRule(function(action, subject) {
+    if (subject.active && subject.local &&
+        (action.id == "org.freedesktop.udisks2.filesystem-mount-system" ||
+         action.id == "org.freedesktop.udisks2.encrypted-unlock-system" ||
+         action.id == "org.freedesktop.udisks2.eject-media-system" ||
+         action.id == "org.freedesktop.udisks2.power-off-drive-system")) {
+        return polkit.Result.YES;
+    }
+});
+UDRULE
+chown 0:0 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-udisks.rules"
+chmod 0644 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-udisks.rules"
+echo "postinst: udisks polkit rule -> $(ls -ln "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-udisks.rules" | awk '{print $1, $3":"$4}')"
+
 # Dogfood-0 (M1) LOGIN-RACE FIX: normalize the shadow files to the Debian-canonical DAC shape.
 # mkosi/sysusers creates /etc/shadow + /etc/gshadow as mode 000 root:root — readable only via
 # CAP_DAC_OVERRIDE. That interacts fatally with the Onion /etc confext merge: overlayfs re-checks
