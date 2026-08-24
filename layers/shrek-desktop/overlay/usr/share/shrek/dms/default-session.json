@@ -1,0 +1,20 @@
+{
+  "wallpaperPath": "",
+  "perMonitorWallpaper": false,
+  "monitorWallpapers": {},
+  "perModeWallpaper": false,
+  "wallpaperPathLight": "",
+  "wallpaperPathDark": "",
+  "monitorWallpapersLight": {},
+  "monitorWallpapersDark": {},
+  "monitorWallpaperFillModes": {},
+  "wallpaperTransition": "none",
+  "includedTransitions": [],
+  "wallpaperCyclingEnabled": false,
+  "wallpaperCyclingMode": "interval",
+  "wallpaperCyclingInterval": 300,
+  "wallpaperCyclingTime": "06:00",
+  "themeModeAutoEnabled": false,
+  "isLightMode": false,
+  "configVersion": 3
+}

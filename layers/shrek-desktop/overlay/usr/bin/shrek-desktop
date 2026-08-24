@@ -8,6 +8,11 @@
 set -eu
 
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-sway}"
+export XDG_SESSION_DESKTOP="${XDG_SESSION_DESKTOP:-sway}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
+export DESKTOP_SESSION="${DESKTOP_SESSION:-sway}"
+export GDK_BACKEND="${GDK_BACKEND:-wayland,x11}"
 mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
 chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
 
@@ -32,4 +37,23 @@ fi
 # image://icon provider) resolve real app icons from Papirus-Dark instead of a placeholder.
 export XDG_CONFIG_DIRS="/usr/share/shrek/xdg:${XDG_CONFIG_DIRS:-/etc/xdg}"
 
-exec sway -c /usr/share/shrek/desktop/sway.config "$@"
+if [ ! -e "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/settings.json" ] && [ -r /usr/share/shrek/dms/default-settings.json ]; then
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell" 2>/dev/null || true
+  cp /usr/share/shrek/dms/default-settings.json "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/settings.json" 2>/dev/null || true
+fi
+
+if [ ! -e "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json" ] && [ -r /usr/share/shrek/dms/default-session.json ]; then
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell" 2>/dev/null || true
+  cp /usr/share/shrek/dms/default-session.json "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json" 2>/dev/null || true
+fi
+
+if [ -e /usr/share/shrek/installer/live-mode ]; then
+  export DMS_DISABLE_MATUGEN="${DMS_DISABLE_MATUGEN:-1}"
+fi
+
+sway_config=/usr/share/shrek/desktop/sway.config
+if [ -r /usr/share/shrek/installer/sway-live.config ]; then
+  sway_config=/usr/share/shrek/installer/sway-live.config
+fi
+
+exec sway -c "$sway_config" "$@"
