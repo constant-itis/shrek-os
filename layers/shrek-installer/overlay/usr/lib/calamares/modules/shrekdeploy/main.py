@@ -58,23 +58,32 @@ def _target_disk_from_partitions():
     return _parent_disk(root_part or first_part)
 
 
+def _target_disk():
+    # INSTALL-0 is a whole-disk image writer: the target is chosen by the
+    # Shrek-owned picker (shrek-install-calamares) and handed over via the
+    # environment. Fall back to the legacy Calamares partition module only if
+    # that is somehow absent.
+    disk = os.environ.get("SHREK_TARGET_DISK", "").strip()
+    if disk:
+        return disk
+    disk = _gs_value("shrek_target_disk", "") or ""
+    if disk.strip():
+        return disk.strip()
+    return _target_disk_from_partitions()
+
+
 def run():
     libcalamares.job.setprogress(0.02)
 
-    target_disk = _target_disk_from_partitions()
-    username = _gs_value("username", "")
+    target_disk = _target_disk()
+    username = _gs_value("username", "") or "shrek"
     fullname = _gs_value("fullname", "")
-    hostname = _gs_value("hostname", "shrek")
+    hostname = _gs_value("hostname", "shrek") or "shrek"
 
     if not target_disk:
         return (
             "No target disk selected",
-            "Calamares did not expose a selected target disk. Return to partitioning and select a disk.",
-        )
-    if not username:
-        return (
-            "No user configured",
-            "Calamares did not expose a user account. Return to the user page and create the owner account.",
+            "The installer did not receive a target disk. Relaunch the installer and select a disk to erase.",
         )
 
     libcalamares.job.setprogress(0.08)

@@ -1,0 +1,108 @@
+#!/bin/sh
+# Shrek OS INSTALL-0 target-disk lister.
+#
+# INSTALL-0 is a whole-disk image writer, not a partition editor, so target
+# selection is Shrek-owned rather than derived from Calamares' generic partition
+# module. This helper enumerates the whole disks that are safe to erase and emits
+# them one per line as:  PATH<TAB>SIZE<TAB>MODEL
+#
+# A disk is INELIGIBLE when it (or any of its children) is part of the running
+# live system: it backs a live mount, carries a Shrek/ESP partition or filesystem
+# label (live media, layer store, install payload, or a previously installed
+# Shrek disk), or is a read-only medium. Everything else is a candidate target.
+#
+# `--diagnose` dumps the raw block topology instead, for install logs.
+#
+# lsblk/findmnt can be overridden via SHREK_LSBLK / SHREK_FINDMNT so the filter
+# logic can be exercised headlessly against fixtures (see
+# scripts/install0-diskpick-proof.sh).
+set -eu
+
+LSBLK="${SHREK_LSBLK:-lsblk}"
+FINDMNT="${SHREK_FINDMNT:-findmnt}"
+
+if [ "${1:-}" = "--diagnose" ]; then
+    echo "== lsblk =="
+    "$LSBLK" -o NAME,PATH,SIZE,TYPE,RO,MOUNTPOINTS,PARTLABEL,LABEL,MODEL 2>&1 || true
+    echo "== findmnt =="
+    "$FINDMNT" -rn -o TARGET,SOURCE 2>&1 || true
+    exit 0
+fi
+
+# Snapshot the block topology once. One row per device (disks and partitions).
+# NB: no PATH column - lsblk -P emits it as PATH="..." and `eval` would clobber
+# the shell's own $PATH; we derive /dev/NAME instead.
+rows="$("$LSBLK" -P -b -o NAME,PKNAME,TYPE,RO,MOUNTPOINT,PARTLABEL,LABEL,SIZE,MODEL)"
+
+# A label that marks a disk as off-limits: the ESP, or any Shrek-owned volume
+# (shrek_1, shrek_1_verity, shrek-swamp, shrek-layers, shrek-data, shrek-payload).
+is_reserved_label() {
+    case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
+        esp|shrek*|shrek-*) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+base_of() {
+    # Base whole-disk name for a row: itself if a disk, else its parent.
+    if [ "$2" = disk ]; then
+        printf '%s' "$1"
+    elif [ -n "$3" ]; then
+        printf '%s' "$3"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# Pass 1 - collect the set of protected base disks.
+protected=" "
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    NAME=; PKNAME=; TYPE=; RO=; MOUNTPOINT=; PARTLABEL=; LABEL=
+    eval "$line"
+    base="$(base_of "$NAME" "$TYPE" "$PKNAME")"
+    reserve=0
+    [ -n "$MOUNTPOINT" ] && reserve=1
+    [ "$RO" = 1 ] && reserve=1
+    is_reserved_label "$PARTLABEL" && reserve=1
+    is_reserved_label "$LABEL" && reserve=1
+    if [ "$reserve" = 1 ]; then
+        case "$protected" in
+            *" $base "*) ;;
+            *) protected="$protected$base " ;;
+        esac
+    fi
+done <<EOF
+$rows
+EOF
+
+# The disk backing "/" is always protected, even if the mount rule missed it
+# (dm-verity/mapper indirection can hide the parent chain).
+root_src="$("$FINDMNT" -rn -o SOURCE / 2>/dev/null || true)"
+if [ -n "$root_src" ]; then
+    root_base="$("$LSBLK" -ndo PKNAME "$root_src" 2>/dev/null | head -1 || true)"
+    [ -z "$root_base" ] && root_base="$(basename "$root_src" 2>/dev/null || true)"
+    if [ -n "$root_base" ]; then
+        case "$protected" in
+            *" $root_base "*) ;;
+            *) protected="$protected$root_base " ;;
+        esac
+    fi
+fi
+
+# Pass 2 - emit eligible whole disks.
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    NAME=; TYPE=; SIZE=; MODEL=
+    eval "$line"
+    [ "$TYPE" = disk ] || continue
+    case "$protected" in
+        *" $NAME "*) continue ;;
+    esac
+    # Skip empty removable slots (card readers etc.) that report zero size.
+    [ "${SIZE:-0}" -gt 0 ] 2>/dev/null || continue
+    human="$(printf '%s' "${SIZE:-0}" | awk '{ b=$1; u="B"; s["1"]="KB"; s["2"]="MB"; s["3"]="GB"; s["4"]="TB"; i=0; while (b>=1024 && i<4){ b=b/1024; i++ } if(i>0)u=s[i""]; printf (b==int(b) ? "%d%s" : "%.1f%s"), b, u }')"
+    printf '/dev/%s\t%s\t%s\n' "$NAME" "$human" "${MODEL:-}"
+done <<EOF
+$rows
+EOF

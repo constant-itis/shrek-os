@@ -92,17 +92,43 @@ sgdisk -e "$TARGET_DISK"
 sgdisk -n 7:0:+4G -t 7:8300 -c 7:shrek-layers "$TARGET_DISK"
 sgdisk -n 8:0:0 -t 8:8300 -c 8:shrek-data "$TARGET_DISK"
 partprobe "$TARGET_DISK" 2>/dev/null || true
+blockdev --rereadpt "$TARGET_DISK" 2>/dev/null || true
+case "$TARGET_DISK" in
+    /dev/loop*) losetup -c "$TARGET_DISK" 2>/dev/null || true ;;
+esac
 partx -u "$TARGET_DISK" 2>/dev/null || partx -a "$TARGET_DISK" 2>/dev/null || true
 udevadm settle 2>/dev/null || true
 
 layers_part=$(part_path "$TARGET_DISK" 7)
 home_part=$(part_path "$TARGET_DISK" 8)
+
+ensure_loop_part_node() {
+    disk="$1"
+    path="$2"
+    case "$disk" in
+        /dev/loop*) ;;
+        *) return 0 ;;
+    esac
+    [ -b "$path" ] && return 0
+    majmin=$(lsblk -nrpo NAME,MAJ:MIN "$disk" 2>/dev/null | awk -v p="$path" '$1 == p { print $2; exit }')
+    [ -n "$majmin" ] || return 0
+    maj=${majmin%:*}
+    min=${majmin#*:}
+    [ -n "$maj" ] && [ -n "$min" ] || return 0
+    mknod "$path" b "$maj" "$min" 2>/dev/null || true
+}
+
+ensure_loop_part_node "$TARGET_DISK" "$layers_part"
+ensure_loop_part_node "$TARGET_DISK" "$home_part"
 for _ in 1 2 3 4 5 6 7 8 9 10; do
     [ -b "$layers_part" ] && [ -b "$home_part" ] && break
     sleep 0.2
+    ensure_loop_part_node "$TARGET_DISK" "$layers_part"
+    ensure_loop_part_node "$TARGET_DISK" "$home_part"
 done
 [ -b "$layers_part" ] && [ -b "$home_part" ] || {
     echo "expected appended partitions missing: $layers_part $home_part" >&2
+    lsblk -lnpo NAME,SIZE,TYPE,LABEL "$TARGET_DISK" >&2 || true
     exit 67
 }
 
