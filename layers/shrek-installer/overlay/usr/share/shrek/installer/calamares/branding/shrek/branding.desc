@@ -3,7 +3,7 @@ componentName: shrek
 welcomeStyleCalamares: false
 welcomeExpandingLogo: false
 windowExpanding: normal
-windowSize: 800px,520px
+windowSize: 900px,560px
 windowPlacement: center
 sidebar: widget
 navigation: widget
@@ -23,7 +23,7 @@ strings:
 images:
     productIcon: "shrek-os-logo-256.png"
     productLogo: "shrek-os-logo.svg"
-    productWallpaper: "shrek-os-wallpaper.jpg"
+    productWallpaper: "shrek-os-installer-background.jpg"
     productWelcome: "shrek-os-logo.svg"
 style:
     SidebarBackground: "#12120F"
