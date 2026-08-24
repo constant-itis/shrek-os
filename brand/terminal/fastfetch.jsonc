@@ -1,0 +1,35 @@
+// Shrek OS fastfetch config.
+// Install: copy to /etc/fastfetch/config.jsonc (system-wide) or
+//          ~/.config/fastfetch/config.jsonc (per-user), and copy
+//          shrek-os-fastfetch-green.txt next to it (or fix the path below).
+{
+  "$schema": "https://github.com/fastfetch-cli/fastfetch/raw/dev/doc/json_schema.json",
+  "logo": {
+    "type": "file",
+    // absolute path is safest for a system install; adjust if you relocate the art
+    "source": "/usr/share/shrek/branding/shrek-os-fastfetch-green.txt",
+    "color": { "1": "green" },
+    "padding": { "top": 1, "right": 3 }
+  },
+  "display": {
+    "separator": " → "
+  },
+  "modules": [
+    "title",
+    "separator",
+    { "type": "os",        "key": "  OS" },
+    { "type": "kernel",    "key": "  Kernel" },
+    { "type": "uptime",    "key": "  Uptime" },
+    { "type": "packages",  "key": "  Packages" },
+    { "type": "shell",     "key": "  Shell" },
+    { "type": "de",        "key": "  DE" },
+    { "type": "wm",        "key": "  WM" },
+    { "type": "terminal",  "key": "  Terminal" },
+    { "type": "cpu",       "key": "  CPU" },
+    { "type": "gpu",       "key": "  GPU" },
+    { "type": "memory",    "key": "  Memory" },
+    { "type": "disk",      "key": "  Disk" },
+    "break",
+    "colors"
+  ]
+}

@@ -27,7 +27,7 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=1
     export SWAYSOCK=/run/xdgr/sway.sock
     mkdir -p /usr/share/shrek/desktop
-    cp /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/wallpaper.png /usr/share/shrek/desktop/wallpaper.png 2>/dev/null || true
+    cp /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/wallpaper.jpg /usr/share/shrek/desktop/wallpaper.jpg 2>/dev/null || true
     cp -r /work/layers/shrek-desktop/overlay/usr/share/shrek/xdg /usr/share/shrek/xdg 2>/dev/null || true
     export XDG_CONFIG_DIRS="/usr/share/shrek/xdg:/etc/xdg"
     sway -c /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/sway.config >/tmp/sway.log 2>&1 &

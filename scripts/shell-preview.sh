@@ -26,7 +26,7 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work \
     export SWAYSOCK=/run/xdgr/sway.sock
     # stage the wallpaper at the absolute path the sealed config references, so the preview shows it
     mkdir -p /usr/share/shrek/desktop
-    cp /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/wallpaper.png /usr/share/shrek/desktop/wallpaper.png 2>/dev/null || true
+    cp /work/layers/shrek-desktop/overlay/usr/share/shrek/desktop/wallpaper.jpg /usr/share/shrek/desktop/wallpaper.jpg 2>/dev/null || true
     # icon theme resolution (same as the sealed shrek-desktop wrapper): gtk settings in /usr via XDG_CONFIG_DIRS
     cp -r /work/layers/shrek-desktop/overlay/usr/share/shrek/xdg /usr/share/shrek/xdg 2>/dev/null || true
     export XDG_CONFIG_DIRS="/usr/share/shrek/xdg:/etc/xdg"
