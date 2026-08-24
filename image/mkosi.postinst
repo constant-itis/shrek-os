@@ -71,6 +71,33 @@ install -d -o 0 -g 0   -m 0755 "$BUILDROOT/etc/polkit-1"
 install -d -o 0 -g 701 -m 0750 "$BUILDROOT/etc/polkit-1/rules.d"
 echo "postinst: polkitd user -> $(grep '^polkitd:' "$BUILDROOT/etc/passwd") / rules.d $(ls -ldn "$BUILDROOT/etc/polkit-1/rules.d" | awk '{print $1, $3":"$4}')"
 
+# Sprint S2 (network): the DMS network center manages NetworkManager over its polkit-gated D-Bus API.
+# For the ACTIVE seat0 user NM already defaults allow_active=yes for list/toggle/scan/connect
+# (network-control, enable-disable-{network,wifi}, wifi.scan, settings.modify.own). The ONE gap is
+# settings.modify.system (save/edit a SYSTEM connection, e.g. persisting a Wi-Fi password), which NM
+# ships as auth_admin_keep — an admin prompt the sealed single-user session has no graphical polkit
+# agent to answer, so the save silently fails and the connection never lands in the /home keyfile store.
+# Grant that one action to the ACTIVE, LOCAL session with a baked rule (polkitd reads /etc/polkit-1/rules.d
+# AND /usr/share/polkit-1/rules.d at startup; /etc is read-only at runtime so it must be baked now, same
+# reason as the rules.d dir above). 49- sorts before any 50-default so its explicit YES wins. Inert on a
+# bare base boot (no polkitd); it only takes effect once the desktop layer's polkit.service starts.
+cat > "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules" <<'NMRULE'
+// Shrek OS — Sprint S2 (Network). Let the active, local seat0 session save/edit
+// system NetworkManager connections without an admin agent. NM's other network-center
+// actions (network-control, enable-disable-{network,wifi}, wifi.scan, settings.modify.own)
+// already default allow_active=yes; only settings.modify.system needs this grant so
+// Wi-Fi credentials persist into the /home-backed keyfile store.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.NetworkManager.settings.modify.system" &&
+        subject.active && subject.local) {
+        return polkit.Result.YES;
+    }
+});
+NMRULE
+chown 0:0 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules"
+chmod 0644 "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules"
+echo "postinst: NM polkit rule -> $(ls -ln "$BUILDROOT/etc/polkit-1/rules.d/49-shrek-nm.rules" | awk '{print $1, $3":"$4}')"
+
 # Dogfood-0 (M1) LOGIN-RACE FIX: normalize the shadow files to the Debian-canonical DAC shape.
 # mkosi/sysusers creates /etc/shadow + /etc/gshadow as mode 000 root:root — readable only via
 # CAP_DAC_OVERRIDE. That interacts fatally with the Onion /etc confext merge: overlayfs re-checks
