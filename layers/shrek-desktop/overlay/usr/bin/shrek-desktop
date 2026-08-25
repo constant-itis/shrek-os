@@ -47,6 +47,22 @@ if [ ! -e "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json"
   cp /usr/share/shrek/dms/default-session.json "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json" 2>/dev/null || true
 fi
 
+# S5 dynamic theming — make foot follow the palette. (1) Seed the user matugen config first-run so
+# `dms matugen queue` (runUserMatugenTemplates=true) regenerates ~/.local/state/shrek/foot-colors.ini
+# from the wallpaper on every theme change. (2) Seed an INITIAL foot-colors.ini so foot.ini's
+# `include=` is never missing — foot refuses to start otherwise (before matugen's first pass). Both
+# are first-run-only; a user-edited config is left alone.
+_shrek_matugen_cfg="${XDG_CONFIG_HOME:-$HOME/.config}/matugen/config.toml"
+if [ ! -e "$_shrek_matugen_cfg" ] && [ -r /usr/share/shrek/matugen/config.toml ]; then
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/matugen" 2>/dev/null || true
+  cp /usr/share/shrek/matugen/config.toml "$_shrek_matugen_cfg" 2>/dev/null || true
+fi
+_shrek_foot_colors="${XDG_STATE_HOME:-$HOME/.local/state}/shrek/foot-colors.ini"
+if [ ! -e "$_shrek_foot_colors" ] && [ -r /usr/share/shrek/matugen/foot-colors.default.ini ]; then
+  mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/shrek" 2>/dev/null || true
+  cp /usr/share/shrek/matugen/foot-colors.default.ini "$_shrek_foot_colors" 2>/dev/null || true
+fi
+
 # Self-heal existing installs. The seed above is first-run-only, so a /home created before DMS had a
 # wallpaper default keeps an empty wallpaperPath — DMS then paints its fallback background OVER the swamp
 # sway draws (the double-owner conflict: swamp flashes, then the flat pattern covers it). If the live

@@ -3,6 +3,7 @@
   "currentThemeCategory": "dynamic",
   "matugenScheme": "scheme-tonal-spot",
   "runUserMatugenTemplates": true,
+  "matugenTemplateFoot": false,
   "widgetBackgroundColor": "sch",
   "widgetBackgroundCustomColor": "#26351D",
   "widgetBackgroundCustomStrength": 0.35,

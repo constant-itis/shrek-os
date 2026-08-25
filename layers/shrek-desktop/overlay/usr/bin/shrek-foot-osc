@@ -1,0 +1,48 @@
+#!/bin/sh
+# shrek-foot-osc — retint already-open foot windows live from the current palette, no restart,
+# no lost scrollback. matugen calls this as the post_hook of the shrekfoot template (see
+# /usr/share/shrek/matugen/config.toml) right after it rewrites foot-colors.ini, so new foot
+# windows read the file and open windows get the OSC sequences below. OSC is a terminal standard
+# (foot-agnostic). Ported from Omarchy's omarchy-theme-osc idea, adapted for foot + sealed /usr.
+#
+# Mechanism: OSC written to a foot child's SLAVE pty (/dev/pts/N) is exactly what a program
+# printing to that terminal would emit, so foot reads it off the master and applies it. We find
+# each foot window's pts via its child (the login shell) fd 0.
+set -u
+
+COLORS="${XDG_STATE_HOME:-$HOME/.local/state}/shrek/foot-colors.ini"
+[ -r "$COLORS" ] || exit 0
+
+# Pull a bare-hex value (last wins) from the [colors]/[cursor] file; strip an accidental leading #.
+val() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*\\(.*\\)\$/\\1/p" "$COLORS" | tail -1 | tr -d '# \t\r'; }
+
+bg=$(val background)
+fg=$(val foreground)
+# [cursor] color is "background accent"; the 2nd token is the cursor color.
+cursor=$(sed -n 's/^[[:space:]]*color[[:space:]]*=[[:space:]]*//p' "$COLORS" | tail -1 | awk '{print $2}' | tr -d '# \t\r')
+
+ESC=$(printf '\033')
+BEL=$(printf '\007')
+seq=""
+[ -n "$fg" ]     && seq="${seq}${ESC}]10;#${fg}${BEL}"
+[ -n "$bg" ]     && seq="${seq}${ESC}]11;#${bg}${BEL}"
+[ -n "$cursor" ] && seq="${seq}${ESC}]12;#${cursor}${BEL}"
+i=0
+while [ "$i" -le 7 ]; do
+    c=$(val "regular$i"); [ -n "$c" ] && seq="${seq}${ESC}]4;${i};#${c}${BEL}"
+    c=$(val "bright$i");  b=$((i + 8)); [ -n "$c" ] && seq="${seq}${ESC}]4;${b};#${c}${BEL}"
+    i=$((i + 1))
+done
+[ -n "$seq" ] || exit 0
+
+# Write to each open foot window's slave pty (its login-shell child's fd 0).
+command -v pgrep >/dev/null 2>&1 || exit 0
+for pid in $(pgrep -x foot 2>/dev/null); do
+    for child in $(pgrep -P "$pid" 2>/dev/null); do
+        tty=$(readlink "/proc/$child/fd/0" 2>/dev/null) || continue
+        case "$tty" in
+            /dev/pts/*) [ -w "$tty" ] && printf '%s' "$seq" > "$tty" 2>/dev/null ;;
+        esac
+    done
+done
+exit 0
