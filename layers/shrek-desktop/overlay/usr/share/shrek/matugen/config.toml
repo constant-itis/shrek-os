@@ -1,11 +1,20 @@
 # Shrek OS — user matugen config. Seeded first-run to ~/.config/matugen/config.toml by the
 # shrek-desktop launcher (matugen reads it from $XDG_CONFIG_HOME/matugen/config.toml). DMS's
-# `dms matugen queue` merges this file's [config] + [templates] sections whenever it regenerates
+# `dms matugen queue` merges this file's config and templates sections whenever it regenerates
 # the palette (runUserMatugenTemplates=true in the DMS defaults). This is how non-Quickshell apps
 # follow the dynamic theme; today that is foot. input_path lives in the sealed RO /usr, output on
 # writable /home. post_hook retints already-open foot windows live via OSC (new windows just read
-# the file). Add more [templates.*] here to theme other terminal-style apps the same way.
+# the file). Add more templates.NAME sub-tables below to theme other terminal-style apps the same way.
+#
+# WARNING — do NOT write a bracketed section name (config or templates in square brackets) anywhere
+# in these comments. DMS's matugen merge (core buildMergedConfig -> extractTOMLSection) slices this
+# file with a naive substring search for those literal tokens, so a bracketed token inside a comment
+# makes it capture comment text as the config section; matugen then dies with "invalid table header"
+# and BOTH shell and foot theming break with a silent "Theme worker failed". The bare templates
+# table below also gives that splitter a clean boundary between the two sections.
 [config]
+
+[templates]
 
 [templates.shrekfoot]
 input_path = "/usr/share/shrek/matugen/templates/foot-colors.ini"
