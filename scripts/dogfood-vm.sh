@@ -268,5 +268,26 @@ grep -qa 'SHREK-DOGFOOD S5 theme-settings=\[dynamic' "$LOG" \
   && ok "DMS seeded to the dynamic wallpaper-derived theme ($(grep -a 'SHREK-DOGFOOD S5 theme-settings=' "$LOG" | tail -1 | sed 's/.*theme-settings=//'))" \
   || bad "DMS not seeded to the dynamic theme ($(grep -a 'SHREK-DOGFOOD S5 theme-settings=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Sprint S5 (foot sub-task): the terminal follows the dynamic palette. matugen writes a plain
+# [colors] file (Material roles -> foot's 16 slots) that foot.ini includes; DMS's own [colors-dark]
+# foot template is disabled (trixie foot 1.21 rejects that section); shrek-foot-osc retints open windows.
+# The load-bearing check is render+check: matugen renders the template from the real wallpaper into a
+# file `foot --check-config` accepts.
+grep -qa 'SHREK-DOGFOOD S5foot include-wired=yes' "$LOG" \
+  && ok "foot.ini includes the matugen-written palette" \
+  || bad "foot.ini does not include the palette ($(grep -a 'SHREK-DOGFOOD S5foot include-wired=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5foot osc-helper=present' "$LOG" \
+  && ok "shrek-foot-osc live-retint helper staged" \
+  || bad "shrek-foot-osc missing ($(grep -a 'SHREK-DOGFOOD S5foot osc-helper=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5foot wiring-files=present' "$LOG" \
+  && ok "foot matugen template + user config + seed present" \
+  || bad "foot theming wiring files missing ($(grep -a 'SHREK-DOGFOOD S5foot wiring-files=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5foot dms-foot-template=disabled' "$LOG" \
+  && ok "DMS's incompatible built-in foot template is disabled" \
+  || bad "DMS foot template still on ($(grep -a 'SHREK-DOGFOOD S5foot dms-foot-template=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" \
+  && ok "matugen renders a foot palette from the wallpaper that foot accepts ($(grep -a 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" | tail -1 | sed 's/.*render+check=ok //'))" \
+  || bad "matugen->foot render/check failed ($(grep -a 'SHREK-DOGFOOD S5foot render+check=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

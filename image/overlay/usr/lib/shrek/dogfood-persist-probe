@@ -350,4 +350,42 @@ else
     say "S5 theme-settings=[MISSING dynamic-default in $DSET]"
 fi
 
+# --- Sprint S5 (foot sub-task): the terminal follows the dynamic palette ------------------------------
+# matugen has no ANSI-16, so a user template (/usr/share/shrek/matugen/{config.toml,templates/
+# foot-colors.ini}) maps Material roles -> foot [colors], writing ~/.local/state/shrek/foot-colors.ini
+# that foot.ini pulls in via `include=`. DMS's own foot template is DISABLED (it emits [colors-dark],
+# which trixie's foot 1.21 rejects). shrek-foot-osc retints open windows live. Prove headlessly:
+# the wiring files are present, DMS's foot template is off, and — the money check — matugen renders the
+# template from the real wallpaper into a file that `foot --check-config` ACCEPTS (template valid against
+# this matugen + foot). Run under a throwaway HOME so the probe never dirties /root.
+grep -q '^include=~/.local/state/shrek/foot-colors.ini' /usr/share/shrek/xdg/foot/foot.ini 2>/dev/null \
+    && say "S5foot include-wired=yes" || say "S5foot include-wired=FAIL"
+[ -x /usr/bin/shrek-foot-osc ] && say "S5foot osc-helper=present" || say "S5foot osc-helper=MISSING"
+if [ -r /usr/share/shrek/matugen/config.toml ] && [ -r /usr/share/shrek/matugen/templates/foot-colors.ini ] && [ -r /usr/share/shrek/matugen/foot-colors.default.ini ]; then
+    say "S5foot wiring-files=present"
+else
+    say "S5foot wiring-files=MISSING"
+fi
+grep -q '"matugenTemplateFoot": *false' "$DSET" 2>/dev/null \
+    && say "S5foot dms-foot-template=disabled" || say "S5foot dms-foot-template=FAIL(still-on)"
+S5F_HOME=$(mktemp -d 2>/dev/null || echo /tmp/s5foot)
+mkdir -p "$S5F_HOME" 2>/dev/null || true
+S5F_WP=$(ls /usr/share/shrek/desktop/wallpaper.* 2>/dev/null | head -1)
+if [ -n "$S5F_WP" ] && [ -x /usr/bin/matugen ] && [ -x /usr/bin/foot ]; then
+    rc=0; HOME="$S5F_HOME" /usr/bin/matugen image "$S5F_WP" --type scheme-tonal-spot --prefer saturation \
+        --config /usr/share/shrek/matugen/config.toml >/dev/null 2>&1 || rc=$?
+    S5F_OUT="$S5F_HOME/.local/state/shrek/foot-colors.ini"
+    if [ "$rc" -eq 0 ] && [ -s "$S5F_OUT" ]; then
+        printf '[main]\nfont=DejaVu Sans Mono:size=11\ninclude=%s\n' "$S5F_OUT" > "$S5F_HOME/foot.ini"
+        rc=0; HOME="$S5F_HOME" LC_ALL=C.UTF-8 /usr/bin/foot --check-config -c "$S5F_HOME/foot.ini" >/dev/null 2>&1 || rc=$?
+        [ "$rc" -eq 0 ] \
+            && say "S5foot render+check=ok colors=[$(grep -oE '^(background|foreground|regular2)=[0-9a-fA-F]{6}' "$S5F_OUT" | tr '\n' ' ')]" \
+            || say "S5foot render+check=FAIL(foot-rejected rc=$rc)"
+    else
+        say "S5foot render+check=FAIL(matugen rc=$rc out=[$(ls -l "$S5F_OUT" 2>&1 | tail -c 80)])"
+    fi
+else
+    say "S5foot render+check=FAIL(missing wallpaper/matugen/foot)"
+fi
+
 say "DONE boot=$n"
