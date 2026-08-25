@@ -76,10 +76,20 @@ Confirmed missing → dead widgets:
 
 ### Phase B — daily-driver
 
-- [ ] **S3 · Lock + idle** *(M)* — verify whether DMS's packaged Quickshell already has the SESSION_LOCK
-  backend (recompile only if not) + `swayidle` + logind idle→lock + lock-on-suspend. **Knot:** the lock
-  screen authenticates the `dev` user, so this needs a working **PAM** path. **Accept:** manual lock +
-  auto-lock on idle + resume requires unlock.
+- [x] **S3 · Lock + idle** *(M)* — **DONE** (dogfood-verified, PASS=37/0). No recompile needed: the
+  packaged Quickshell already links PAM (`libpam.so.0`) and DMS ships a full Lock module + `IdleService`
+  (ext-idle-notify) + `SessionService`, so **no swayidle** — idle→lock and lock-on-suspend are DMS-internal,
+  driven by settings. Two things wired: (1) the **PAM knot** — DMS's lock `PamContext` with
+  `SettingsData.lockPamExternallyManaged=true` uses the stock `/etc/pam.d/login` service (`pam_unix`) and
+  never tries to write a pam config to the read-only `/etc`; but `dev` shipped with a **LOCKED** hash
+  (`!` prefix, for autologin-only), so `pam_unix` refused every unlock — S3 **unlocked** dev's password
+  (`image/mkosi.postinst`, still the demo default `shrek`, changeable; autologin via `login -f` is
+  unaffected). (2) **settings** seeded in the DMS defaults: `lockPamExternallyManaged`, `lockBeforeSuspend`,
+  `acLockTimeout`/`batteryLockTimeout=300`s (idle→lock); manual lock via `loginctl lock-session`
+  (`loginctlLockIntegration`, default on). The dogfood oracle proves the auth path headlessly: quickshell
+  links PAM → `/etc/pam.d/login` present → `pamtester` authenticates dev+correct password AND rejects a
+  wrong one → lock settings seeded. **Accept:** manual lock + auto-lock on idle + resume requires unlock. ✓
+  *(Default lock password is `shrek` until INSTALL-0 / the user changes it.)*
 - [x] **S4 · Storage / mounts (udisks2)** *(S — nearly free after S1)* — **DONE** (dogfood-verified,
   PASS=32/0). udisks2 added to the **base** (not a layer): it has an `/etc` footprint (`udisks2.conf`)
   and a D-Bus-activated service, both integrated natively at base build — no sysext post-merge dance.
