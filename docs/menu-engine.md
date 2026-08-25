@@ -19,8 +19,18 @@ spike and is the build reference going forward.
   jsonc parse / merge / alias-route / fuzzy-search all pass, and the generated guard batch is valid
   bash that runs on the build host with the correct `<id>:<w|c|d>:<0|1>` contract. No QML runtime needed
   — the file keeps its `module.exports` block, so the exact runtime file is the test target.
-- **Next:** port `Menu.qml` with surgery into `shell.qml`'s existing `ShellRoot`+`IpcHandler`, and write
-  the shrek `menu.jsonc`.
+- **Content (`menu.jsonc`): DONE, validated.** The baked tree
+  (`.../shrek-menu/menu.jsonc`) is written on verified-baked backends: `apps` (provider) · `system`
+  (DMS `lock lock` + logind suspend/reboot/poweroff + `swaymsg exit`) · `network` (nmcli Wi-Fi toggle,
+  `nmtui`) · `style` (DMS `theme toggle`, wallpaper provider, settings) · `capture` (grim/slurp) ·
+  `audio` (DMS `audio mute`/`micmute`, state read with wpctl). Validated via `tests/menu-jsonc.test.js`:
+  parses, nests with no orphans, providers stay bare baked keys (`apps`, `wallpapers` — the security
+  invariant), aliases route, and the guard batch is valid bash that runs with the right contract. IPC
+  verbs were taken from DMS source, not guessed (the appendix's `theme cycle` / `powermenu open reboot`
+  were wrong — real verbs are `theme toggle` / `lock lock` / `audio mute`).
+- **Next:** port `Menu.qml` with surgery into `shell.qml`'s existing `ShellRoot`+`IpcHandler` — this
+  wires `MenuModel.js` + `menu.jsonc` into a rendered, searchable, keyboard-driven surface, honors the
+  `apps`/`wallpapers` providers, and merges an optional `~/.config/shrek/menu.jsonc` from `/home`.
 
 ## Architecture (three unknowns, resolved from source)
 
@@ -104,13 +114,15 @@ Package presence is loaded once into an associative array (same optimization Oma
 `GUARD_READERS` (Omarchy's memoized `omarchy-default-*` readers) is **empty** — Shrek ships none yet;
 append to that array in `MenuModel.js` to add a fast-path reader later.
 
-## Port plan (next)
+## Port plan (remaining)
+
+Done: `MenuModel.js` (engine) and `menu.jsonc` (content) — see Status. The one remaining slice:
 
 - **`Menu.qml`** — port with surgery: keep UI/delegate/keyboard-nav/search; rewrite the plugin
   lifecycle → the standalone `ShellRoot`+`IpcHandler` already in `shell.qml`, `Util.execDetached` →
-  `Quickshell.execDetached`, the `providers` map, and app-library → DMS's app-entry service.
-- **`menu.jsonc`** — full rewrite; the starter tree (power/lock/network/theme/capture/audio on
-  shrek's wired backends) is in `docs/omarchy-portability.md`. Bake read-only under
-  `/usr/share/shrek/dms/shrek-menu/`, merge an optional `~/.config/shrek/menu.jsonc` from `/home`.
-- **Security:** a `provider` must accept only a fixed, baked-in string key — never a path or command
-  — so a `/home`-writable override can *select* a vendor provider but never inject a script.
+  `Quickshell.execDetached`, the `providers` map (honoring the `apps`/`wallpapers` keys menu.jsonc
+  already declares), and app-library → DMS's app-entry service. This slice wires `MenuModel.js` +
+  `menu.jsonc` into a live surface and adds the optional `~/.config/shrek/menu.jsonc` `/home` merge.
+- **Security (holds through the port):** a `provider` must resolve only a fixed, baked-in string key —
+  never a path or command — so a `/home`-writable override can *select* a vendor provider but never
+  inject a script. The `providers` map in `Menu.qml` is where this is enforced.
