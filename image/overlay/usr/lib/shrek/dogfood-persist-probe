@@ -376,11 +376,13 @@ if [ -n "$S5F_WP" ] && [ -x /usr/bin/matugen ] && [ -x /usr/bin/foot ]; then
         --config /usr/share/shrek/matugen/config.toml >/dev/null 2>&1 || rc=$?
     S5F_OUT="$S5F_HOME/.local/state/shrek/foot-colors.ini"
     if [ "$rc" -eq 0 ] && [ -s "$S5F_OUT" ]; then
-        printf '[main]\nfont=DejaVu Sans Mono:size=11\ninclude=%s\n' "$S5F_OUT" > "$S5F_HOME/foot.ini"
-        rc=0; HOME="$S5F_HOME" LC_ALL=C.UTF-8 /usr/bin/foot --check-config -c "$S5F_HOME/foot.ini" >/dev/null 2>&1 || rc=$?
+        # Check the REAL shipped foot.ini (its `include=` resolves to $HOME/.local/state/shrek/
+        # foot-colors.ini, which matugen just wrote) — NOT a synthetic one. This is what catches an
+        # include placed in the wrong section (foot rejects `include` inside [colors]).
+        rc=0; HOME="$S5F_HOME" LC_ALL=C.UTF-8 /usr/bin/foot --check-config -c /usr/share/shrek/xdg/foot/foot.ini >/dev/null 2>&1 || rc=$?
         [ "$rc" -eq 0 ] \
             && say "S5foot render+check=ok colors=[$(grep -oE '^(background|foreground|regular2)=[0-9a-fA-F]{6}' "$S5F_OUT" | tr '\n' ' ')]" \
-            || say "S5foot render+check=FAIL(foot-rejected rc=$rc)"
+            || say "S5foot render+check=FAIL(shipped foot.ini rejected rc=$rc)"
     else
         say "S5foot render+check=FAIL(matugen rc=$rc out=[$(ls -l "$S5F_OUT" 2>&1 | tail -c 80)])"
     fi
