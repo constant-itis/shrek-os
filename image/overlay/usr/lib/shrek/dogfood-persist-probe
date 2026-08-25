@@ -322,4 +322,32 @@ else
     say "S3 lock-settings=[MISSING in $DSET]"
 fi
 
+# --- Sprint S5: Dynamic theming (matugen) — the vendored binary is present, runs under the image's glibc,
+# and turns the wallpaper into a Material palette. matugen has no Debian package, so the pinned upstream
+# release binary is staged into /usr/bin (see third_party/matugen). DMS drives it via `dms matugen queue`
+# only when the theme is `dynamic` (the seeded default); it is glibc-dynamic but trixie's glibc 2.41
+# satisfies its GLIBC_2.39 need and its libc/libm/libgcc_s deps ride in the base. Prove headlessly:
+# binary present+executable, `--version` runs (the dynamic link resolves in-image), and it extracts a
+# palette from the shipped wallpaper (the wallpaper->palette loop). The full recolor is visual — screenshot.
+MATUGEN=/usr/bin/matugen
+say "S5 matugen-binary=[$([ -x "$MATUGEN" ] && echo present || echo MISSING)]"
+rc=0; mver=$("$MATUGEN" --version 2>&1) || rc=$?
+[ "$rc" -eq 0 ] && say "S5 matugen-runs=[ok $mver]" || say "S5 matugen-runs=FAIL(rc=$rc out=[$(printf '%s' "$mver" | tr '\n' ' ' | tail -c 120)])"
+S5_WP=$(ls /usr/share/shrek/desktop/wallpaper.* 2>/dev/null | head -1)
+if [ -n "$S5_WP" ]; then
+    rc=0; s5pal=$(HOME=/tmp "$MATUGEN" image "$S5_WP" --type scheme-tonal-spot --prefer saturation --json hex --dry-run 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ] && printf '%s' "$s5pal" | grep -q '#'; then
+        say "S5 matugen-palette=ok wallpaper=[$S5_WP] colors=[$(printf '%s' "$s5pal" | grep -oE '#[0-9a-fA-F]{6}' | head -3 | tr '\n' ' ')]"
+    else
+        say "S5 matugen-palette=FAIL wallpaper=[$S5_WP] rc=$rc out=[$(printf '%s' "$s5pal" | tr '\n' ' ' | tail -c 140)]"
+    fi
+else
+    say "S5 matugen-palette=FAIL no-wallpaper"
+fi
+if grep -q '"currentThemeName": *"dynamic"' "$DSET" 2>/dev/null && grep -q '"runUserMatugenTemplates": *true' "$DSET" 2>/dev/null; then
+    say "S5 theme-settings=[dynamic runUserMatugenTemplates=true scheme=$(grep -oE '"matugenScheme": *"[^"]+"' "$DSET" | grep -oE '[^"]+"$' | tr -d '"')]"
+else
+    say "S5 theme-settings=[MISSING dynamic-default in $DSET]"
+fi
+
 say "DONE boot=$n"

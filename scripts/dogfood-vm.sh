@@ -250,5 +250,23 @@ grep -qa 'SHREK-DOGFOOD S3 lock-settings=\[externally-managed' "$LOG" \
   && ok "DMS lock configured: external PAM + idle-lock timeout + lock-on-suspend ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | sed 's/.*lock-settings=//'))" \
   || bad "DMS lock settings not seeded ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Sprint S5: Dynamic theming — the vendored matugen binary is present, runs under the image's glibc,
+# and turns the shipped wallpaper into a Material palette (the wallpaper->palette loop DMS drives via
+# `dms matugen queue` when the theme is `dynamic`, the seeded default). matugen has no Debian package, so
+# it is staged into /usr/bin from the pinned upstream release (third_party/matugen). The visual recolor is
+# proven by screenshot, not by the serial oracle.
+grep -qa 'SHREK-DOGFOOD S5 matugen-binary=\[present\]' "$LOG" \
+  && ok "matugen binary staged in /usr/bin (the dynamic-theming engine is present)" \
+  || bad "matugen binary missing ($(grep -a 'SHREK-DOGFOOD S5 matugen-binary=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5 matugen-runs=\[ok' "$LOG" \
+  && ok "matugen runs under the image glibc ($(grep -a 'SHREK-DOGFOOD S5 matugen-runs=' "$LOG" | tail -1 | sed 's/.*matugen-runs=//'))" \
+  || bad "matugen does not run ($(grep -a 'SHREK-DOGFOOD S5 matugen-runs=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5 matugen-palette=ok' "$LOG" \
+  && ok "matugen extracts a Material palette from the wallpaper ($(grep -a 'SHREK-DOGFOOD S5 matugen-palette=ok' "$LOG" | tail -1 | sed 's/.*matugen-palette=ok //'))" \
+  || bad "matugen did not extract a palette ($(grep -a 'SHREK-DOGFOOD S5 matugen-palette=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5 theme-settings=\[dynamic' "$LOG" \
+  && ok "DMS seeded to the dynamic wallpaper-derived theme ($(grep -a 'SHREK-DOGFOOD S5 theme-settings=' "$LOG" | tail -1 | sed 's/.*theme-settings=//'))" \
+  || bad "DMS not seeded to the dynamic theme ($(grep -a 'SHREK-DOGFOOD S5 theme-settings=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }
