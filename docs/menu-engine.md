@@ -43,8 +43,13 @@ spike and is the build reference going forward.
   `DesktopEntry.execute()` (handles field codes / terminal / workdir). Confirmed live: apps list under
   Apps, are searchable from the root, and launch. (Note: DMS's spotlight `$mod+space` already app-launches
   — the menu's distinct value is the guarded command tree; apps here are a convenience.)
-- **Next (3c, cosmetics):** icons (Material-Symbol section glyphs + app icons via baked Papirus through
-  `Quickshell.iconPath`), scroll-follows-selection for long lists, minor delegate/sizing polish.
+- **Delegate polish — 3c DONE, verified live. The menu engine is complete.** Command-tree rows show
+  Material-Symbol glyphs (menu.jsonc `icon` ligature names) rendered from DMS's baked
+  `MaterialSymbolsRounded[...].ttf` via `FontLoader` (system fontconfig doesn't register it, so we load the
+  file directly, `font.family: symbolsFont.name` — mirroring DMS's own `DankIcon.qml`); app rows show real
+  icons from the baked Papirus theme via `Quickshell.iconPath`. The list scrolls to keep the highlighted
+  row on screen (`positionViewAtIndex`) for long app lists. Confirmed live: themed to the wallpaper,
+  glyphs + app icons crisp, nav/search/launch all working.
 
 ## Architecture (three unknowns, resolved from source)
 
