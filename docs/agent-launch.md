@@ -119,66 +119,89 @@ Optional later: a DMS spotlight/menu entry, and — the Omarchy `agents/` panel 
 candy** (mycelium #2813: it launches nothing; it only shows per-provider usage). The launch path is
 keybind/CLI-driven, exactly as in Omarchy.
 
-## 7. The MBP-standalone knot — where do the brokers live? (OWNER DECISION)
+## 7. Where do the brokers live? — ships with NO model, provides a way to hook one up
 
-Every broker (`model-proxy`, `claude-broker`, `codex-broker`) is deliberately **off the sealed image**
-and Phase-6 slice-5 §8 explicitly deferred the standalone/headless-broker case. So for anything other
-than `local`, `shrek-model-proxy` / `shrek-claude-cli` must resolve to a broker running SOMEWHERE the
-sandbox can reach by that sealed name. Two clean answers:
+Every broker (`model-proxy`, `claude-broker`, `codex-broker`) is deliberately **off the sealed image**,
+and `local` needs a model server somewhere too. So each sealed name (`shrek-model`, `shrek-model-proxy`,
+`shrek-claude-cli`, `shrek-codex-cli`) must resolve to a backend the host can reach *by that name*. The
+decisive constraint is that **Shrek OS is universal** — one image ships to anyone, so it cannot bake in
+*any* address (evo-x2, a homelab, a tailnet). **The image ships with NO model wired; it ships a way to
+hook one up.**
 
-- **(a) Homelab broker over Tailscale.** The sealed names resolve to homelab hosts (100.x). `local` is
-  free today: `shrek-model:8100` → evo-x2 35B. The api-key/sub brokers run on a homelab box
-  (claude-remote / brent-oneplus). Matches the built "desktop-class broker host" assumption 1:1. MBP
-  needs a network link + the name→IP mapping; zero new broker work for `local`.
-- **(b) Co-located broker on the MBP trusted plane.** The broker runs on the MBP host (outside the
-  sandbox, in the trusted plane), the OAuth browser callback completes locally. This is the deferred
-  slice-5 standalone case — needs the login UX + broker-lifecycle nailed. Best "it's *my* laptop's
-  Claude sub" feel, more work.
+**The hook-up (`shrek-connect`).** The sealed image carries the *names* (L0) and the dispatch UX (L4);
+it carries no address for any of them. `shrek-connect <provider> <addr>` binds a sealed name to an
+address *you* choose — a LAN IP, a tailnet `100.x`, a hostname — writing one `/etc/hosts`-format line
+into a per-install store on the writable `/home` plane. That is the whole "site config": the seal fixes
+the *name*, the dispatcher picks the *choice*, and only this layer holds the *address*.
 
-**DECISION LOCKED (2026-08-25): (a) homelab-broker-over-Tailscale** (mycelium #2814). The stack is
-already on the `theleonodor` tailnet; evo-x2 `100.x:8100` IS the `local` provider the day the Shrek host
-joins; the target MBP (weak 2012 box) fits co-located brokers worse. Source-verified why this is clean:
-sealed egress names resolve ONCE, HOST-SIDE, at sandbox construction (`gatekeeperd`
-`resolve_profile_v4`, `net_plane.rs:244` → pins the IPv4 into the sandbox's `/etc/hosts`); the sandbox
-has NO DNS/resolver (`egress.rs:20`). So **Tailscale is a pure host-side concern — only the Shrek host
-joins the tailnet, the sandbox is untouched, and the sealed egress invariant does not change one bit.**
-The dispatcher spec above is identical either way; only host-side name resolution changes.
+**Why this is universal and clean (source-verified, preserves the #2814 structural fact).** Sealed
+egress names resolve ONCE, HOST-SIDE, at sandbox construction — `gatekeeperd` `resolve_profile_v4`
+(`net_plane.rs:244`) runs a plain glibc `getaddrinfo` (`to_socket_addrs`, line 263) and pins the IPv4
+into the sandbox's `/etc/hosts` (`t2_plane.rs:598`); the sandbox itself has NO DNS/resolver
+(`egress.rs:20`). So name→address is a **pure host-side concern**, the sandbox is untouched, and the
+sealed egress invariant does not change one bit. The only question is what the *host's* `getaddrinfo`
+reads — and the answer is nss `files`, i.e. `/etc/hosts`:
 
-Wiring Tailscale into the immutable image = the SAME proven pattern as NetworkManager/udisks2: package
-`tailscaled`, persist `/var/lib/tailscale` on the writable `/home` plane, add
-`/etc/polkit-1/rules.d/49-shrek-tailscale.rules` + a service drop-in for the sealed-RO write-block. UX =
-mirror Omarchy `shell/plugins/panels/tailscale/Service.qml` (shell out to `tailscale
-status --json`/`up`/`down`/`set --exit-node` host-side, never in a sandbox), built AFTER the plumbing.
-Locked sequence: (1) `local`→evo-x2 over Tailscale [agent-launch slice, front half]; (2) Tailscale
-host-plumbing slice; (3) Tailscale panel.
+- `/etc/hosts` is a **baked symlink → `/home/.shrek-system/hosts`** (`image/overlay/etc/hosts`) — the
+  exact "mutable `/etc` file → writable plane" idiom the base already uses for `/etc/resolv.conf`
+  → `/run`. `shrek-connect` edits that store; `getaddrinfo` (and thus gatekeeperd) reads it.
+- **Not MagicDNS.** The egress hosts are sealed-policy *aliases*, not tailnet device names
+  (`egress.rs`: "`shrek-model` is the sealed, stable" name), so MagicDNS can't resolve them without
+  per-user Tailscale-console records — extra surface that couples a compiled-in alias to mutable console
+  state. nss `files` needs zero resolver wiring and is deterministic; the pin is as sealed as the name.
+- The image has no `libnss-myhostname`, so `shrek-hosts-seed.service` (a base oneshot ordered like
+  `var-lib-swamp.mount`: after `home.mount`, before `local-fs.target`) seeds the store with `localhost`
+  on every boot, so a fresh, un-hooked-up box still resolves `localhost`. Un-hooked-up model names simply
+  don't resolve → `shrek-agent` catches it pre-flight and prints a "hook one up" hint (never a bare
+  fail-closed).
+
+**Broker placement is now the user's call, per install, and orthogonal to the image:**
+- **`local`** — point it at any OpenAI-wire model server you can reach: `shrek-connect local
+  192.168.1.152` (LAN) or a tailnet `100.x`. No credential, no broker. This is the loop-proving path.
+- **Credentialed (`anthropic`/`claude`/`codex`)** — run the broker somewhere reachable (a homelab box,
+  or later a co-located broker on the trusted plane, the deferred slice-5 standalone case) and
+  `shrek-connect` that provider at it. The dispatcher is identical either way; only the address differs.
+
+**Tailscale is an OPTIONAL transport, not part of this base.** A LAN LLM needs no tailnet at all. Only
+when you hook up a *remote* brain by `100.x` do you need the host on a tailnet — a separate, optional
+slice (package `tailscaled`, persist `/var/lib/tailscale` on `/home`, polkit rule + service drop-in —
+the proven NetworkManager/udisks2 pattern; UX mirrors Omarchy's `tailscale` Service.qml). It is
+turned on when hooking up a remote brain, never assumed by the image.
 
 ## 8. Sealed-OS fit
 
-- Dispatcher + set-default + default config bake into `/usr` (RO); the only writable state is
-  `~/.config/shrek/agent.json` on `/home` — same model as theme/menu. Nothing installs post-boot.
+- Dispatcher + set-default bake into `/usr` (RO); the writable state is the provider *choice*
+  (`~/.config/shrek/agent.json`) and the name→address *bindings* (`/home/.shrek-system/hosts`, which
+  `/etc/hosts` symlinks to) — both on `/home`, same model as theme/menu. Nothing installs post-boot.
 - **No blind auto-approve.** Omarchy passes `--permission-mode auto`/`--yolo`; Shrek does NOT — the
   bounded coder loop + T2 wall + grant protocol are the approval model. The dispatcher passes no
   approve-everything flag.
 - Provider id is a fixed baked enum; a `/home` override may *select* a vendor provider, never inject a
-  command or endpoint (except `model_url`, which is plaintext-http and only meaningful for `local`).
+  command. The *address* is never in config or a flag — it lives only in the sealed-name binding
+  (`shrek-connect`), which gatekeeperd resolves host-side and the sandbox never sees.
 
 ## 9. Built vs. new
 
 - **Built:** `shrek run`, the coder (`--provider local|anthropic`, `--task`, `--model`, `--model-url`),
   every sealed egress profile, all three brokers, the login/health UX (slice-5).
-- **New (this doc):** `shrek-agent`, `shrek-default-agent`, `usr/share/shrek/agent/default.json`, the
-  sway keybind, and (later) the read-only usage panel. All shell/config → **no system-index bump**.
+- **New (this doc):** `shrek-agent`, `shrek-default-agent`, the sway keybind (all L4/L5, shipped); and
+  the name-resolution layer — `shrek-connect` (the hook-up), the baked `/etc/hosts` → `/home` symlink,
+  and `shrek-hosts-seed.service`; and (later) the read-only usage panel. All shell/config → **no
+  system-index bump**.
 
 ## 10. Proof / dogfood
 
-Extend `image/overlay/usr/lib/shrek/dogfood-persist-probe` with an S-agent group:
-- dispatcher present + executable (0755) and set-default writes/round-trips the config file;
-- provider→triple mapping matches the §2 table for all four ids (assert the exact `--egress`/`--provider`
-  strings) and fail-closes on an unknown id;
-- the `local` path end-to-end against a canned OpenAI-wire responder (the deterministic oracle already
-  used for the coder) — `shrek-agent --provider local --task …` drives a `CODER-DONE ok=true`.
-The credentialed paths reuse the existing slice-3/4/5 broker oracles; the dispatcher only needs to prove
-it hands them the right args.
+`image/overlay/usr/lib/shrek/dogfood-persist-probe` carries an **S-agent** group (dispatcher present +
+executable, provider→triple map matches the §2 table for all four ids, fail-closes on an unknown id, and
+the L5 default round-trips) and an **S-connect** group for the name-resolution layer:
+- `shrek-connect` present; its provider→sealed-host-name map matches the L0 policy 1:1;
+- bind/list/forget round-trips a correct `/etc/hosts` line into the store (via `SHREK_HOSTS`);
+- `shrek-agent` fail-closes (exit 3) with the "hook one up" hint when the chosen provider is UNbound;
+- the real image wiring is in place: `/etc/hosts` is the baked symlink to `/home/.shrek-system/hosts`,
+  and `shrek-hosts-seed.service` ran on boot (so `localhost` resolves on a fresh, un-hooked-up box).
+A bound real launch (`local` end-to-end against a canned OpenAI-wire responder → `CODER-DONE ok=true`)
+is the host-side coder oracle's job (slice-3 §5); the credentialed paths reuse the slice-3/4/5 broker
+oracles. The dispatcher only needs to prove it hands them the right args over a resolvable name.
 
 ## 11. Open questions for the owner
 
@@ -187,8 +210,9 @@ it hands them the right args.
    Phase-6 slice-7 (deferred). Ship one-shot first?
 3. **Picker surface** — v1 `foot`+`fzf`/`read`, upgrade to `dms ipc` spotlight later? Or wire the menu
    engine (docs/omarchy-portability.md Appendix) and make agent-pick one of its provider-backed submenus?
-4. **`local` endpoint** — hardcode evo-x2 as the default `model_url`, or leave `shrek-model` name
-   resolution to the network layer and keep the config endpoint-agnostic?
+4. ~~**`local` endpoint**~~ — RESOLVED (§7): the image is endpoint-agnostic and bakes NO address; the
+   user binds `shrek-model` (and any broker) per-install with `shrek-connect`, on the writable `/home`
+   plane. Ships with no model wired.
 
 ---
 
