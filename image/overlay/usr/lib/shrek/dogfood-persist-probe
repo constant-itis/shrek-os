@@ -390,6 +390,49 @@ else
     say "S5foot render+check=FAIL(missing wallpaper/matugen/foot)"
 fi
 
+# --- Sprint S5 (foot sub-task): config-merge safety + REAL dms worker ---------------------------------
+# The render+check above runs matugen --config DIRECTLY, which parses config.toml as proper TOML and
+# IGNORES comments — so it did NOT catch the bug that shipped: DMS's `dms matugen queue` does NOT parse
+# the file, it SLICES it with a naive substring search for the literal tokens [config] and [templates]
+# (core buildMergedConfig -> extractTOMLSection). A bracketed section token inside a COMMENT makes the
+# splitter capture comment text as the config section; matugen then dies with "invalid table header"
+# and BOTH shell and foot theming break silently ("Theme worker failed"). Two guards below.
+#
+# (1) Cheap deterministic guard: no comment line in config.toml may contain a bracketed section token.
+if grep -nE '^[[:space:]]*#' /usr/share/shrek/matugen/config.toml 2>/dev/null | grep -qE '\[(config|templates)'; then
+    say "S5foot config-merge-safe=FAIL(bracketed [config]/[templates] token in a comment breaks the dms substring merge)"
+else
+    say "S5foot config-merge-safe=ok"
+fi
+# (2) Money check: run the REAL `dms matugen generate` (same merge path as the runtime `queue`) so a
+# broken merge is caught end-to-end. dms refuses to run as root, so drop to the 'dev' user under a
+# throwaway HOME. Assert BOTH outputs: shell palette (dms-colors.json) AND foot recolored off the seed.
+S5W_HOME=$(mktemp -d 2>/dev/null || echo /tmp/s5worker)
+if [ -x /usr/bin/dms ] && [ -n "$S5F_WP" ] && id dev >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1 \
+   && [ -f /usr/share/quickshell/dms/shell.qml ]; then
+    cat > "$S5W_HOME/run.sh" <<S5WEOF
+H="$S5W_HOME"; export HOME="\$H"
+mkdir -p "\$H/.config/matugen" "\$H/.cache/DankMaterialShell" "\$H/.local/state/shrek"
+cp /usr/share/shrek/matugen/config.toml "\$H/.config/matugen/config.toml"
+cp /usr/share/shrek/matugen/foot-colors.default.ini "\$H/.local/state/shrek/foot-colors.ini"
+/usr/bin/dms matugen generate --state-dir "\$H/.cache/DankMaterialShell" \
+    --shell-dir /usr/share/quickshell/dms --config-dir "\$H/.config" \
+    --kind image --value "$S5F_WP" --mode dark --matugen-type scheme-tonal-spot >/dev/null 2>&1
+S5WEOF
+    chown -R dev:dev "$S5W_HOME" 2>/dev/null
+    runuser -u dev -- sh "$S5W_HOME/run.sh" 2>/dev/null
+    S5W_SHELL="$S5W_HOME/.cache/DankMaterialShell/dms-colors.json"
+    S5W_FOOT="$S5W_HOME/.local/state/shrek/foot-colors.ini"
+    if [ -s "$S5W_SHELL" ] && [ -s "$S5W_FOOT" ] && ! grep -q '^background=101014' "$S5W_FOOT"; then
+        say "S5foot dms-worker=ok shell-palette=yes foot-recolored=[$(grep -m1 '^background=' "$S5W_FOOT")]"
+    else
+        say "S5foot dms-worker=FAIL(shell=[$(ls -l "$S5W_SHELL" 2>&1 | tail -c 40)] foot-bg=[$(grep -m1 '^background=' "$S5W_FOOT" 2>/dev/null)])"
+    fi
+else
+    say "S5foot dms-worker=SKIP(no dms/dev/runuser/shell.qml/wallpaper)"
+fi
+rm -rf "$S5W_HOME" 2>/dev/null
+
 # --- Sprint S5 (wallpaper set sub-task): give the DMS wallpaper switcher a gallery to browse ----------
 # A small first-party set is staged as JPG in /usr/share/shrek/wallpapers (JPG: the sealed image has no
 # Qt webp plugin, and JPG adds no extra image decoder). The DMS switcher is pointed at it via

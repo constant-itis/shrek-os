@@ -288,6 +288,16 @@ grep -qa 'SHREK-DOGFOOD S5foot dms-foot-template=disabled' "$LOG" \
 grep -qa 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" \
   && ok "matugen renders a foot palette from the wallpaper that foot accepts ($(grep -a 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" | tail -1 | sed 's/.*render+check=ok //'))" \
   || bad "matugen->foot render/check failed ($(grep -a 'SHREK-DOGFOOD S5foot render+check=' "$LOG" | tail -1 | tr -d '\r'))"
+# The render+check above runs matugen DIRECTLY (parses TOML, ignores comments) so it MISSED the real
+# regression: DMS's `dms matugen queue` slices config.toml by a naive substring search — a bracketed
+# [config]/[templates] token in a COMMENT makes it capture comment text -> matugen "invalid table
+# header" -> shell AND foot theming die silently. These two gate that real path.
+grep -qa 'SHREK-DOGFOOD S5foot config-merge-safe=ok' "$LOG" \
+  && ok "matugen config.toml has no bracketed section token in a comment (safe for the DMS substring merge)" \
+  || bad "config.toml comment holds a [config]/[templates] token that breaks the DMS merge ($(grep -a 'SHREK-DOGFOOD S5foot config-merge-safe=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5foot dms-worker=ok' "$LOG" \
+  && ok "the REAL dms matugen worker themes shell+foot end-to-end ($(grep -a 'SHREK-DOGFOOD S5foot dms-worker=ok' "$LOG" | tail -1 | sed 's/.*dms-worker=ok //'))" \
+  || bad "dms matugen worker failed to theme shell/foot ($(grep -a 'SHREK-DOGFOOD S5foot dms-worker=' "$LOG" | tail -1 | tr -d '\r'))"
 
 # --- Sprint S5 (wallpaper set sub-task): the switcher has a browsable first-party gallery. Staged as JPG
 # (no Qt webp plugin in the image) and pointed at via wallpaperCyclingFolderPath in the default session.
