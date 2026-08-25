@@ -229,5 +229,26 @@ grep -qa 'SHREK-DOGFOOD S4 mount-open=ok' "$LOG" \
   && ok "attached disk mounts via udisks and its contents are readable (attach->mount->open)" \
   || bad "attached disk did not mount/open ($(grep -a 'SHREK-DOGFOOD S4 mount-open=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Sprint S3: Lock + idle — the DMS lock screen can authenticate dev via PAM ------------------------
+# The lock GUI is not driven headlessly; instead prove the load-bearing auth path the sprint flagged as
+# the knot. quickshell must link PAM; the /etc/pam.d/login service DMS uses (lockPamExternallyManaged)
+# must exist; and PAM must accept dev's real password yet reject a wrong one (dev's hash is UNLOCKED as
+# of S3). Idle->lock + lock-on-suspend are DMS-internal, enabled by the seeded lock settings.
+grep -qa 'SHREK-DOGFOOD S3 quickshell-pam=\[linked\]' "$LOG" \
+  && ok "quickshell is built with PAM (the lock screen can authenticate)" \
+  || bad "quickshell has no PAM ($(grep -a 'SHREK-DOGFOOD S3 quickshell-pam=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S3 pam-login-service=\[present\]' "$LOG" \
+  && ok "/etc/pam.d/login present (the lock PAM service)" \
+  || bad "/etc/pam.d/login missing ($(grep -a 'SHREK-DOGFOOD S3 pam-login-service=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S3 pam-auth-correct=ok' "$LOG" \
+  && ok "PAM authenticates dev with the correct password (the lock screen unlocks)" \
+  || bad "PAM did NOT authenticate dev ($(grep -a 'SHREK-DOGFOOD S3 pam-auth-correct=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S3 pam-auth-wrong-rejected=ok' "$LOG" \
+  && ok "PAM rejects a wrong password (the lock is a real gate)" \
+  || bad "PAM accepted a wrong password ($(grep -a 'SHREK-DOGFOOD S3 pam-auth-wrong-rejected=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S3 lock-settings=\[externally-managed' "$LOG" \
+  && ok "DMS lock configured: external PAM + idle-lock timeout + lock-on-suspend ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | sed 's/.*lock-settings=//'))" \
+  || bad "DMS lock settings not seeded ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

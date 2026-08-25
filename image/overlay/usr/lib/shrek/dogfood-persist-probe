@@ -300,4 +300,26 @@ else
     say "S4 mount-open=FAIL no-SHREKUSB-disk blk=[$(lsblk -no NAME,LABEL 2>/dev/null | tr '\n' '|')]"
 fi
 
+# --- Sprint S3: Lock + idle — the DMS lock screen authenticates the dev user via PAM -------------------
+# DMS's lock screen (ext-session-lock-v1 via Quickshell) authenticates dev through PAM. With
+# SettingsData.lockPamExternallyManaged=true (seeded in the DMS defaults) it uses the STOCK /etc/pam.d/login
+# service (pam_unix -> /etc/shadow) and never tries to write a pam config to the read-only /etc. The knot:
+# dev must have an UNLOCKED password hash (S3 dropped the `!` prefix baked in image/mkosi.postinst) or
+# pam_unix refuses every unlock. Prove the real auth path headlessly (not the GUI): quickshell links libpam;
+# /etc/pam.d/login exists; pamtester authenticates dev+correct password AND rejects a wrong one. Idle->lock
+# + lock-on-suspend are DMS-internal (IdleService/ext-idle-notify + lockBeforeSuspend), config-enabled via
+# the seeded settings and manual lock via loginctl lock-session (loginctlLockIntegration).
+say "S3 quickshell-pam=[$(ldd /usr/bin/quickshell 2>/dev/null | grep -qi libpam && echo linked || echo MISSING)]"
+say "S3 pam-login-service=[$([ -f /etc/pam.d/login ] && echo present || echo MISSING)]"
+rc=0; printf 'shrek\n' | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && say "S3 pam-auth-correct=ok" || say "S3 pam-auth-correct=FAIL(rc=$rc)"
+rc=0; printf 'not-the-password\n' | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
+[ "$rc" -ne 0 ] && say "S3 pam-auth-wrong-rejected=ok" || say "S3 pam-auth-wrong-rejected=FAIL(accepted-bad-pw)"
+DSET=/usr/share/shrek/dms/default-settings.json
+if grep -q '"lockPamExternallyManaged": *true' "$DSET" 2>/dev/null; then
+    say "S3 lock-settings=[externally-managed acLockTimeout=$(grep -oE '"acLockTimeout": *[0-9]+' "$DSET" | grep -oE '[0-9]+') lockBeforeSuspend=$(grep -oE '"lockBeforeSuspend": *(true|false)' "$DSET" | grep -oE '(true|false)')]"
+else
+    say "S3 lock-settings=[MISSING in $DSET]"
+fi
+
 say "DONE boot=$n"
