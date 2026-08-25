@@ -1,0 +1,49 @@
+#!/bin/sh
+# shrek-default-agent — set the default model provider for shrek-agent (L5, writable /home).
+#
+# Writes ~/.config/shrek/agent.json, which shrek-agent (L4) reads to pick a SEALED egress profile.
+# This file records the CHOICE only — never a credential, never an address. Credentials live
+# broker-side (L3); the endpoint is pinned in the seal (L0). Same convention + printf-write pattern
+# as shrek-theme (no jq, no python on the sealed image).
+#
+#   shrek-default-agent <provider>          set the default provider
+#   shrek-default-agent --project <DIR>     set (also) the default project dir
+#   shrek-default-agent show                print the current config (or the default note)
+#
+#   provider ids: local | anthropic | claude | codex   (default: local)
+set -eu
+
+# ${HOME:-} guards set -u when run without HOME (root/systemd context); a real write still needs HOME.
+CFG="${SHREK_AGENT_CONFIG:-${HOME:-}/.config/shrek/agent.json}"
+PROVIDERS="local anthropic claude codex"
+valid_provider() { for p in $PROVIDERS; do [ "$1" = "$p" ] && return 0; done; return 1; }
+cfg_field() { [ -f "$CFG" ] && sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -1 || true; }
+
+cmd="${1:-}"
+[ -n "$cmd" ] || { echo "usage: shrek-default-agent <${PROVIDERS// / | }> | --project DIR | show" >&2; exit 1; }
+
+# carry existing values so a partial update doesn't drop the other field
+provider="$(cfg_field provider)"; [ -n "$provider" ] || provider="local"
+project_root="$(cfg_field project_root)"
+last_project="$(cfg_field last_project)"
+
+case "$cmd" in
+    show)
+        if [ -f "$CFG" ]; then cat "$CFG"; else echo '{"provider":"local"}  (default; no config written)'; fi
+        exit 0 ;;
+    --project)
+        shift; project_root="${1:-}"
+        [ -n "$project_root" ] || { echo "shrek-default-agent: --project needs a DIR" >&2; exit 2; } ;;
+    *)
+        valid_provider "$cmd" || { echo "shrek-default-agent: unknown provider '$cmd' (want: $PROVIDERS)" >&2; exit 2; }
+        provider="$cmd" ;;
+esac
+
+mkdir -p "$(dirname "$CFG")"
+{
+    printf '{"provider":"%s"' "$provider"
+    [ -n "$project_root" ] && printf ',"project_root":"%s"' "$project_root"
+    [ -n "$last_project" ] && printf ',"last_project":"%s"' "$last_project"
+    printf '}\n'
+} > "$CFG"
+echo "shrek-default-agent: provider=$provider${project_root:+ project_root=$project_root}"

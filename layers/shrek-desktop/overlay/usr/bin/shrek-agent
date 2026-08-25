@@ -1,0 +1,144 @@
+#!/bin/sh
+# shrek-agent — launch a walled coding agent against a chosen model provider.
+#
+# This is L4 (UX dispatch) in the agent-launch layer stack (docs/agent-launch.md). It maps a
+# friendly provider id to the REAL front-door args and spawns a terminal running the session:
+#
+#     shrek run --project DIR --egress <SEALED PROFILE> -- coder --provider <WIRE> --task "..."
+#
+# The layering guarantee: this script only ever NAMES a sealed egress profile (L0, crates/shrek-policy)
+# and picks the coder WIRE (L2, crates/coder). It never carries an address or a credential — the
+# endpoint is pinned in the seal (L0) and the key lives broker-side (L3). A wrong id or a stale profile
+# name can only FAIL CLOSED at the front door (L1) / gatekeeperd (L0); it can never widen authority.
+#
+#   shrek-agent [--provider ID] [--project DIR] [--task "one line"]   launch a session
+#   shrek-agent --pick                                                choose+persist a default, then launch
+#   shrek-agent --print [--provider ID]                              dry-run: print the resolved argv, exec nothing
+#   shrek-agent --list                                               list provider ids and their sealed profile
+#
+#   provider ids:  local | anthropic | claude | codex   (default: local; the no-credential path)
+#
+# NB (structural, not a knob): to aim `local` at a specific box (e.g. the LAN 35B), the SEALED name
+# `shrek-model` is resolved to that host BELOW this layer (network/name resolution) — NOT here. This
+# layer chooses the profile; the address is sealed under it. See docs/agent-launch.md §7.
+set -eu
+
+# HOME may be unset (e.g. run from a root systemd context / the dogfood probe); ${HOME:-} keeps set -u
+# happy. --list/--print never read the config anyway, and an absent config just falls back to defaults.
+CFG="${SHREK_AGENT_CONFIG:-${HOME:-}/.config/shrek/agent.json}"
+PROVIDERS="local anthropic claude codex"
+DEF_PROVIDER="local"
+DEF_PROJECT_ROOT="${HOME:-/tmp}/work"
+
+# --- L4 provider map: id -> (sealed egress profile @ L0, coder wire @ L2). SINGLE SOURCE OF TRUTH. ---
+# Emitted egress names MUST exist in crates/shrek-policy EGRESS_PROFILES; the dogfood S-agent group and
+# the host-side de-risk cross-check this so a typo is caught before it can fail-closed in a user's face.
+egress_for() {
+    case "$1" in
+        local)     echo "model-local" ;;
+        anthropic) echo "model-anthropic" ;;
+        claude)    echo "model-claude-cli" ;;
+        codex)     echo "model-codex-cli" ;;
+        *) return 1 ;;
+    esac
+}
+# The coder speaks only two wires; sub/api-key/codex all ride the `anthropic` messages wire and differ
+# ONLY by which broker the egress points at (L3). `local` is the one distinct (OpenAI chat) wire.
+wire_for() {
+    case "$1" in
+        local)                    echo "local" ;;
+        anthropic|claude|codex)   echo "anthropic" ;;
+        *) return 1 ;;
+    esac
+}
+
+valid_provider() { for p in $PROVIDERS; do [ "$1" = "$p" ] && return 0; done; return 1; }
+
+# One-field JSON reads, dependency-free (no jq/python on the sealed image — same rule as shrek-theme).
+cfg_field() { [ -f "$CFG" ] && sed -n 's/.*"'"$1"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$CFG" | head -1 || true; }
+
+usage() {
+    cat >&2 <<'EOF'
+usage:
+  shrek-agent [--provider ID] [--project DIR] [--task "one line"]
+  shrek-agent --pick
+  shrek-agent --print [--provider ID] [--project DIR] [--task "one line"]
+  shrek-agent --list
+  provider ids: local | anthropic | claude | codex   (default: local)
+EOF
+    exit "${1:-0}"
+}
+
+# --- parse ---
+provider=""; project=""; task=""; mode="run"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --provider) shift; provider="${1:-}" ;;
+        --project)  shift; project="${1:-}" ;;
+        --task)     shift; task="${1:-}" ;;
+        --pick)     mode="pick" ;;
+        --print)    mode="print" ;;
+        --list)     mode="list" ;;
+        -h|--help)  usage 0 ;;
+        *) echo "shrek-agent: unknown arg '$1'" >&2; usage 2 ;;
+    esac
+    shift || true
+done
+
+if [ "$mode" = "list" ]; then
+    for p in $PROVIDERS; do printf '%-10s -> egress %s (wire %s)\n' "$p" "$(egress_for "$p")" "$(wire_for "$p")"; done
+    exit 0
+fi
+
+# --- resolve provider: flag > config > sealed default; fail-closed on anything unknown ---
+[ -n "$provider" ] || provider="$(cfg_field provider)"
+[ -n "$provider" ] || provider="$DEF_PROVIDER"
+valid_provider "$provider" || { echo "shrek-agent: unknown provider '$provider' (want: $PROVIDERS)" >&2; exit 2; }
+egress="$(egress_for "$provider")"
+wire="$(wire_for "$provider")"
+
+# --pick: persist the chosen default up front (delegates the write + validation to shrek-default-agent)
+if [ "$mode" = "pick" ]; then
+    if [ -t 0 ]; then
+        i=1; for p in $PROVIDERS; do printf '  %d) %s\n' "$i" "$p" >&2; i=$((i+1)); done
+        printf 'choose provider [%s]: ' "$provider" >&2; read -r ans || ans=""
+        case "$ans" in ''), ;; [0-9]*) j=1; for p in $PROVIDERS; do [ "$j" = "$ans" ] && provider="$p"; j=$((j+1)); done ;; *) valid_provider "$ans" && provider="$ans" ;; esac
+        valid_provider "$provider" || { echo "shrek-agent: unknown provider '$provider'" >&2; exit 2; }
+    fi
+    shrek-default-agent "$provider" >&2 || true
+    egress="$(egress_for "$provider")"; wire="$(wire_for "$provider")"
+fi
+
+# --- resolve project: flag > config last_project > default root/scratch; shrek run needs a NAMED dir ---
+[ -n "$project" ] || project="$(cfg_field last_project)"
+if [ -z "$project" ]; then
+    root="$(cfg_field project_root)"; [ -n "$root" ] || root="$DEF_PROJECT_ROOT"
+    project="${root}/scratch"
+fi
+# expand a leading ~
+case "$project" in "~"/*) project="${HOME:-/tmp}/${project#~/}" ;; esac
+
+# --- resolve task (not needed for --print without intent to run) ---
+if [ -z "$task" ] && [ "$mode" = "run" ] && [ -t 0 ]; then
+    printf 'task (one line): ' >&2; read -r task || task=""
+fi
+
+if [ "$mode" = "print" ]; then
+    printf 'shrek run --project %s --egress %s -- coder --provider %s --task %s\n' \
+        "$project" "$egress" "$wire" "${task:-<TASK>}"
+    exit 0
+fi
+
+[ -n "$task" ] || { echo "shrek-agent: a --task is required to launch (or run in a terminal for a prompt)" >&2; exit 2; }
+mkdir -p "$project"
+
+# --- launch: hand the session to a foot terminal, injection-safe (values via env, never interpolated
+# into the command string), and HOLD after exit so the user can read CODER-DONE. foot execs directly. ---
+export SHREK_AGENT_PROJECT="$project" SHREK_AGENT_EGRESS="$egress" SHREK_AGENT_WIRE="$wire" SHREK_AGENT_TASK="$task"
+HOLD='shrek run --project "$SHREK_AGENT_PROJECT" --egress "$SHREK_AGENT_EGRESS" -- coder --provider "$SHREK_AGENT_WIRE" --task "$SHREK_AGENT_TASK"; ec=$?; printf "\n-- coder exited (%s). Press Enter to close --\n" "$ec"; read _'
+if command -v foot >/dev/null 2>&1 && [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    exec foot --app-id=shrek.agent sh -c "$HOLD"
+else
+    # headless / no compositor: run inline
+    exec sh -c "$HOLD"
+fi
