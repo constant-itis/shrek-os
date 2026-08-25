@@ -122,6 +122,12 @@ Confirmed missing → dead widgets:
     `shrek-foot-osc` (matugen `post_hook`, OSC-to-pty). DMS's own foot template is **disabled**
     (`matugenTemplateFoot:false`) — it emits a `[colors-dark]` section that trixie's foot 1.21 rejects.
     The launcher seeds an initial `foot-colors.ini` so foot's include is never missing.
+  - **Wallpaper set for the switcher (sub-task)** — **DONE**. A first-party set of Japanese-woodblock
+    swamp scenes, each styled to a popular palette, staged as JPG in `overlay/usr/share/shrek/wallpapers/`
+    (JPG, not the source webp — the sealed image has no Qt webp plugin, and JPG adds no new decoder). The
+    DMS switcher is pointed at the gallery via `wallpaperCyclingFolderPath` in the default session (cycling
+    off by default; prev/next flips through the set). `CREDITS.txt` records provenance + the palette→file
+    map. The swamp default stays reachable in the gallery.
 
 ### Phase C — real-hardware / needs a decision (lower priority)
 
