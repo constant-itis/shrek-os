@@ -37,7 +37,7 @@
 
   // ── Style (DMS theme + wallpaper provider) ──────────────────────────────
   "style.theme":     {"icon":"brightness_6", "label":"Toggle Light / Dark", "action":"dms ipc call theme toggle"},
-  "style.wallpaper": {"icon":"wallpaper",    "label":"Wallpaper", "provider":"wallpapers"},
+  "style.wallpaper": {"icon":"wallpaper",    "label":"Wallpaper…", "action":"dms ipc call dash toggle wallpaper"},
   "style.settings":  {"icon":"tune",         "label":"Appearance Settings…", "action":"dms ipc call settings focusOrToggle"},
 
   // ── Capture (grim/slurp; writes to ~/Pictures/Screenshots) ──────────────
