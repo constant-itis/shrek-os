@@ -13,8 +13,14 @@ spike and is the build reference going forward.
 - **Theme parity: DONE, verified live.** The surface reads DMS's `dms-colors.json` and follows theme
   changes in place — proven on the 0.3.0 image by atomically rewriting the file under a running
   instance and watching the card recolor with no relaunch, dogfood still 60/0. Schema resolved (below).
-- **Next:** port the engine (`MenuModel.js` ~verbatim, `Menu.qml` with surgery) + write the shrek
-  `menu.jsonc`.
+- **Model port (`MenuModel.js`): DONE, validated.** Ported ~verbatim from Omarchy; the only changes are
+  the guard batch (`GUARD_READERS` emptied, `guardHelpers()` rewritten pacman→sealed-Debian — see
+  *Guard vocabulary* below). Validated standalone under `node` (`tests/menu-model.test.js`, 22 checks):
+  jsonc parse / merge / alias-route / fuzzy-search all pass, and the generated guard batch is valid
+  bash that runs on the build host with the correct `<id>:<w|c|d>:<0|1>` contract. No QML runtime needed
+  — the file keeps its `module.exports` block, so the exact runtime file is the test target.
+- **Next:** port `Menu.qml` with surgery into `shell.qml`'s existing `ShellRoot`+`IpcHandler`, and write
+  the shrek `menu.jsonc`.
 
 ## Architecture (three unknowns, resolved from source)
 
@@ -74,12 +80,32 @@ run `out/qs-cache/quickshell -p <shell.qml>` under a headless Sway in `debian:tr
 (pass). The cached binary is 0.3.1; the image ships 0.3.0 — core windowing API matches, but always
 **verify layershell render live** on the graphical domain.
 
+## Guard vocabulary (`when` / `checked` / `disabled`)
+
+Every `when`/`checked`/`disabled` expression in `menu.jsonc` is a bash test evaluated once per menu
+(re)load in a **single** subprocess (`MenuModel.guardScript()`), never per-row or per-keystroke — the
+menu opens on the last evaluation's cached answers and never blocks. Expressions are arbitrary bash, so
+anything that exits 0/nonzero works, but the batch preloads these Shrek helpers (rewritten from
+Omarchy's pacman-based ones for a **sealed Debian** image — nothing installs post-boot, so "present" is a
+fixed fact derived from dpkg / `command -v` / systemd):
+
+| Helper | True when | Backed by |
+|---|---|---|
+| `shrek-pkg-present PKG…` | every PKG is installed (Provides-aware) | one `dpkg-query -W` load, hash lookup |
+| `shrek-pkg-missing PKG…` | any PKG is absent | same |
+| `shrek-cmd-present CMD…` | every CMD is on `PATH` | `command -v` |
+| `shrek-cmd-missing CMD…` | any CMD is absent | `command -v` |
+| `shrek-unit-active UNIT…` | every UNIT is active | `systemctl is-active` |
+| `shrek-unit-enabled UNIT…` | every UNIT is enabled | `systemctl is-enabled` |
+
+Package presence is loaded once into an associative array (same optimization Omarchy got from
+`pacman -Qq`), so a menu with many `shrek-pkg-present` guards still forks only once. Inline commands
+(`nmcli radio wifi | grep -q enabled`, `command -v wpctl`) are fine too and run directly.
+`GUARD_READERS` (Omarchy's memoized `omarchy-default-*` readers) is **empty** — Shrek ships none yet;
+append to that array in `MenuModel.js` to add a fast-path reader later.
+
 ## Port plan (next)
 
-- **`MenuModel.js`** — port ~verbatim (pure JS: tree flatten, fuzzy score, route resolve, guard-batch
-  gen). Only edits: swap the `omarchy-*` `GUARD_READERS` allowlist and rewrite `guardHelpers()` from
-  `pacman -Q` → `command -v`/`dpkg -l` (re-derive "package present" → command/unit/`/home`-state
-  present, since nothing installs post-boot).
 - **`Menu.qml`** — port with surgery: keep UI/delegate/keyboard-nav/search; rewrite the plugin
   lifecycle → the standalone `ShellRoot`+`IpcHandler` already in `shell.qml`, `Util.execDetached` →
   `Quickshell.execDetached`, the `providers` map, and app-library → DMS's app-entry service.
