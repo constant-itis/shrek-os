@@ -28,9 +28,17 @@ spike and is the build reference going forward.
   invariant), aliases route, and the guard batch is valid bash that runs with the right contract. IPC
   verbs were taken from DMS source, not guessed (the appendix's `theme cycle` / `powermenu open reboot`
   were wrong — real verbs are `theme toggle` / `lock lock` / `audio mute`).
-- **Next:** port `Menu.qml` with surgery into `shell.qml`'s existing `ShellRoot`+`IpcHandler` — this
-  wires `MenuModel.js` + `menu.jsonc` into a rendered, searchable, keyboard-driven surface, honors the
-  `apps`/`wallpapers` providers, and merges an optional `~/.config/shrek/menu.jsonc` from `/home`.
+- **Surface engine (`shell.qml`) — 3a DONE, verified live.** `MenuModel.js` + `menu.jsonc` are wired into
+  the surface: it loads the baked tree merged with an optional `~/.config/shrek/menu.jsonc`, runs the
+  guard batch in one `bash -c` subprocess, and renders a themed keyboard-driven list (breadcrumb header,
+  type-to-search that flattens+ranks the whole tree, arrow/Enter/Left-Back/Esc nav, `›` for submenus,
+  dim for disabled, `✓` for checked). Enter on an action runs it via `Quickshell.execDetached` and closes.
+  Confirmed on the 0.3.0 image: renders themed, navigates, searches, and **fires actions** (Lock, theme
+  toggle). Wallpaper routes to DMS's own picker via public IPC (`dms ipc call dash toggle wallpaper`) —
+  no native wallpaper provider (a deliberate call: don't duplicate/couple to DMS internals).
+- **Next (3b):** the `apps` provider — enumerate `DesktopEntries.applications` (Quickshell core, per
+  instance; reuse `ui/services/Applications.qml`), feed via `MenuModel.mergeAppRows`, launch with
+  `entry.execute()`. Then (3c) delegate polish: Material-Symbol icons, app icons, dynamic sizing.
 
 ## Architecture (three unknowns, resolved from source)
 
