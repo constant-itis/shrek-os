@@ -31,7 +31,7 @@ Confirmed missing → dead widgets:
 | Wi-Fi / network control center | NetworkManager (may live in the base image — verify) + polkit |
 | Lock screen + auto-lock / idle | session-lock backend + `swayidle` + logind idle + PAM auth |
 | USB / disk mounting | `udisks2` (+ polkit) |
-| Wallpaper → dynamic recolor | `matugen` binary (config references it; binary not staged) |
+| Wallpaper → dynamic recolor | ~~`matugen` binary~~ **DONE (S5)** — vendored, DMS theme seeded `dynamic` |
 | Brightness slider | `brightnessctl` (real hardware only) |
 | Power-profile switching | `power-profiles-daemon` |
 | Weather tab | network egress + a weather API (+ a sealed-egress policy decision) |
@@ -104,10 +104,17 @@ Confirmed missing → dead widgets:
   dogfood oracle attaches a labelled `SHREKUSB` virtio disk and proves the chain: udisksd owns its bus
   name → polkit grants `filesystem-mount-system` to the seat0 leader → the disk mounts via udisks and its
   seeded marker reads back. **Accept:** attach → mount → open. ✓
-- [ ] **S5 · Dynamic theming (matugen)** *(M)* — stage the `matugen` static binary into
-  `layers/shrek-desktop/overlay/usr/bin` (same pattern as the staged `quickshell` binary), flip
-  `runUserMatugenTemplates` in the DMS settings. **Biggest visual payoff** — closing the wallpaper →
-  palette → recolor loop. **Accept:** pick a wallpaper → the whole shell recolors.
+- [x] **S5 · Dynamic theming (matugen)** *(M)* — **DONE** (dogfood-verified + fresh-home screenshot:
+  DMS boots the wallpaper-derived palette). matugen has **no Debian package**, so the pinned upstream
+  release binary (`InioX/matugen` v4.2.0, sha256 provenance in `third_party/matugen`) is **vendored**
+  into `layers/shrek-desktop/overlay/usr/bin/matugen`. Note it is **glibc-dynamic**, not static — the
+  "static binary" shorthand was wrong — but trixie's glibc 2.41 satisfies its GLIBC_2.39 need and its
+  libc/libm/libgcc_s deps ride in the base. DMS drives it via its own `dms matugen queue` wrapper, but
+  **only when the theme is `dynamic`** — the stock `green` theme never calls matugen. So beyond flipping
+  `runUserMatugenTemplates:true`, the DMS default is seeded `currentThemeName/Category:"dynamic"` and
+  `widgetBackgroundColor:"sch"` (was a fixed-green `custom`) so panels track the palette. Out-of-box
+  still reads green because the shipped wallpaper *is* the swamp. **Accept:** pick a wallpaper → the
+  whole shell recolors. ✓
 
 ### Phase C — real-hardware / needs a decision (lower priority)
 
