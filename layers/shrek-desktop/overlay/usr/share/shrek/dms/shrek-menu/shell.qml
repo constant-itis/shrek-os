@@ -79,6 +79,15 @@ ShellRoot {
     property var items: ({})
     property var itemOrder: []
 
+    // Installed apps (the `apps` provider). Quickshell core DesktopEntries is a per-instance C++ singleton
+    // (NOT DMS's app service — a second qs process is blackholed from importing that), so it is reachable
+    // directly with no cross-instance coupling. appList is a bound property: when the scan updates,
+    // onAppListChanged re-merges — no need to know the ObjectModel's exact change-signal name. appEntries
+    // maps a row's appId back to its DesktopEntry so activate() can launch it with entry.execute().
+    readonly property var appList: DesktopEntries.applications ? DesktopEntries.applications.values : []
+    property var appEntries: ({})
+    onAppListChanged: root.rebuildFromSources()
+
     // Guard results: id -> bool. Absent id = "no guard" (visible / unchecked / enabled).
     property var whenResults: ({})
     property var checkedResults: ({})
@@ -91,9 +100,39 @@ ShellRoot {
 
     function rebuildFromSources() {
         var merged = MenuModel.mergeMenuSources(root.defaultMenuItems, root.userMenuItems);
-        root.items = merged.items;
-        root.itemOrder = merged.itemOrder;
+        // Merge installed-app rows under the "apps" section (sorted by name) and record a launch map.
+        var rows = [];
+        var map = ({});
+        var apps = (root.appList || []).slice();
+        apps.sort(function (a, b) { return ("" + (a && a.name || "")).localeCompare("" + (b && b.name || "")); });
+        for (var i = 0; i < apps.length; i++) {
+            var e = apps[i];
+            if (!e || e.noDisplay) continue;
+            var appId = "" + (e.id || e.name || "");
+            if (!appId) continue;
+            map[appId] = e;
+            rows.push(root.makeAppRow(appId, e));
+        }
+        var withApps = MenuModel.mergeAppRows(merged.items, merged.itemOrder, rows);
+        root.items = withApps.items;
+        root.itemOrder = withApps.itemOrder;
+        root.appEntries = map;
         root.evaluateGuards();
+    }
+
+    // A display-ready app row parented under the "apps" section. genericName + keywords ride in aliases so
+    // fuzzy search finds an app by what it does, not just its name (MenuModel scores kind:"app" specially).
+    function makeAppRow(appId, e) {
+        var aliases = [];
+        if (e.genericName) aliases.push("" + e.genericName);
+        var kw = e.keywords || [];
+        for (var k = 0; k < kw.length; k++) aliases.push("" + kw[k]);
+        return {
+            id: "apps." + appId, parent: "apps", kind: "app",
+            icon: "", iconFont: "", appIcon: "" + (e.icon || ""), appId: appId,
+            label: "" + (e.name || appId), title: "", target: "", description: "" + (e.genericName || ""),
+            action: "", provider: "", aliases: aliases, when: "", checked: "", disabled: ""
+        };
     }
 
     // One bash subprocess per (re)load evaluates every when/checked/disabled. The menu renders on the last
@@ -194,6 +233,12 @@ ShellRoot {
     }
     function activate(row) {
         if (!row || row.disabled) return;
+        if (row.kind === "app") {
+            var e = root.appEntries[row.appId];
+            if (e) e.execute();          // DesktopEntry.execute() handles field codes / terminal / workdir
+            win.visible = false;
+            return;
+        }
         if (row.action && row.action.length > 0) {
             Quickshell.execDetached(["bash", "-c", row.action]);
             win.visible = false;
