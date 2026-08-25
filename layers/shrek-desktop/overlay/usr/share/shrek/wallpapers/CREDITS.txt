@@ -1,0 +1,33 @@
+Shrek OS wallpapers
+===================
+
+Original artwork made for Shrek OS — Japanese-woodblock (ukiyo-e / shin-hanga)
+takes on the swamp, styled to match popular terminal/editor color palettes so a
+wallpaper pairs naturally with the matugen-derived dynamic theme. First-party
+assets, part of the Shrek OS project and covered by the repository license; NOT
+third-party art (unlike Omarchy's set, these ship with known provenance).
+
+Shipped as JPG (1672x941) — the sealed image renders JPG with no extra Qt image
+plugin. The DMS wallpaper switcher is pointed here via wallpaperCyclingFolderPath
+in the DMS default session (prev/next flips through the set; cycling is off by
+default). shrek-swamp-default.jpg is the shipped default, kept here so users can
+return to it.
+
+Palette theme  ->  file
+  Tokyo Night (ukiyo-e dragon/fortress) .... tokyo-night-dragon-castle-ukiyo-e.jpg
+  Tokyo Night Storm (indigo rain) .......... tokyo-night-storm-zen-walk.jpg
+  Rose Pine Dawn (shin-hanga pilgrimage) ... rose-pine-dawn-shin-hanga.jpg
+  Catppuccin (yokai procession) ............ catpuccin-procession.jpg
+  Gruvbox (autumn woodblock) ............... gruvbox-onionhelmet.jpg
+  Gruvbox Light (vermilion sunset) ......... gruvbox-light-zen-walk.jpg
+  Solarized Light (gold-screen swamp) ...... solarized-light-gold-screen-swamp.jpg
+  Nord (snowy mountain monastery) .......... nord-frozen-bridge-dragon-castle.jpg
+  Kanagawa (swamp waves, onion moon) ....... kanagawa-swamp-shack.jpg
+  Everforest (mossy shrine / torii) ........ everforest-donkey.jpg
+  Everforest Light (moss and ink) .......... everforest-light-zen-walk.jpg
+  PaperColor Light (rice-paper) ............ papercolor-light-suki-e-shrek-donkey.jpg
+  Ayu Mirage (charcoal night) .............. ayu-mirage-zen-walk.jpg
+  Amber (onion helmet) ..................... amber-onion-helmet.jpg
+  Midnight (castle dragon) ................. midnight-castle-dragon.jpg
+  Midnight (helmet) ........................ midnight-helmet.jpg
+  Swamp (Shrek OS default) ................. shrek-swamp-default.jpg

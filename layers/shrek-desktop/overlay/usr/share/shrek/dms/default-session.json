@@ -10,6 +10,7 @@
   "monitorWallpaperFillModes": {},
   "wallpaperTransition": "none",
   "includedTransitions": [],
+  "wallpaperCyclingFolderPath": "/usr/share/shrek/wallpapers",
   "wallpaperCyclingEnabled": false,
   "wallpaperCyclingMode": "interval",
   "wallpaperCyclingInterval": 300,
