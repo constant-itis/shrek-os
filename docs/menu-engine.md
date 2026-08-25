@@ -36,9 +36,15 @@ spike and is the build reference going forward.
   Confirmed on the 0.3.0 image: renders themed, navigates, searches, and **fires actions** (Lock, theme
   toggle). Wallpaper routes to DMS's own picker via public IPC (`dms ipc call dash toggle wallpaper`) —
   no native wallpaper provider (a deliberate call: don't duplicate/couple to DMS internals).
-- **Next (3b):** the `apps` provider — enumerate `DesktopEntries.applications` (Quickshell core, per
-  instance; reuse `ui/services/Applications.qml`), feed via `MenuModel.mergeAppRows`, launch with
-  `entry.execute()`. Then (3c) delegate polish: Material-Symbol icons, app icons, dynamic sizing.
+- **Apps provider — 3b DONE, verified live.** `DesktopEntries.applications` (Quickshell **core**
+  singleton — per-instance, no DMS import, so it dodges the `qs://` blackhole) is enumerated, sorted by
+  name, and merged under the `apps` section via `MenuModel.mergeAppRows`. genericName + keywords ride in
+  each row's aliases so fuzzy search finds an app by what it does. Enter launches via
+  `DesktopEntry.execute()` (handles field codes / terminal / workdir). Confirmed live: apps list under
+  Apps, are searchable from the root, and launch. (Note: DMS's spotlight `$mod+space` already app-launches
+  — the menu's distinct value is the guarded command tree; apps here are a convenience.)
+- **Next (3c, cosmetics):** icons (Material-Symbol section glyphs + app icons via baked Papirus through
+  `Quickshell.iconPath`), scroll-follows-selection for long lists, minor delegate/sizing polish.
 
 ## Architecture (three unknowns, resolved from source)
 
