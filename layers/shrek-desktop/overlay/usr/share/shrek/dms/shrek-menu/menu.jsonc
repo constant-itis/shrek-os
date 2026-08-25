@@ -1,0 +1,60 @@
+{
+  // Shrek OS command menu — baked read-only at /usr/share/shrek/dms/shrek-menu/menu.jsonc.
+  // A user copy at ~/.config/shrek/menu.jsonc is merged over this per-key (see docs/menu-engine.md).
+  //
+  // Parsed by MenuModel.js: `//` comments must be on their OWN line (inline trailing comments are
+  // NOT stripped and would break the parse); trailing commas before } or ] are fine. Ids are dotted
+  // for nesting (system.lock -> child of system); a root node is synthesized. `action` is arbitrary
+  // bash run detached; `provider` names a fixed baked-in submenu generator (never a path/command);
+  // `when`/`checked`/`disabled` are bash guards evaluated once per menu load and may call the
+  // shrek-pkg/cmd/unit-present|missing helpers (see the Guard vocabulary section of menu-engine.md).
+  //
+  // Every backend below is baked into the image: sway/foot, NetworkManager (nmcli/nmtui),
+  // pipewire+wireplumber (wpctl), grim+slurp, and DMS's own IPC (dms ipc call ...).
+
+  // ── Top-level sections ──────────────────────────────────────────────────
+  "apps":    {"icon":"apps",               "label":"Apps",    "provider":"apps"},
+  "system":  {"icon":"power_settings_new", "label":"System",  "aliases":["power","session"]},
+  "network": {"icon":"wifi",               "label":"Network"},
+  "style":   {"icon":"palette",            "label":"Style",   "aliases":["theme","appearance"]},
+  "capture": {"icon":"photo_camera",       "label":"Capture", "aliases":["screenshot"]},
+  "audio":   {"icon":"volume_up",          "label":"Audio",   "aliases":["sound"]},
+
+  // ── System (logind power actions + DMS lock) ────────────────────────────
+  "system.lock":     {"icon":"lock",               "label":"Lock",      "action":"dms ipc call lock lock"},
+  "system.suspend":  {"icon":"bedtime",            "label":"Suspend",   "action":"systemctl suspend"},
+  "system.reboot":   {"icon":"restart_alt",        "label":"Reboot",    "action":"systemctl reboot"},
+  "system.shutdown": {"icon":"power_settings_new", "label":"Shut Down", "action":"systemctl poweroff"},
+  "system.logout":   {"icon":"logout",             "label":"Log Out",   "action":"swaymsg exit"},
+
+  // ── Network (NetworkManager) ────────────────────────────────────────────
+  "network.toggle-wifi": {"icon":"wifi", "label":"Toggle Wi-Fi",
+    "checked":"nmcli radio wifi | grep -q enabled",
+    "action":"nmcli radio wifi $(nmcli radio wifi | grep -q enabled && echo off || echo on)"},
+  "network.connections": {"icon":"settings_ethernet", "label":"Connections…",
+    "when":"shrek-cmd-present nmtui",
+    "action":"foot --app-id=shrek.nmtui nmtui"},
+
+  // ── Style (DMS theme + wallpaper provider) ──────────────────────────────
+  "style.theme":     {"icon":"brightness_6", "label":"Toggle Light / Dark", "action":"dms ipc call theme toggle"},
+  "style.wallpaper": {"icon":"wallpaper",    "label":"Wallpaper", "provider":"wallpapers"},
+  "style.settings":  {"icon":"tune",         "label":"Appearance Settings…", "action":"dms ipc call settings focusOrToggle"},
+
+  // ── Capture (grim/slurp; writes to ~/Pictures/Screenshots) ──────────────
+  "capture.region": {"icon":"screenshot_region", "label":"Screenshot (Region)",
+    "when":"shrek-cmd-present grim slurp",
+    "action":"mkdir -p ~/Pictures/Screenshots && grim -g \"$(slurp)\" ~/Pictures/Screenshots/$(date +%Y%m%d-%H%M%S).png"},
+  "capture.screen": {"icon":"screenshot_monitor", "label":"Screenshot (Full)",
+    "when":"shrek-cmd-present grim",
+    "action":"mkdir -p ~/Pictures/Screenshots && grim ~/Pictures/Screenshots/$(date +%Y%m%d-%H%M%S).png"},
+
+  // ── Audio (WirePlumber via DMS audio IPC; state read with wpctl) ────────
+  "audio.mute": {"icon":"volume_off", "label":"Mute Output",
+    "when":"shrek-cmd-present wpctl",
+    "checked":"wpctl get-volume @DEFAULT_AUDIO_SINK@ | grep -q MUTED",
+    "action":"dms ipc call audio mute"},
+  "audio.mic-mute": {"icon":"mic_off", "label":"Mute Microphone",
+    "when":"shrek-cmd-present wpctl",
+    "checked":"wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED",
+    "action":"dms ipc call audio micmute"}
+}
