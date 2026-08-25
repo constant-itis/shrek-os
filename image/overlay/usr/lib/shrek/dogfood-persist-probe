@@ -388,4 +388,30 @@ else
     say "S5foot render+check=FAIL(missing wallpaper/matugen/foot)"
 fi
 
+# --- Sprint S5 (wallpaper set sub-task): give the DMS wallpaper switcher a gallery to browse ----------
+# A small first-party set is staged as JPG in /usr/share/shrek/wallpapers (JPG: the sealed image has no
+# Qt webp plugin, and JPG adds no extra image decoder). The DMS switcher is pointed at it via
+# wallpaperCyclingFolderPath in the default session. Prove headlessly: the gallery has a real set of
+# files that are all valid JPEG (magic FF D8 FF — od is in the base; foot/matugen only decode what the
+# base can), and the switcher folder is seeded. The picker UI itself is visual, out of scope here.
+WPDIR=/usr/share/shrek/wallpapers
+if [ -d "$WPDIR" ]; then
+    wpn=0; wpbad=0
+    for f in "$WPDIR"/*.jpg; do
+        [ -f "$f" ] || continue
+        wpn=$((wpn + 1))
+        sig=$(od -An -tx1 -N3 "$f" 2>/dev/null | tr -d ' \n\r')
+        [ "$sig" = "ffd8ff" ] || wpbad=$((wpbad + 1))
+    done
+    if [ "$wpn" -ge 10 ] && [ "$wpbad" -eq 0 ]; then
+        say "S5wall gallery=ok count=$wpn all-jpeg=yes"
+    else
+        say "S5wall gallery=FAIL count=$wpn non-jpeg=$wpbad"
+    fi
+else
+    say "S5wall gallery=FAIL no-dir"
+fi
+grep -q '"wallpaperCyclingFolderPath": *"/usr/share/shrek/wallpapers"' /usr/share/shrek/dms/default-session.json 2>/dev/null \
+    && say "S5wall picker-folder=seeded" || say "S5wall picker-folder=FAIL"
+
 say "DONE boot=$n"

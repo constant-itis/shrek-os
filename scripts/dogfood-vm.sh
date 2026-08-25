@@ -289,5 +289,14 @@ grep -qa 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" \
   && ok "matugen renders a foot palette from the wallpaper that foot accepts ($(grep -a 'SHREK-DOGFOOD S5foot render+check=ok' "$LOG" | tail -1 | sed 's/.*render+check=ok //'))" \
   || bad "matugen->foot render/check failed ($(grep -a 'SHREK-DOGFOOD S5foot render+check=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Sprint S5 (wallpaper set sub-task): the switcher has a browsable first-party gallery. Staged as JPG
+# (no Qt webp plugin in the image) and pointed at via wallpaperCyclingFolderPath in the default session.
+grep -qa 'SHREK-DOGFOOD S5wall gallery=ok' "$LOG" \
+  && ok "wallpaper gallery staged, all valid JPEG ($(grep -a 'SHREK-DOGFOOD S5wall gallery=ok' "$LOG" | tail -1 | sed 's/.*gallery=ok //'))" \
+  || bad "wallpaper gallery missing/invalid ($(grep -a 'SHREK-DOGFOOD S5wall gallery=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S5wall picker-folder=seeded' "$LOG" \
+  && ok "DMS wallpaper switcher pointed at the gallery" \
+  || bad "wallpaper switcher folder not seeded ($(grep -a 'SHREK-DOGFOOD S5wall picker-folder=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }
