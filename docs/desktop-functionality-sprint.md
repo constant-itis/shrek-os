@@ -115,6 +115,13 @@ Confirmed missing → dead widgets:
   `widgetBackgroundColor:"sch"` (was a fixed-green `custom`) so panels track the palette. Out-of-box
   still reads green because the shipped wallpaper *is* the swamp. **Accept:** pick a wallpaper → the
   whole shell recolors. ✓
+  - **Foot follows the theme (sub-task)** — **DONE**. matugen has no ANSI-16, so a user matugen config
+    (`/usr/share/shrek/matugen/{config.toml,templates/foot-colors.ini}`, merged by `dms matugen queue`)
+    maps Material roles → foot's 16 slots into `~/.local/state/shrek/foot-colors.ini`, which `foot.ini`
+    pulls in via a top-level `include=`. New windows read the file; open windows are retinted live by
+    `shrek-foot-osc` (matugen `post_hook`, OSC-to-pty). DMS's own foot template is **disabled**
+    (`matugenTemplateFoot:false`) — it emits a `[colors-dark]` section that trixie's foot 1.21 rejects.
+    The launcher seeds an initial `foot-colors.ini` so foot's include is never missing.
 
 ### Phase C — real-hardware / needs a decision (lower priority)
 
