@@ -20,7 +20,9 @@
 #
 # NB (structural, not a knob): to aim `local` at a specific box (e.g. the LAN 35B), the SEALED name
 # `shrek-model` is resolved to that host BELOW this layer (network/name resolution) — NOT here. This
-# layer chooses the profile; the address is sealed under it. See docs/agent-launch.md §7.
+# layer chooses the profile; the address is bound under it, per-install, by `shrek-connect` (writable
+# /home). Shrek ships with NO model wired; if the chosen provider's sealed name is unbound we stop with
+# a "hook one up" hint instead of letting gatekeeperd fail-closed on a bare "no A record". See §7.
 set -eu
 
 # HOME may be unset (e.g. run from a root systemd context / the dogfood probe); ${HOME:-} keeps set -u
@@ -48,6 +50,18 @@ wire_for() {
     case "$1" in
         local)                    echo "local" ;;
         anthropic|claude|codex)   echo "anthropic" ;;
+        *) return 1 ;;
+    esac
+}
+# id -> the sealed egress HOST NAME its profile resolves (crates/shrek-policy egress.rs). Used ONLY for
+# the advisory "is a brain hooked up?" pre-flight below; it MUST match shrek-connect's host_for. The
+# authoritative resolution is still gatekeeperd's getaddrinfo at `shrek run`.
+host_for() {
+    case "$1" in
+        local)     echo "shrek-model" ;;
+        anthropic) echo "shrek-model-proxy" ;;
+        claude)    echo "shrek-claude-cli" ;;
+        codex)     echo "shrek-codex-cli" ;;
         *) return 1 ;;
     esac
 }
@@ -130,6 +144,19 @@ if [ "$mode" = "print" ]; then
 fi
 
 [ -n "$task" ] || { echo "shrek-agent: a --task is required to launch (or run in a terminal for a prompt)" >&2; exit 2; }
+
+# --- pre-flight: is a brain hooked up? Shrek ships with NO model wired. If this provider's sealed name
+# has no binding in the writable /home store (which /etc/hosts symlinks to, so getaddrinfo reads it), the
+# launch would reach gatekeeperd and fail-closed with a bare "no A record". Guide the user instead. This
+# is ADVISORY (checks the store, same file gatekeeperd resolves through); the seal still enforces. ------
+HOSTS_STORE="${SHREK_HOSTS:-/home/.shrek-system/hosts}"
+host="$(host_for "$provider")"
+if ! awk -v h="$host" '$2==h{ok=1} END{exit !ok}' "$HOSTS_STORE" 2>/dev/null; then
+    echo "shrek-agent: no brain connected for '$provider' ($host is unbound)." >&2
+    echo "  hook one up:  shrek-connect $provider <addr>   (a LAN IP, a tailnet 100.x, or a hostname)" >&2
+    echo "  see bindings: shrek-connect --list" >&2
+    exit 3
+fi
 mkdir -p "$project"
 
 # --- launch: hand the session to a foot terminal, injection-safe (values via env, never interpolated

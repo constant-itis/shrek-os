@@ -1,0 +1,24 @@
+#!/bin/sh
+# shrek-os hosts-seed — ensure the writable name→address binding store exists with localhost.
+#
+# /etc/hosts is a baked symlink → /home/.shrek-system/hosts (the "mutable /etc file → writable plane"
+# idiom, same as /etc/resolv.conf → /run). shrek-connect writes per-install broker bindings there; this
+# guarantees the file exists with localhost on EVERY boot so a fresh, un-hooked-up box still resolves
+# localhost via nss `files` (the image ships no libnss-myhostname). Run by shrek-hosts-seed.service,
+# ordered after /home is mounted and before the rest of userspace resolves names.
+#
+# Idempotent and first-boot-safe: if the store already exists it is left EXACTLY as-is (user bindings
+# are never touched). A plain helper — not an inline ExecStart — so there is no systemd-escape ambiguity.
+set -eu
+
+d=/home/.shrek-system
+f="$d/hosts"
+
+[ -f "$f" ] && exit 0
+
+mkdir -p "$d"
+{
+    echo "127.0.0.1 localhost"
+    echo "::1 localhost"
+} > "$f"
+chmod 0644 "$f"

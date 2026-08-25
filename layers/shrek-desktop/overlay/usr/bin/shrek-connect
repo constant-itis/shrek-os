@@ -1,0 +1,109 @@
+#!/bin/sh
+# shrek-connect — hook a model provider up to YOUR broker's address (name→address, writable /home).
+#
+# Shrek OS ships with NO model wired. The sealed image (L0) carries the agent-launch UX and the sealed
+# egress NAMES (shrek-model, shrek-model-proxy, shrek-claude-cli, shrek-codex-cli) but no ADDRESS for any
+# of them — deliberately, so ONE image is universal and nobody's homelab is baked into everyone's OS.
+# This command is the hook-up: it binds a sealed name to an address YOU choose, on the writable /home
+# plane, and nothing else.
+#
+# It sits in the host-side NAME-RESOLUTION layer — BELOW the L4 dispatcher (shrek-agent, which only names
+# a profile) and BELOW the L0 seal (which only fixes the name). gatekeeperd's getaddrinfo resolves the
+# sealed name through nss `files` (/etc/hosts, a baked symlink to this store), pins the IPv4 into the
+# sandbox at construction, and the sandbox itself still has NO resolver. The seal (the NAME) and the
+# dispatcher (the CHOICE) never carry an address; only this layer does, and only on /home.
+#
+#   shrek-connect <provider> <addr>     bind the provider's broker to an address (IPv4 or hostname)
+#   shrek-connect --list                show every provider's sealed name + current binding
+#   shrek-connect --forget <provider>   remove a binding (back to unwired)
+#
+#   provider ids: local | anthropic | claude | codex
+#   addr: reachable from THIS host — a LAN IP (192.168.x.y), a tailnet 100.x, a hostname, whatever.
+#         `local` is the no-credential path (your own OpenAI-wire model server); the rest need a broker.
+set -eu
+
+# System-scope binding store on the writable /home plane (sibling of the NetworkManager keyfile store,
+# /home/.shrek-system/NetworkManager). /etc/hosts is a baked symlink to this (image/overlay/etc/hosts),
+# so getaddrinfo resolves through it. SHREK_HOSTS overrides it for the dogfood probe, exactly as
+# SHREK_AGENT_CONFIG overrides shrek-agent's config.
+HOSTS="${SHREK_HOSTS:-/home/.shrek-system/hosts}"
+PROVIDERS="local anthropic claude codex"
+
+# provider -> the sealed egress HOST NAME it resolves (crates/shrek-policy egress.rs EGRESS_PROFILES).
+# MUST stay in lockstep with shrek-agent's egress_for and the policy table; the dogfood S-connect group
+# cross-checks it so a drift is caught before it can fail-closed in a user's face.
+host_for() {
+    case "$1" in
+        local)     echo "shrek-model" ;;
+        anthropic) echo "shrek-model-proxy" ;;
+        claude)    echo "shrek-claude-cli" ;;
+        codex)     echo "shrek-codex-cli" ;;
+        *) return 1 ;;
+    esac
+}
+# loop var is _p, NOT p: this runs while the caller holds the chosen provider in `p`, and POSIX sh has
+# no function-local scope — a `for p` here would clobber it (and the error message would blame the wrong id).
+valid_provider() { for _p in $PROVIDERS; do [ "$1" = "$_p" ] && return 0; done; return 1; }
+
+# addr is written verbatim as the LHS of a hosts line getaddrinfo reads — allow ONLY what a hosts
+# address/host token may contain. Rejects whitespace and anything that could smuggle a second token or
+# a newline into the store.
+valid_addr() { case "$1" in ''|*[!a-zA-Z0-9.:_-]*) return 1 ;; *) return 0 ;; esac; }
+
+# Ensure the store exists with localhost so a fresh box always resolves localhost once /home is up (the
+# boot-time shrek-hosts-seed.service does the same, earlier, for the rest of the system). First-run only;
+# never clobbers existing bindings.
+seed() {
+    [ -f "$HOSTS" ] && return 0
+    mkdir -p "$(dirname "$HOSTS")" 2>/dev/null || true
+    printf '127.0.0.1 localhost\n::1 localhost\n' > "$HOSTS"
+}
+
+require_writable() {
+    [ -w "$HOSTS" ] && return 0
+    echo "shrek-connect: $HOSTS is not writable — re-run as the owner (or: sudo shrek-connect $*)" >&2
+    exit 1
+}
+
+# Rewrite the store dropping any prior line for sealed name $1, optionally appending "$2 $1". Atomic
+# (tmp + mv); localhost and every OTHER provider's line are carried through untouched.
+rewrite() {
+    _h="$1"; _addr="${2:-}"; _tmp="$HOSTS.shrek.tmp"
+    { awk -v h="$_h" '$2!=h' "$HOSTS"; [ -n "$_addr" ] && printf '%s %s\n' "$_addr" "$_h"; } > "$_tmp"
+    mv "$_tmp" "$HOSTS"
+}
+
+cmd="${1:-}"
+case "$cmd" in
+    ''|-h|--help)
+        cat >&2 <<EOF
+usage:
+  shrek-connect <provider> <addr>     bind a provider to your broker address
+  shrek-connect --list                show current bindings
+  shrek-connect --forget <provider>   remove a binding
+  provider ids: $PROVIDERS
+EOF
+        [ -z "$cmd" ] && exit 1 || exit 0 ;;
+    --list|list|show)
+        seed
+        for p in $PROVIDERS; do
+            h="$(host_for "$p")"
+            a="$(awk -v h="$h" '$2==h {print $1; exit}' "$HOSTS" 2>/dev/null || true)"
+            printf '%-10s %-18s %s\n' "$p" "$h" "${a:-<not connected>}"
+        done
+        exit 0 ;;
+    --forget|forget)
+        shift; p="${1:-}"
+        valid_provider "$p" || { echo "shrek-connect: unknown provider '$p' (want: $PROVIDERS)" >&2; exit 2; }
+        seed; require_writable --forget "$p"
+        rewrite "$(host_for "$p")"
+        echo "shrek-connect: $p ($(host_for "$p")) disconnected"; exit 0 ;;
+    *)
+        p="$cmd"; shift; addr="${1:-}"
+        valid_provider "$p" || { echo "shrek-connect: unknown provider '$p' (want: $PROVIDERS)" >&2; exit 2; }
+        [ -n "$addr" ] || { echo "shrek-connect: need an address — shrek-connect $p <addr>" >&2; exit 2; }
+        valid_addr "$addr" || { echo "shrek-connect: bad address '$addr' (IPv4/hostname characters only)" >&2; exit 2; }
+        seed; require_writable "$p" "$addr"
+        rewrite "$(host_for "$p")" "$addr"
+        echo "shrek-connect: $p ($(host_for "$p")) -> $addr"; exit 0 ;;
+esac

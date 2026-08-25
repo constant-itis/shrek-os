@@ -1,0 +1,29 @@
+# Shrek OS — agent-launch layer: seed the writable name→address binding store on /home.
+#
+# /etc/hosts is a baked symlink to /home/.shrek-system/hosts (image/overlay/etc/hosts) — the same
+# "mutable /etc file → writable plane" idiom the base already uses for /etc/resolv.conf → /run. That
+# store holds the per-install broker bindings written by `shrek-connect` (Shrek ships with NONE — the
+# image is universal, nobody's homelab is baked in).
+#
+# The image has no libnss-myhostname, so an UNSEEDED symlink would leave `localhost` unresolvable via
+# nss `files`. This oneshot guarantees the store exists with localhost on EVERY boot, ordered exactly
+# like var-lib-swamp.mount: after /home is mounted (home.mount is Before=local-fs.target) and before the
+# rest of userspace that resolves names. It only creates the file if absent — user bindings are never
+# touched. It writes as root (root:root 0644); `shrek-connect` edits it as the owner via sudo, since the
+# binding is system-scope name resolution (same trust class as editing /etc/hosts directly).
+[Unit]
+Description=Seed the Shrek writable hosts binding store (/home/.shrek-system/hosts)
+Documentation=file:///usr/share/doc/shrek/agent-launch.md
+DefaultDependencies=no
+After=home.mount
+Before=local-fs.target nss-lookup.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/hosts-seed
+
+[Install]
+WantedBy=local-fs.target
