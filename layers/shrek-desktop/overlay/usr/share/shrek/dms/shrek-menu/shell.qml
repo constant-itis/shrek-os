@@ -67,6 +67,15 @@ ShellRoot {
     readonly property color cOutline:     themed("outline_variant",        "#3a4a34")
     readonly property color cSelected:    themed("primary_container",      "#2c3f22")  // highlighted row
 
+    // Material Symbols Rounded — the icon font DMS bakes at this path. System fontconfig doesn't register
+    // it, so (exactly like DMS's own DankIcon.qml) we FontLoader the .ttf directly and use its .name as the
+    // family; menu.jsonc `icon` values are Material Symbol ligature names ("wifi", "lock", ...). The
+    // bracketed filename is a valid file URL — DMS resolves the same path this way.
+    FontLoader {
+        id: symbolsFont
+        source: Qt.resolvedUrl("file:///usr/share/quickshell/dms/assets/fonts/material-design-icons/variablefont/MaterialSymbolsRounded[FILL,GRAD,opsz,wght].ttf")
+    }
+
     // ── Menu model state ─────────────────────────────────────────────────────────────────────────
     // The tree is default (baked, RO /usr) merged with an optional user file from writable /home; the
     // user file can override any key but a provider is only ever a fixed baked string (enforced below),
@@ -388,6 +397,8 @@ ShellRoot {
                     model: root.rows
                     currentIndex: root.selectedIndex
                     boundsBehavior: Flickable.StopAtBounds
+                    // Keep the highlighted row on screen as the cursor moves through a long list (apps).
+                    onCurrentIndexChanged: positionViewAtIndex(currentIndex, ListView.Contain)
 
                     delegate: Rectangle {
                         width: resultList.width
@@ -408,18 +419,45 @@ ShellRoot {
                             anchors.leftMargin: 12
                             anchors.rightMargin: 12
                             spacing: 8
+
+                            // Leading icon: a Material Symbol glyph for command-tree rows, the real app icon
+                            // (from the baked Papirus theme via Quickshell.iconPath) for app rows.
+                            Item {
+                                id: iconSlot
+                                width: 22
+                                height: parent.height
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: modelData.kind !== "app" && modelData.icon && modelData.icon.length > 0
+                                    text: modelData.icon
+                                    font.family: symbolsFont.name
+                                    font.pixelSize: 19
+                                    color: index === root.selectedIndex ? root.cPrimary : root.cSurfaceDim
+                                }
+                                Image {
+                                    anchors.centerIn: parent
+                                    visible: modelData.kind === "app"
+                                    width: 18; height: 18
+                                    sourceSize.width: 18; sourceSize.height: 18
+                                    fillMode: Image.PreserveAspectFit
+                                    asynchronous: true
+                                    source: modelData.kind === "app"
+                                            ? Quickshell.iconPath(modelData.appIcon, "application-x-executable") : ""
+                                }
+                            }
+
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
-                                width: parent.width - childrenExpander.width - 8
+                                width: parent.width - iconSlot.width - childrenExpander.width - parent.spacing * 2
                                 text: modelData.label
                                 elide: Text.ElideRight
-                                color: index === root.selectedIndex ? root.cSurfaceText : root.cSurfaceText
+                                color: root.cSurfaceText
                                 font.pixelSize: 14
                             }
                             Text {
                                 id: childrenExpander
                                 anchors.verticalCenter: parent.verticalCenter
-                                // A submenu (children, no action) shows a chevron; a match shows its path.
+                                // A submenu (children, no action) shows a chevron; a search match shows its path.
                                 text: (!modelData.action && modelData.childCount > 0) ? "›"
                                       : (root.filterText.length > 0 && modelData.path ? modelData.path : "")
                                 color: root.cSurfaceDim
