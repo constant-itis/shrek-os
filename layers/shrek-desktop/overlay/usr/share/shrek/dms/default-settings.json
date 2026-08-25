@@ -1,9 +1,9 @@
 {
-  "currentThemeName": "green",
-  "currentThemeCategory": "generic",
+  "currentThemeName": "dynamic",
+  "currentThemeCategory": "dynamic",
   "matugenScheme": "scheme-tonal-spot",
-  "runUserMatugenTemplates": false,
-  "widgetBackgroundColor": "custom",
+  "runUserMatugenTemplates": true,
+  "widgetBackgroundColor": "sch",
   "widgetBackgroundCustomColor": "#26351D",
   "widgetBackgroundCustomStrength": 0.35,
   "controlCenterTileColorMode": "primary",
