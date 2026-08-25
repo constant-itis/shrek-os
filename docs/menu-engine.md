@@ -7,11 +7,14 @@ spike and is the build reference going forward.
 
 ## Status
 
-- **Spike: DONE, verified live.** An empty surface opens via IPC, renders centered over the desktop
-  with the swamp palette, grabs keyboard focus, and closes on Escape — confirmed on the real image
-  (packaged quickshell 0.3.0), dogfood still 60/0. This retired the only estimate-invalidating unknown.
+- **Spike: DONE, verified live.** An empty surface opens via IPC, renders centered over the desktop,
+  grabs keyboard focus, and closes on Escape — confirmed on the real image (packaged quickshell 0.3.0),
+  dogfood still 60/0. This retired the only estimate-invalidating unknown.
+- **Theme parity: DONE, verified live.** The surface reads DMS's `dms-colors.json` and follows theme
+  changes in place — proven on the 0.3.0 image by atomically rewriting the file under a running
+  instance and watching the card recolor with no relaunch, dogfood still 60/0. Schema resolved (below).
 - **Next:** port the engine (`MenuModel.js` ~verbatim, `Menu.qml` with surgery) + write the shrek
-  `menu.jsonc`, and wire theme parity from `dms-colors.json`.
+  `menu.jsonc`.
 
 ## Architecture (three unknowns, resolved from source)
 
@@ -34,9 +37,15 @@ with evidence:
    (`src/core/qsintercept.cpp` resolves `qs.*` under *this* instance's config root only; anything
    outside is sent to `qrc:/qs-blackhole`). So a shrek-owned surface cannot borrow DMS's `Theme`/
    `Color`. Parity instead comes from reading `~/.cache/DankMaterialShell/dms-colors.json` (DMS's
-   matugen output; `FileView{watchChanges:true}` gives free live re-theme). **Exact JSON schema is
-   still to be confirmed against the running `dms=1.5.3db1` build** — the spike uses a baked swamp
-   palette until then.
+   matugen output). **Schema (verified live against `dms=1.5.3db1`):**
+   `{ colors: { dark|light: { <M3 semantic key>: "#rrggbb" } }, dank16: {...} }` — flat hex values, the
+   50 standard matugen M3 keys (`surface_container_high`, `on_surface`, `primary`, `outline_variant`, …).
+   Matugen writes it atomically (`.tmp`+rename), so a watched read never sees a partial file. The
+   surface mirrors DMS's own `dynamicColorsFileView` (`Common/Theme.qml`):
+   `FileView{ watchChanges:true; onFileChanged: reload(); onLoaded: reparse() }`. **Use `onLoaded`, not
+   `onLoadedChanged`** — `loaded` transitions `false→true` only on the first load, so `onLoadedChanged`
+   never re-fires on subsequent reloads and the card would freeze at the launch palette. A baked
+   swamp-green palette is the fallback when the file/key is absent (first boot, pre-matugen).
 
 3. **Launch + window.** Sway autostarts it alongside `dms run`; it stays hidden until toggled:
    ```
