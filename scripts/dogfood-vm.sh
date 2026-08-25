@@ -308,5 +308,19 @@ grep -qa 'SHREK-DOGFOOD S5wall picker-folder=seeded' "$LOG" \
   && ok "DMS wallpaper switcher pointed at the gallery" \
   || bad "wallpaper switcher folder not seeded ($(grep -a 'SHREK-DOGFOOD S5wall picker-folder=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Agent-launch L4/L5 (docs/agent-launch.md): the shrek-agent dispatcher structural asserts ---------
+grep -qa 'SHREK-DOGFOOD Sagent binaries=present' "$LOG" \
+  && ok "agent-launch dispatcher + set-default present and executable" \
+  || bad "agent-launch binaries missing ($(grep -a 'SHREK-DOGFOOD Sagent binaries=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sagent map=ok' "$LOG" \
+  && ok "L4->L0 provider map emits the sealed egress names ($(grep -a 'SHREK-DOGFOOD Sagent map=ok' "$LOG" | tail -1 | sed 's/.*map=ok //'))" \
+  || bad "agent provider map wrong ($(grep -a 'SHREK-DOGFOOD Sagent map=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sagent fail-closed=ok' "$LOG" \
+  && ok "agent dispatcher fail-closes on an unknown provider id" \
+  || bad "agent dispatcher did not fail-closed on unknown id ($(grep -a 'SHREK-DOGFOOD Sagent fail-closed=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sagent set-default=ok' "$LOG" \
+  && ok "L5 default round-trips (set-default -> shrek-agent resolves the right profile)" \
+  || bad "agent set-default did not round-trip ($(grep -a 'SHREK-DOGFOOD Sagent set-default=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

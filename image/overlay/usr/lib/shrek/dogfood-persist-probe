@@ -459,4 +459,38 @@ fi
 grep -q '"wallpaperCyclingFolderPath": *"/usr/share/shrek/wallpapers"' /usr/share/shrek/dms/default-session.json 2>/dev/null \
     && say "S5wall picker-folder=seeded" || say "S5wall picker-folder=FAIL"
 
+# --- Agent-launch L4/L5 (docs/agent-launch.md): the shrek-agent dispatcher + set-default helper. --------
+# The sealed VM is endpoint-free, so we do NOT run a model round-trip here (that's the host-side coder
+# oracle, slice-3 §5). We prove the STRUCTURE: the dispatcher exists, its L4->L0 provider map emits the
+# expected sealed egress names, it fail-closes on an unknown id, and the L5 default round-trips. The
+# authoritative "every emitted egress is a sealed L0 profile" check runs host-side at de-risk time.
+if [ -x /usr/bin/shrek-agent ] && [ -x /usr/bin/shrek-default-agent ]; then
+    say "Sagent binaries=present"
+else
+    say "Sagent binaries=FAIL agent=[$(ls -l /usr/bin/shrek-agent 2>&1 | tail -c 60)] def=[$(ls -l /usr/bin/shrek-default-agent 2>&1 | tail -c 60)]"
+fi
+# L4 map: each id -> its sealed profile (must match crates/shrek-policy EGRESS_PROFILES verbatim).
+amap="$(shrek-agent --list 2>/dev/null | awk '{print $1"="$4}' | tr '\n' ' ')"
+if [ "$amap" = "local=model-local anthropic=model-anthropic claude=model-claude-cli codex=model-codex-cli " ]; then
+    say "Sagent map=ok [$amap]"
+else
+    say "Sagent map=FAIL [$amap]"
+fi
+# fail-closed: an unknown provider id must exit nonzero, never resolve to a backend.
+if shrek-agent --print --provider bogus --project /w/p --task x >/dev/null 2>&1; then
+    say "Sagent fail-closed=FAIL(unknown id accepted)"
+else
+    say "Sagent fail-closed=ok"
+fi
+# L5 round-trip (as user dev, own HOME): set default -> shrek-agent reads it back into the right profile.
+ACFG="$(asdev sh -c 'echo "$HOME"')/.config/shrek/agent.json"
+asdev rm -f "$ACFG" 2>/dev/null || true
+asdev shrek-default-agent claude >/dev/null 2>&1 || true
+ares="$(asdev shrek-agent --print --project /w/p --task noop 2>/dev/null)"
+case "$ares" in
+    *"--egress model-claude-cli -- coder --provider anthropic"*) say "Sagent set-default=ok" ;;
+    *) say "Sagent set-default=FAIL [$ares]" ;;
+esac
+asdev rm -f "$ACFG" 2>/dev/null || true
+
 say "DONE boot=$n"
