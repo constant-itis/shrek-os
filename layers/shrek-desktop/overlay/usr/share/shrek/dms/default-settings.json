@@ -24,6 +24,10 @@
   "waveProgressEnabled": false,
   "audioVisualizerEnabled": false,
   "mediaUseAlbumArtAccent": false,
+  "lockPamExternallyManaged": true,
+  "lockBeforeSuspend": true,
+  "acLockTimeout": 300,
+  "batteryLockTimeout": 300,
   "dashTabs": [
     { "id": "overview", "enabled": true },
     { "id": "media", "enabled": true },
