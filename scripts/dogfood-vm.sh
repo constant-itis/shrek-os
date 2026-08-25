@@ -322,5 +322,25 @@ grep -qa 'SHREK-DOGFOOD Sagent set-default=ok' "$LOG" \
   && ok "L5 default round-trips (set-default -> shrek-agent resolves the right profile)" \
   || bad "agent set-default did not round-trip ($(grep -a 'SHREK-DOGFOOD Sagent set-default=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Agent-launch name-resolution layer (docs/agent-launch.md §7): shrek-connect hook-up + hosts seed ---
+grep -qa 'SHREK-DOGFOOD Sconnect binary=present' "$LOG" \
+  && ok "hook-up tool (shrek-connect) present and executable" \
+  || bad "shrek-connect missing ($(grep -a 'SHREK-DOGFOOD Sconnect binary=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect map=ok' "$LOG" \
+  && ok "provider -> sealed host-name map matches the L0 policy ($(grep -a 'SHREK-DOGFOOD Sconnect map=ok' "$LOG" | tail -1 | sed 's/.*map=ok //'))" \
+  || bad "shrek-connect host map wrong ($(grep -a 'SHREK-DOGFOOD Sconnect map=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect bind=ok' "$LOG" \
+  && ok "hook-up bind writes the correct hosts line (bind/list round-trip)" \
+  || bad "shrek-connect bind round-trip failed ($(grep -a 'SHREK-DOGFOOD Sconnect bind=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect unbound-guard=ok' "$LOG" \
+  && ok "shrek-agent fail-closes with a hook-up hint when the provider is unbound" \
+  || bad "unbound-provider guard did not fire ($(grep -a 'SHREK-DOGFOOD Sconnect unbound-guard=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect etc-hosts-wired=ok' "$LOG" \
+  && ok "/etc/hosts is the baked symlink to the writable /home binding store" \
+  || bad "/etc/hosts symlink not wired ($(grep -a 'SHREK-DOGFOOD Sconnect etc-hosts-wired=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect seed-service=active' "$LOG" \
+  && ok "the boot-time hosts-seed oneshot ran (localhost resolvable on a fresh box)" \
+  || bad "shrek-hosts-seed.service not active ($(grep -a 'SHREK-DOGFOOD Sconnect seed-service=' "$LOG" | tail -1 | tr -d '\r'))"
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

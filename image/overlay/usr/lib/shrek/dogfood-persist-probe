@@ -493,4 +493,56 @@ case "$ares" in
 esac
 asdev rm -f "$ACFG" 2>/dev/null || true
 
+# --- Agent-launch name-resolution layer (docs/agent-launch.md §7): shrek-connect hook-up + hosts seed. --
+# Shrek ships with NO model wired; shrek-connect binds a sealed name -> an address on the writable /home
+# store that /etc/hosts symlinks to. We prove: the tool exists; its provider->sealed-name map matches the
+# L0 policy; the bind/list/forget round-trip writes a correct hosts line; shrek-agent fail-closes with a
+# "hook one up" hint when the chosen provider is UNbound; and the real image wiring (the /etc/hosts
+# symlink + the boot seed) is in place. A bound real launch is the host-side coder oracle's job (slice-3).
+if [ -x /usr/bin/shrek-connect ]; then
+    say "Sconnect binary=present"
+else
+    say "Sconnect binary=FAIL [$(ls -l /usr/bin/shrek-connect 2>&1 | tail -c 60)]"
+fi
+# provider -> sealed host name map (must match crates/shrek-policy egress hosts, 1:1 with the profiles).
+cmap="$(shrek-connect --list 2>/dev/null | awk '{print $1"="$2}' | tr '\n' ' ')"
+if [ "$cmap" = "local=shrek-model anthropic=shrek-model-proxy claude=shrek-claude-cli codex=shrek-codex-cli " ]; then
+    say "Sconnect map=ok [$cmap]"
+else
+    say "Sconnect map=FAIL [$cmap]"
+fi
+# bind/list/forget round-trip against a private store (SHREK_HOSTS), as the dev user in its own HOME.
+CHOSTS="$(asdev sh -c 'echo "$HOME"')/.cache/shrek-connect-test-hosts"
+asdev sh -c "rm -f '$CHOSTS'; SHREK_HOSTS='$CHOSTS' shrek-connect local 127.0.0.1 >/dev/null 2>&1" || true
+cbound="$(asdev sh -c "SHREK_HOSTS='$CHOSTS' shrek-connect --list 2>/dev/null" | awk '$1=="local"{print $3}')"
+if [ "$cbound" = "127.0.0.1" ] && asdev sh -c "grep -qx '127.0.0.1 shrek-model' '$CHOSTS'"; then
+    say "Sconnect bind=ok"
+else
+    say "Sconnect bind=FAIL [local=$cbound file=$(asdev sh -c "tr '\n' '|' < '$CHOSTS' 2>&1")]"
+fi
+# the unbound provider guard: with `local` bound but `claude` not, shrek-agent must fail-closed (exit 3)
+# on --provider claude and emit the hook-up hint — never reach a launch. Capture is set -e-SAFE: the
+# guard firing IS a non-zero exit (the feature working), so `|| arc=$?` catches it instead of killing
+# this probe (a bare `aout=$(...)` assignment would propagate the 3 and abort the whole oneshot).
+arc=0
+aout="$(asdev sh -c "SHREK_HOSTS='$CHOSTS' shrek-agent --provider claude --project /w/p --task noop 2>&1")" || arc=$?
+if [ "$arc" = 3 ] && printf '%s' "$aout" | grep -q "no brain connected for 'claude'"; then
+    say "Sconnect unbound-guard=ok"
+else
+    say "Sconnect unbound-guard=FAIL [rc=$arc msg=$(printf '%s' "$aout" | tr '\n' '/')]"
+fi
+asdev sh -c "SHREK_HOSTS='$CHOSTS' shrek-connect --forget local >/dev/null 2>&1; rm -f '$CHOSTS'" || true
+# real image wiring: /etc/hosts is the baked symlink and the boot seed ran (oneshot RemainAfterExit).
+link="$(readlink /etc/hosts 2>/dev/null || true)"
+if [ "$link" = "/home/.shrek-system/hosts" ] && grep -qx '127.0.0.1 localhost' /etc/hosts 2>/dev/null; then
+    say "Sconnect etc-hosts-wired=ok"
+else
+    say "Sconnect etc-hosts-wired=FAIL [link=$link]"
+fi
+if systemctl is-active shrek-hosts-seed.service >/dev/null 2>&1; then
+    say "Sconnect seed-service=active"
+else
+    say "Sconnect seed-service=FAIL [$(systemctl is-active shrek-hosts-seed.service 2>&1 | tr '\n' ' ')]"
+fi
+
 say "DONE boot=$n"
