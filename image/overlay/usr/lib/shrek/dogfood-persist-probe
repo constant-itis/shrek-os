@@ -300,6 +300,27 @@ else
     say "S4 mount-open=FAIL no-SHREKUSB-disk blk=[$(lsblk -no NAME,LABEL 2>/dev/null | tr '\n' '|')]"
 fi
 
+# --- Sprint S6: Brightness + power-profiles — the DMS brightness keys + bar power-profile widget ----------
+# Both are HARDWARE features that no-op in the VM (no /sys/class/backlight node, no cpufreq/platform_profile
+# driver), so the oracle proves what is hardware-INDEPENDENT: the sealed-image PACKAGING + AUTHORIZATION that
+# make them work on the real Mac panel. brightnessctl drives XF86MonBrightness* (sway.config) and writes the
+# backlight node via its `video`-group udev rule, so dev must be IN video. power-profiles-daemon backs the DMS
+# PowerProfileWatcher; switching the profile is polkit-gated (switch-profile defaults auth_admin_keep) — the
+# baked rule 49-shrek-ppd.rules grants the active seat0 session, proven with pkcheck against the SAME leader
+# S1 used. The live profile-switch / brightness-set are the no-op-in-VM part: the profile list is INFO only,
+# never failed on absent hardware (empty in the VM is expected).
+say "S6 brightnessctl-present=[$(command -v brightnessctl >/dev/null 2>&1 && echo yes || echo MISSING)]"
+say "S6 dev-in-video-grp=[$(id -nG dev 2>/dev/null | tr ' ' '\n' | grep -qx video && echo yes || echo no)]"
+say "S6 ppd-present=[$(command -v powerprofilesctl >/dev/null 2>&1 && echo yes || echo MISSING)]"
+if [ -n "$LEAD" ] && [ -r "/proc/$LEAD/stat" ]; then
+    rc=0; timeout 15 pkcheck --action-id org.freedesktop.UPower.PowerProfiles.switch-profile --process "$LEAD,$STT,$LUID" >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] && say "S6 authz switch-profile=yes" || say "S6 authz switch-profile=no(rc=$rc)"
+else
+    say "S6 authz switch-profile=no(no-active-seat0-session-leader)"
+fi
+s6prof=$(powerprofilesctl list 2>&1 | sed -n 's/^[* ]*\([a-z][a-z-]*\):.*/\1/p' | tr '\n' ',' || true)
+say "S6 ppd-profiles=[${s6prof:-none(vm-no-cpufreq-driver)}]"
+
 # --- Sprint S3: Lock + idle — the DMS lock screen authenticates the dev user via PAM -------------------
 # DMS's lock screen (ext-session-lock-v1 via Quickshell) authenticates dev through PAM. With
 # SettingsData.lockPamExternallyManaged=true (seeded in the DMS defaults) it uses the STOCK /etc/pam.d/login

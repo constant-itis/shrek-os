@@ -250,6 +250,22 @@ grep -qa 'SHREK-DOGFOOD S3 lock-settings=\[externally-managed' "$LOG" \
   && ok "DMS lock configured: external PAM + idle-lock timeout + lock-on-suspend ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | sed 's/.*lock-settings=//'))" \
   || bad "DMS lock settings not seeded ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Sprint S6: Brightness + power-profiles — sealed-image PACKAGING + AUTHORIZATION (the hardware-
+# independent half; the live brightness-set / profile-switch is a no-op in the VM and is INFO-only). --------
+grep -qa 'SHREK-DOGFOOD S6 brightnessctl-present=\[yes\]' "$LOG" \
+  && ok "brightnessctl shipped (the DMS brightness keys have a backend on real HW)" \
+  || bad "brightnessctl missing ($(grep -a 'SHREK-DOGFOOD S6 brightnessctl-present=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S6 dev-in-video-grp=\[yes\]' "$LOG" \
+  && ok "dev is in the video group (brightnessctl can write the backlight node)" \
+  || bad "dev not in the video group ($(grep -a 'SHREK-DOGFOOD S6 dev-in-video-grp=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S6 ppd-present=\[yes\]' "$LOG" \
+  && ok "power-profiles-daemon shipped (the DMS power-profile widget has a backend)" \
+  || bad "power-profiles-daemon missing ($(grep -a 'SHREK-DOGFOOD S6 ppd-present=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD S6 authz switch-profile=yes' "$LOG" \
+  && ok "polkit grants the active seat0 session power-profile switching" \
+  || bad "polkit did NOT grant PowerProfiles.switch-profile ($(grep -a 'SHREK-DOGFOOD S6 authz switch-profile=' "$LOG" | tail -1 | tr -d '\r'))"
+echo "  INFO $(grep -a 'SHREK-DOGFOOD S6 ppd-profiles=' "$LOG" | tail -1 | sed 's/.*SHREK-DOGFOOD //' | tr -d '\r') — live profiles are hardware-gated; empty in the VM is expected"
+
 # --- Sprint S5: Dynamic theming — the vendored matugen binary is present, runs under the image's glibc,
 # and turns the shipped wallpaper into a Material palette (the wallpaper->palette loop DMS drives via
 # `dms matugen queue` when the theme is `dynamic`, the seeded default). matugen has no Debian package, so
