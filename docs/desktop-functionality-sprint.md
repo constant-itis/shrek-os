@@ -131,8 +131,16 @@ Confirmed missing → dead widgets:
 
 ### Phase C — real-hardware / needs a decision (lower priority)
 
-- [ ] **S6 · Brightness + power-profiles** *(S)* — `brightnessctl` + `power-profiles-daemon`. No-op in a
-  VM; matters on the real Mac hardware.
+- [x] **S6 · Brightness + power-profiles** *(S)* — **DONE** (dogfood-verified, hardware-independent half).
+  Both are **base** packages: `brightnessctl` (backs the already-bound `XF86MonBrightness*` → `dms ipc call
+  brightness` keys) and `power-profiles-daemon` (backs the DMS bar power-profile widget). The sealed-image
+  gaps closed: (a) brightnessctl writes `/sys/class/backlight` via its `video`-group udev rule → **dev added
+  to `video`** in `image/mkosi.postinst`; (b) ppd's `switch-profile` action defaults `auth_admin_keep`, so
+  the active seat0 session gets `org.freedesktop.UPower.PowerProfiles.*` via a baked polkit rule
+  (`49-shrek-ppd.rules`, same shape as S1/S2/S4). ppd is D-Bus activated like udisks2 (no unit enable). The
+  dogfood oracle proves packaging + `pkcheck` authorization; the **live brightness-set / profile-switch is a
+  genuine no-op in the VM** (no backlight node, no cpufreq/platform_profile driver) so the profile list is
+  reported INFO-only — it lights up on the real Mac panel.
 - [ ] **S7 · Weather + shell egress** *(M + decision)* — the weather tab needs the shell to reach a
   network API, which touches the sealed-egress security model. Defer until we decide whether the shell
   gets a named egress, or just disable the weather tab for now.
