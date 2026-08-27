@@ -266,6 +266,11 @@ grep -qa 'SHREK-DOGFOOD S6 authz switch-profile=yes' "$LOG" \
   || bad "polkit did NOT grant PowerProfiles.switch-profile ($(grep -a 'SHREK-DOGFOOD S6 authz switch-profile=' "$LOG" | tail -1 | tr -d '\r'))"
 echo "  INFO $(grep -a 'SHREK-DOGFOOD S6 ppd-profiles=' "$LOG" | tail -1 | sed 's/.*SHREK-DOGFOOD //' | tr -d '\r') — live profiles are hardware-gated; empty in the VM is expected"
 
+# --- Sprint S7: Weather tab disabled (owner chose no shell egress; a named-egress broker is a future slice).
+grep -qa 'SHREK-DOGFOOD S7 weather-tab=disabled-in-seed' "$LOG" \
+  && ok "weather tab seeded OFF — no undeclared shell egress (S7: disable, not broker)" \
+  || bad "weather tab not disabled in the DMS seed ($(grep -a 'SHREK-DOGFOOD S7 weather-tab=' "$LOG" | tail -1 | tr -d '\r'))"
+
 # --- Sprint S5: Dynamic theming — the vendored matugen binary is present, runs under the image's glibc,
 # and turns the shipped wallpaper into a Material palette (the wallpaper->palette loop DMS drives via
 # `dms matugen queue` when the theme is `dynamic`, the seeded default). matugen has no Debian package, so

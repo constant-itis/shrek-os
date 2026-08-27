@@ -566,4 +566,16 @@ else
     say "Sconnect seed-service=FAIL [$(systemctl is-active shrek-hosts-seed.service 2>&1 | tr '\n' ' ')]"
 fi
 
+# --- Sprint S7: Weather tab — DISABLED (no shell egress) ----------------------------------------------
+# Decision (owner, 2026-08-27): the DMS weather tab curls a third-party weather API on a timer — an
+# undeclared, recurring phone-home from the SYSTEM shell, which Shrek's default-deny / named-egress model
+# does not grant ad hoc. Rather than open a shell egress hole, the tab is seeded OFF in the DMS dashTabs
+# (default-settings.json). A named-egress broker for the shell (reusable for Tailscale/VPN) is a separate
+# future slice. Prove the seed disables it, so no weather egress is attempted by default.
+if grep -Eq '"id"[[:space:]]*:[[:space:]]*"weather"[[:space:]]*,[[:space:]]*"enabled"[[:space:]]*:[[:space:]]*false' "$DSET" 2>/dev/null; then
+    say "S7 weather-tab=disabled-in-seed"
+else
+    say "S7 weather-tab=FAIL [$(grep -o '"id": *"weather"[^}]*' "$DSET" 2>/dev/null | tr -d '\n')]"
+fi
+
 say "DONE boot=$n"
