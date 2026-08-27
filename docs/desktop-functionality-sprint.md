@@ -141,9 +141,12 @@ Confirmed missing → dead widgets:
   dogfood oracle proves packaging + `pkcheck` authorization; the **live brightness-set / profile-switch is a
   genuine no-op in the VM** (no backlight node, no cpufreq/platform_profile driver) so the profile list is
   reported INFO-only — it lights up on the real Mac panel.
-- [ ] **S7 · Weather + shell egress** *(M + decision)* — the weather tab needs the shell to reach a
-  network API, which touches the sealed-egress security model. Defer until we decide whether the shell
-  gets a named egress, or just disable the weather tab for now.
+- [x] **S7 · Weather + shell egress** *(decision)* — **DONE (disabled)**. The weather tab curls a
+  third-party API on a timer — an undeclared, recurring phone-home from the *system shell*, which Shrek's
+  default-deny / named-egress model does not grant ad hoc. **Owner decision (2026-08-27): disable the tab**
+  rather than open a shell egress hole. Seeded OFF in `default-settings.json` dashTabs; dogfood asserts the
+  seed. A **named-egress broker for the shell** (endpoint-pinned, auditable, reusable for Tailscale/VPN) is
+  parked as its own future slice — that's the door those features will share when they land.
 
 ## Notes / constraints
 
