@@ -126,7 +126,15 @@ else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
   if [ "$INSTALLABLE" = "1" ]; then
-    echo "!!! INSTALLABLE=1: enabling persistent /home (home.mount) without dogfood reboot probe !!!"
+    echo "!!! INSTALLABLE=1: deployable image — masking self-poweroff spike gates + enabling persistent /home (no dogfood reboot probe) !!!"
+    # A deployable / daily-driver image MUST NOT carry the Phase-5 SPIKE proof gates. shrek-mount-gate has
+    # SuccessAction=FailureAction=poweroff-force (it powers the box off to signal the CI oracle), so leaving
+    # it live makes a REAL install boot to the desktop and then immediately power off. Mask both spike gates
+    # here exactly like the DOGFOOD/LIVE_INSTALLER paths do. (The plain-CI branch above intentionally leaves
+    # them live so boot-vm.sh / desktop-sealed-proof.sh still get their poweroff pass-signal.)
+    install -d "$DOGFOOD_MASKS"
+    ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
+    ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
     install -d "$LOCALFS_WANTS"
     ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
   else
