@@ -129,6 +129,13 @@ svc NetworkManager '^active'
 svc systemd-resolved '^active'
 svc bluetooth        '^active'
 svc dbus-broker      '^active'
+# HW-enablement batch (#2909) — new base services. timesyncd must be active (NTP on a 2012-RTC sealed OS).
+# mbpfan is applesmc-condition-guarded so in the VM it is INACTIVE, NOT failed — this asserts the
+# universal-image guard works (it would be active on a real Mac). upower is D-Bus-activated: present and
+# not failed (active or inactive both pass; failed/unknown do not).
+svc systemd-timesyncd '^active'
+svc mbpfan           '^inactive'
+svc upower           '^(active|inactive)'
 svc user@1000.service '^active'
 svc pipewire         '^active'
 svc wireplumber      '^active'

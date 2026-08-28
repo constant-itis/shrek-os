@@ -52,21 +52,25 @@ say "user-session: user@1000=$(systemctl is-active user@1000.service 2>/dev/null
 say "user-runtime dir=[$(ls -1 "$RT" 2>&1 | tr '\n' ' ')] bus=$([ -S "$RT/bus" ] && echo present || echo absent)"
 
 # Bluetooth: bluez's bluetooth.service is ConditionPathIsDirectory=/sys/class/bluetooth. The VM may have
-# no Bluetooth controller, but bluetoothd can still run correctly with an empty controller set once the
-# kernel Bluetooth core exposes the class directory. Do not invent a fake adapter; zero controllers is a
-# valid dogfood VM state. The layer's bluetooth.service lands in /usr only after the Onion sysext merge,
-# so daemon-reload first to make it loadable; login is long done by now, so this reload cannot race the
-# tty1 autologin.
+# no Bluetooth controller, but bluetoothd runs correctly with an empty controller set once the kernel
+# Bluetooth core exposes the class directory. Do not invent a fake adapter; zero controllers is a valid
+# dogfood VM state. As of the HW-enablement batch (#2909) bluez is in the BASE image and bluetooth.service
+# is BASE-enabled (multi-user.target.wants) — so it is loadable and STARTED at boot with NO daemon-reload
+# and NO manual `systemctl start` here. Dropping that manual kick is deliberate: it makes the report below
+# reflect TRUE boot-time enablement (the actual fix) instead of masking it. We still modprobe the BT core
+# so the adapterless VM exposes a valid /sys/class/bluetooth, then poll the boot-started unit until settled.
 modprobe bluetooth 2>/dev/null || true
 j=0; while [ "$j" -lt 5 ]; do [ -d /sys/class/bluetooth ] && break; sleep 1; j=$((j + 1)); done
-systemctl daemon-reload 2>/dev/null || true
-systemctl start bluetooth.service 2>/dev/null || true
-# Type=dbus (BusName=org.bluez): the unit is briefly `activating` until bluetoothd claims the name on the
-# system bus. Poll until it settles to active (no adapter is needed for the daemon to run).
+# Type=dbus (BusName=org.bluez): briefly `activating` until bluetoothd claims the bus name. Poll the
+# BOOT-started unit until it settles to active (no adapter is needed for the daemon to run).
 b=0; while [ "$b" -lt 20 ]; do [ "$(systemctl is-active bluetooth.service 2>/dev/null)" = active ] && break; sleep 1; b=$((b + 1)); done
 say "bluetooth hci=[$(ls /sys/class/bluetooth 2>/dev/null | tr '\n' ' ')] settled-after=${b}s"
 
-for u in NetworkManager systemd-resolved bluetooth dbus-broker; do
+# HW-enablement batch (#2909): also report the new base services. systemd-timesyncd should be active
+# (network is up); mbpfan is applesmc-condition-guarded, so on the adapterless/non-Apple VM it stays
+# INACTIVE (condition-skipped, NOT failed — that is the universal-image guard working; it would be active
+# on a real Mac); upower is D-Bus-activated (present, may be inactive until a client calls it).
+for u in NetworkManager systemd-resolved bluetooth dbus-broker systemd-timesyncd mbpfan upower; do
     say "SVC system $u=$(systemctl is-active "$u" 2>/dev/null || echo unknown)"
 done
 say "SVC system user@1000.service=$(systemctl is-active user@1000.service 2>/dev/null || echo unknown)"
