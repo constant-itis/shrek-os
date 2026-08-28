@@ -33,6 +33,9 @@
 # Phase-5 slice-6: the T2 gVisor ExtraTree (pinned runsc ~100MB + busybox rootfs), assembled at build
 # time by scripts/seal-t2-artifacts.sh and sealed via 30-t2-gvisor.conf. Build artifact, not source.
 /image/mkosi.extra.t2/
+# Broadcom b43 Wi-Fi firmware: non-free blobs extracted from the Broadcom wl driver by
+# scripts/stage-b43-firmware.sh (the reproducible recipe IS tracked). Opt-in real-hardware artifact.
+/image/overlay/usr/lib/firmware/b43/
 # Desktop Bootstrap-0: EPHEMERAL staged layer artifacts. ui/ is the source of record (staged into the
 # overlay at build); the Quickshell binary + its Qt QML plugins are build products. The tracked overlay
 # source is only the wrapper, sway.config, and layer marker.
