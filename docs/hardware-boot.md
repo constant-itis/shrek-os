@@ -79,6 +79,28 @@ menuentry "Shrek OS (debug console=tty0)" {
 }
 ```
 
-Boot: hold Option at chime -> "EFI Boot" -> rEFInd -> Shrek OS. Use wired Ethernet (the
-BCM4331 Wi-Fi has no in-image driver). If it still fails, boot the debug entry and read the
-screen.
+Boot: hold Option at chime -> "EFI Boot" -> rEFInd -> Shrek OS. If it stalls, boot the debug
+entry and read the screen.
+
+## 5. Broadcom BCM4331 Wi-Fi (optional, non-free)
+
+The 2012 MacBook's BCM4331 uses the in-kernel `b43` driver, whose firmware is proprietary and
+not in Debian main (Debian's firmware-b43-installer fetches it at install time). To avoid any
+on-device download, `scripts/stage-b43-firmware.sh` extracts it once at build time (from the
+broadcom-wl 5.100.138 `wl_apsta.o` blob via `b43-fwcutter`) into
+`image/overlay/usr/lib/firmware/b43/`, which the base image bakes into the sealed dm-verity
+`/usr` (`ExtraTrees=overlay`). The firmware lives in the ROOT, not the initrd — Wi-Fi is never
+needed to boot — so `b43` loads post-boot when the PCIe device is probed (`bcma` -> `b43`) and
+NetworkManager comes up. `b43`/`bcma` are already in the kernel module set and are not
+blacklisted.
+
+This is OPT-IN and hardware-specific: run the staging script before `build-in-container.sh`
+when targeting Broadcom hardware; a plain build stays firmware-free and universal. The
+extracted blobs are non-free and gitignored (only the staging recipe is tracked). If Wi-Fi is
+unstable on BCM4331 (a known `b43` quirk on this chip), fall back to wired Ethernet.
+
+```
+scripts/stage-b43-firmware.sh          # one-time, before the base build
+INSTALLABLE=1 scripts/build-in-container.sh 1
+# ... then the same payload -> writer-proof -> dd -> rEFInd flow above
+```
