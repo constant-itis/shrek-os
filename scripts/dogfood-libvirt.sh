@@ -13,7 +13,7 @@
 #                          and a normal libvirt NAT virtio NIC for human desktop use.
 #
 # This script only GENERATES + prints import steps — it does NOT define the domain (never mutates the
-# owner's libvirt unprompted). Run on the host (beepboop) where libvirt/virt-manager live.
+# host's libvirt unprompted). Run on the host where libvirt/virt-manager live.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"; mkdir -p out
 

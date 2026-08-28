@@ -1,7 +1,7 @@
 // MenuModel.js — nested-searchable command-menu model for the shrek-menu surface.
 //
 // Ported ~verbatim from Omarchy (basecamp/omarchy shell/plugins/menu/MenuModel.js, MIT) per the
-// menu-engine GO decision (docs/menu-engine.md, mycelium #2806). Pure JS, zero compositor coupling:
+// menu-engine GO decision (docs/menu-engine.md). Pure JS, zero compositor coupling:
 // jsonc parse + default/user merge, tree flatten, fuzzy search/score, route + alias resolve, and the
 // one-subprocess-per-load guard-batch generator for when/checked/disabled expressions.
 //

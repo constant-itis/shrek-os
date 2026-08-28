@@ -248,7 +248,7 @@ separate packages/layers a person adds by need — and can enable per domain.
 | SWAMP SEARCH | extractor + FTS5 | full-text search | opt-in |
 | SWAMP SEMANTIC | embedder + vector store | embeddings, similarity | opt-in |
 | SWAMP RELATE | relater | semantic-map graph | opt-in |
-| SWAMP LIVING | (mycelium engine, adapted) | co-access, decay, reinforcement | **deferred** |
+| SWAMP LIVING | (memory-graph engine, adapted) | co-access, decay, reinforcement | **deferred** |
 
 - **Per-domain enablement.** A person can run the semantic tier over `~/Projects` and metadata-
   only over `~/Media`. The tier config is per-domain, so "better in the areas that need it" is a
@@ -256,7 +256,7 @@ separate packages/layers a person adds by need — and can enable per domain.
 - **Graceful degradation.** A missing tier is skipped by the query planner, which falls to the
   best lower tier ([`filesystem-intelligence.md`](filesystem-intelligence.md) §5). Uninstalling
   the semantic tier makes search less clever, never wrong.
-- **Living-graph upgrade path.** The deferred tier reuses the existing mycelium FOSS engine,
+- **Living-graph upgrade path.** The deferred tier reuses a reference memory-graph FOSS engine,
   adapted to run *inside* `swampd`'s confinement (§5) rather than as a trusted service. The
   record already reserves its fields (§3), so it lands as a behavior migration. Deferred per
   [`filesystem-intelligence.md`](filesystem-intelligence.md) §8 — a self-reinforcing access-
@@ -343,7 +343,7 @@ never depends on it running.
 ## 11. Deferred
 
 - **Living graph** — co-access strengthening, decay, reinforcement; fields reserved in §3,
-  engine is the adapted mycelium FOSS core, gated on its own threat pass
+  engine is the adapted memory-graph FOSS core, gated on its own threat pass
   ([`filesystem-intelligence.md`](filesystem-intelligence.md) §8).
 - **Richer query IPC** — v1 is a simple line/socket read API. A varlink surface and streaming
   results are a later refinement, mirroring the `gatekeeperd` IPC evolution.

@@ -8,7 +8,7 @@ sealed egress/broker spine — adds **no authority**, only a chooser + a launche
 > **dispatcher** that maps name → command, and a **terminal-spawn**. Shrek lifts that *shape* and
 > replaces the *guts*: Omarchy launches the raw CLI with the user's own creds and blind auto-approve;
 > Shrek routes a **task** through `shrek run` → the T2/gVisor wall → a broker over NAME-only egress,
-> the box holding no secret. (Reference for the Omarchy mechanism: mycelium #2813.)
+> the box holding no secret. (The mechanism is lifted from Omarchy: basecamp/omarchy, MIT.)
 
 ---
 
@@ -37,14 +37,14 @@ api-key vs Codex. So the dispatcher is a table mapping a **user-facing provider 
 
 | User picks   | `shrek run --egress` | `coder --provider` | Dials (sealed name)       | Broker / auth model                          | Credential |
 |--------------|----------------------|--------------------|---------------------------|----------------------------------------------|------------|
-| `local`      | `model-local`        | `local`            | `shrek-model:8100`        | direct LAN model (e.g. evo-x2 35B), no broker | none |
+| `local`      | `model-local`        | `local`            | `shrek-model:8100`        | direct LAN model (e.g. a local 35B), no broker | none |
 | `anthropic`  | `model-anthropic`    | `anthropic`        | `shrek-model-proxy:8200`  | `model-proxy` injects the api key + TLS       | `sk-ant-*` (broker-side) |
 | `claude`     | `model-claude-cli`   | `anthropic`        | `shrek-claude-cli:8300`   | `claude-broker` shells the logged-in `claude` CLI | CLI owns it (`claude auth login`) |
 | `codex`      | `model-codex-cli`    | `anthropic`        | `shrek-codex-cli` broker  | `codex-broker` shells the logged-in `codex` CLI | CLI owns it |
 
 Note `claude`/`codex`/`anthropic` all use the SAME `--provider anthropic` wire — only the sealed egress
 name differs. `local` is the only distinct wire. **Fastest path to a working coder on the MBP: `local`
-pointed at evo-x2 (192.168.1.152:8100) — no credential, no cloud, no broker to stand up.**
+pointed at a LAN model server (e.g. a host on `:8100`) — no credential, no cloud, no broker to stand up.**
 
 ## 3. The three pieces (mapped from Omarchy #2813)
 
@@ -116,7 +116,7 @@ bindsym $mod+a exec shrek-agent --pick
 bindsym Mod1+a exec shrek-agent --pick
 ```
 Optional later: a DMS spotlight/menu entry, and — the Omarchy `agents/` panel as **read-only usage
-candy** (mycelium #2813: it launches nothing; it only shows per-provider usage). The launch path is
+candy** (it launches nothing; it only shows per-provider usage). The launch path is
 keybind/CLI-driven, exactly as in Omarchy.
 
 ## 7. Where do the brokers live? — ships with NO model, provides a way to hook one up
@@ -125,7 +125,7 @@ Every broker (`model-proxy`, `claude-broker`, `codex-broker`) is deliberately **
 and `local` needs a model server somewhere too. So each sealed name (`shrek-model`, `shrek-model-proxy`,
 `shrek-claude-cli`, `shrek-codex-cli`) must resolve to a backend the host can reach *by that name*. The
 decisive constraint is that **Shrek OS is universal** — one image ships to anyone, so it cannot bake in
-*any* address (evo-x2, a homelab, a tailnet). **The image ships with NO model wired; it ships a way to
+*any* address (a LAN host, a homelab, a tailnet). **The image ships with NO model wired; it ships a way to
 hook one up.**
 
 **The hook-up (`shrek-connect`).** The sealed image carries the *names* (L0) and the dispatch UX (L4);
@@ -157,7 +157,7 @@ reads — and the answer is nss `files`, i.e. `/etc/hosts`:
 
 **Broker placement is now the user's call, per install, and orthogonal to the image:**
 - **`local`** — point it at any OpenAI-wire model server you can reach: `shrek-connect local
-  192.168.1.152` (LAN) or a tailnet `100.x`. No credential, no broker. This is the loop-proving path.
+  <lan-ip>` (LAN) or a tailnet address. No credential, no broker. This is the loop-proving path.
 - **Credentialed (`anthropic`/`claude`/`codex`)** — run the broker somewhere reachable (a homelab box,
   or later a co-located broker on the trusted plane, the deferred slice-5 standalone case) and
   `shrek-connect` that provider at it. The dispatcher is identical either way; only the address differs.
@@ -205,11 +205,11 @@ oracles. The dispatcher only needs to prove it hands them the right args over a 
 
 ## 11. Open questions for the owner
 
-1. ~~**Broker placement for the MBP**~~ — RESOLVED (§7): (a) homelab-over-Tailscale (mycelium #2814).
+1. ~~**Broker placement for the MBP**~~ — RESOLVED (§7): (a) homelab-over-Tailscale.
 2. **Interactive vs one-shot** — v1 is `coder --task` (bounded, walled). A REPL/`--resume` feel is
    Phase-6 slice-7 (deferred). Ship one-shot first?
 3. **Picker surface** — v1 `foot`+`fzf`/`read`, upgrade to `dms ipc` spotlight later? Or wire the menu
-   engine (docs/omarchy-portability.md Appendix) and make agent-pick one of its provider-backed submenus?
+   engine (the Omarchy-derived menu surface) and make agent-pick one of its provider-backed submenus?
 4. ~~**`local` endpoint**~~ — RESOLVED (§7): the image is endpoint-agnostic and bakes NO address; the
    user binds `shrek-model` (and any broker) per-install with `shrek-connect`, on the writable `/home`
    plane. Ships with no model wired.
@@ -218,4 +218,4 @@ oracles. The dispatcher only needs to prove it hands them the right args over a 
 
 *Companion to docs/phase6-slice3-provider-abstraction.md (the wire seam),
 docs/phase6-slice4-claude-cli-broker.md + slice5-claude-login-ux.md (the sub broker + login),
-docs/omarchy-portability.md (the shape lifted). Mechanism source: mycelium #2813.*
+and Omarchy (basecamp/omarchy, MIT — the menu shape lifted).*

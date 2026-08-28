@@ -1,4 +1,4 @@
-// shrek-menu — shrek-owned standalone command surface (docs/menu-engine.md; mycelium menu-engine GO decision).
+// shrek-menu — shrek-owned standalone command surface (docs/menu-engine.md; menu-engine GO decision).
 //
 // A SEPARATE `qs` process, NOT a DMS plugin and NOT spliced into DMS's tree: DMS's plugin schema has no
 // surface type and plugins can't make a top-level PanelWindow, and quickshell IPC target names are scoped
@@ -31,7 +31,7 @@ ShellRoot {
     // `import qs.Common` DMS's Theme singleton — a second qs process is blackholed by quickshell's
     // per-instance qs:// URL interceptor — so this surface reads the same file itself. The write is atomic
     // (matugen stages a .tmp then renames), so a watched read never sees a partial file. Schema verified
-    // live against dms=1.5.3db1 (mycelium #2819): { colors: { dark|light: { <M3 key>: "#rrggbb" } }, dank16 }.
+    // live against dms=1.5.3db1: { colors: { dark|light: { <M3 key>: "#rrggbb" } }, dank16 }.
     readonly property string colorMode: "dark"   // shipped image is dark; DMS defaults to dark too.
 
     property var dmsColors: ({})

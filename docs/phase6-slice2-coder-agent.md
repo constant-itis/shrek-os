@@ -98,7 +98,7 @@ model-local  →  { host: "shrek-model", proto: tcp, port: 8100 }   // exactly o
 - **acceptance gate:** a deterministic canned HTTP responder the harness stands up at that address
   (mirrors `p6-egress-proof` mapping `github-https`→a local server). Fixed replies ⇒ a fixed sequence
   of tool-calls ⇒ reproducible expected output. No LLM in the gate.
-- **`--live` smoke:** `shrek-model` maps to the real local 35B (`192.168.1.152:8100`, LAN, no auth,
+- **`--live` smoke:** `shrek-model` maps to a real local 35B (`<lan-host>:8100`, LAN, no auth,
   standard `chat/completions` API). Informational / non-gating — same coder binary, same protocol
   path, only the backing server differs.
 
@@ -148,7 +148,7 @@ toolchain in the rootfs, so the cargo-rootfs track stays parked.
   - **A5** the wall holds during a *model-driven* session: vault ENOENT, host sentinel absent, and a
     non-`model-local` dst (e.g. `1.1.1.1:53`) is DROPPED even though egress is up.
   - **A6** fail-closed: harness digest absent ⇒ `T-hostile` ⇒ refuse, the coder never runs.
-- **`--live` smoke — same script, `LIVE=1`:** maps `shrek-model`→`192.168.1.152:8100`, runs the same
+- **`--live` smoke — same script, `LIVE=1`:** maps `shrek-model`→`<lan-host>:8100`, runs the same
   binary against the real 35B, prints the transcript. Informational; a model that "solves it
   differently" is not a gate failure.
 - **Unit tests (`crates/coder`):** the JSON request builder, the tool-call parser (incl. malformed ⇒

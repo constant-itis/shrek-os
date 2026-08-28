@@ -29,12 +29,12 @@ ACCEPTANCE TEST (breaks the base tie — base-selection.md ADR-001):
 
 ## 0. Build-environment decision (settled — see host survey 2026-08-17)
 
-**beepboop cannot build this in place**, and we will not mutate it to try. It is Pop!_OS 22.04
+**The build host cannot build this in place**, and we will not mutate it to try. It is Pop!_OS 22.04
 on **systemd 249**; `mkosi`, `systemd-repart`, `ukify`, `mokutil`, `bootc`, `mkfs.erofs` are all
 absent, and 249 is too old for the repart/ukify sealing workflow (needs ≥ 254). Installing that
 stack onto a daily-driver desktop violates the safe-change + minimal-deps rules.
 
-What beepboop *does* have, and what we use instead:
+What the build host *does* have, and what we use instead:
 
 ```
 cargo/rustc 1.95     → build + compile-check the Rust control plane locally (no container needed)
@@ -44,7 +44,7 @@ docker 28.3          → BUILD the image inside a Debian TRIXIE container (mkosi
 452 G free on /home  → ample for image artifacts
 ```
 
-**Rule for the whole spike: no build tooling is installed on the beepboop host.** mkosi/ukify/
+**Rule for the whole spike: no build tooling is installed on the build host.** mkosi/ukify/
 repart run inside the trixie build container; boots happen in disposable VMs.
 
 ---

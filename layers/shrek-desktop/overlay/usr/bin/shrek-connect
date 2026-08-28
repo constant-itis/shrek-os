@@ -18,7 +18,7 @@
 #   shrek-connect --forget <provider>   remove a binding (back to unwired)
 #
 #   provider ids: local | anthropic | claude | codex
-#   addr: reachable from THIS host — a LAN IP (192.168.x.y), a tailnet 100.x, a hostname, whatever.
+#   addr: reachable from THIS host — a LAN IP, a tailnet address, a hostname, whatever.
 #         `local` is the no-credential path (your own OpenAI-wire model server); the rest need a broker.
 set -eu
 

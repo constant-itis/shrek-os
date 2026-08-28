@@ -176,8 +176,8 @@ fn decode_response(resp: &[u8], n: usize, dim: u32) -> Result<Vec<Vec<f32>>, Emb
 //
 // Stable, reproducible boundaries that are a pure function of the object's extracted text, so re-chunking
 // after an edit is idempotent and chunk identity (object_id, ordinal) is stable. Windows are sized in
-// CHARS (never splitting a UTF-8 boundary) to stay safely under the provider's token cap — the mycelium
-// bakeoff saw ~11% of DENSE docs exceed EmbeddingGemma's 2048-token cap at ~1.28 tok/char, so a ~1200-
+// CHARS (never splitting a UTF-8 boundary) to stay safely under the provider's token cap — a prior
+// retrieval bakeoff saw ~11% of DENSE docs exceed EmbeddingGemma's 2048-token cap at ~1.28 tok/char, so a ~1200-
 // char window (~1500 tokens worst case) leaves margin. A fixed overlap preserves cross-boundary context.
 
 const CHUNK_CHARS: usize = 1200;
@@ -245,12 +245,12 @@ mod tests {
     #[test]
     fn semantic_version_string_is_stable_and_joined() {
         let id = BackendIdentity {
-            provider_id: "evo-x2-lan".into(),
+            provider_id: "local-lan".into(),
             model_id: "embeddinggemma-300m".into(),
             dim: 768,
             version: 1,
         };
-        assert_eq!(id.semantic_version(), "evo-x2-lan|embeddinggemma-300m|768|1");
+        assert_eq!(id.semantic_version(), "local-lan|embeddinggemma-300m|768|1");
     }
 
     #[test]

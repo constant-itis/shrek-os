@@ -129,13 +129,13 @@ fn open_persistent_index(cfg: &Config) -> Index {
 /// network; the proxy reaches the LAN provider over the gated egress plane (slice-4 §1.2/§1.3).
 ///
 ///   SWAMP_EMBED_SOCKET   proxy socket path (presence enables the tier)
-///   SWAMP_EMBED_PROVIDER provider id  (default evo-x2-lan)
+///   SWAMP_EMBED_PROVIDER provider id  (default local-lan)
 ///   SWAMP_EMBED_MODEL    model id     (default embeddinggemma-300m)
 ///   SWAMP_EMBED_DIM      vector dim   (default 768 — the live EmbeddingGemma-300M)
 fn build_backend() -> Option<embed::SocketBackend> {
     let sock = std::env::var("SWAMP_EMBED_SOCKET").ok().filter(|s| !s.is_empty())?;
     let identity = embed::BackendIdentity {
-        provider_id: env_or("SWAMP_EMBED_PROVIDER", "evo-x2-lan"),
+        provider_id: env_or("SWAMP_EMBED_PROVIDER", "local-lan"),
         model_id: env_or("SWAMP_EMBED_MODEL", "embeddinggemma-300m"),
         dim: env_or("SWAMP_EMBED_DIM", "768").parse::<u32>().unwrap_or(768),
         version: SEMANTIC_INTERFACE_VERSION,

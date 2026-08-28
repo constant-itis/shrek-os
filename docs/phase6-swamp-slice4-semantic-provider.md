@@ -53,7 +53,7 @@ Three failure asymmetries this slice must preserve, all in the SAFE direction:
 - `swampd` — the most dangerous process in the system (`swamp.md` intro): reads everything on its
   allow-set, unprivileged, Landlocked, availability-plane, **currently makes zero outbound network
   connections** (`confine.rs` `handled_access_net: 0`; query socket is unix-domain).
-- The **embedding provider** (EVO-X2 / LAN) — **untrusted for authority.** It scores; it never widens
+- The **embedding provider** (a LAN host) — **untrusted for authority.** It scores; it never widens
   scope. It is reached over a **gated egress plane**, never trusted to hold or return authority.
 - A **caller** (coder T2 session, `shrek find`) — reaches the query API only through the broker with a
   kernel-attested session; never supplies its own identity or scope.
@@ -115,7 +115,7 @@ destination — reopening exactly the side channel §5 confinement exists to clo
 **local unix socket** (`/run/swamp-embed.sock`) named by a **sealed provider-profile**. An **off-image,
 broker-side** `swamp-embed-proxy` (new crate, excluded from workspace `default-members` — mirrors
 `crates/model-proxy`) is the only party that reaches the LAN provider, and only the sealed
-provider-profile destination (`evo-x2:8102`), pinned by the same **deny-by-default egress plane** as
+provider-profile destination (`<embedding-host>:8102`), pinned by the same **deny-by-default egress plane** as
 slice-1b (`docs/phase6-slice1b-egress.md`: named-egress, fail-closed A-record pin, drop-everything-else).
 swampd's `handled_access_net` stays `0`. The base links **no HTTP client, no TLS, no DNS egress.**
 
@@ -214,13 +214,13 @@ recommendations below.
 
 | # | Fork | Options | Recommended | Amends |
 |---|------|---------|-------------|--------|
-| **F1** | Provider channel topology | (a) swampd dials `evo-x2:8102` directly; (b) swampd → local unix socket → **off-image `swamp-embed-proxy`** → provider over the gated egress plane | **(b)** — base stays network-free & HTTP-dep-free; mirrors `model-proxy`; T4 mitigation | — |
+| **F1** | Provider channel topology | (a) swampd dials `<embedding-host>:8102` directly; (b) swampd → local unix socket → **off-image `swamp-embed-proxy`** → provider over the gated egress plane | **(b)** — base stays network-free & HTTP-dep-free; mirrors `model-proxy`; T4 mitigation | — |
 | **F2** | Similarity search structure | (a) global ANN (HNSW/IVF) filtered-after; (b) **scope-first brute-force cosine** over the candidate set | **(b)** — authority-before-vector by construction (T1); ANN deferred, scope-partitioned if ever | — |
 | **F3** | Vector store | (a) separate vector DB (Chroma/FAISS — new heavy dep + separate store); (b) **extend the `/var/lib/swamp` SQLite** with `chunks`/`vectors` BLOB tables | **(b)** — zero new crates; light-by-default (empty tables on a core install) | **`swamp.md` §4** ("separate vector store" → separate *logical tables* in the same SQLite; a metadata/FTS install carries none of their weight) |
 | **F4** | Availability signal | (a) overload `freshness`; (b) **distinct additive `semantic available\|unavailable` header** | **(b)** — orthogonal to freshness (a FRESH index can be semantic-unavailable); both index-global, no existence oracle | wire proto §4 |
 | **F5** | Chunk identity | (a) content-hash id; (b) **`(object_id, ordinal)` + stored `text_hash`** for idempotent skip | **(b)** — stable across edits; ties to the object record; incremental re-embed | — |
-| **F6** | Hybrid fusion | (a) equal-weight RRF; (b) **semantic-led, lexical as exact-match booster** | **(b)** — prior art: mycelium bakeoff proved equal-weight RRF drags semantic down (hybrid 62% < semantic 90%) | — |
-| **F7** | First backend | (a) stand up a new endpoint; (b) **consume the already-live `evo-x2:8102` EmbeddingGemma-300M** | **(b)** — verified live this session: OpenAI-compatible `/v1/embeddings`, **dim=768**, permanent `embed-gemma.service`, reboot-durable, up in both GPU modes | — |
+| **F6** | Hybrid fusion | (a) equal-weight RRF; (b) **semantic-led, lexical as exact-match booster** | **(b)** — prior art: a retrieval bakeoff proved equal-weight RRF drags semantic down (hybrid 62% < semantic 90%) | — |
+| **F7** | First backend | (a) stand up a new endpoint; (b) **consume an already-live `<embedding-host>:8102` EmbeddingGemma-300M** | **(b)** — verified live this session: OpenAI-compatible `/v1/embeddings`, **dim=768**, permanent `embed-gemma.service`, reboot-durable, up in both GPU modes | — |
 
 ## 4. The backend interface (in-base, versioned)
 
@@ -237,7 +237,7 @@ SocketBackend  — frames chunks to /run/swamp-embed.sock (the sealed provider-p
 NullBackend    — no provider configured ⇒ identity absent ⇒ semantic=unavailable, FTS floor only.
 ```
 
-The **first real backend** is `provider_id=evo-x2-lan`, `model_id=embeddinggemma-300m`, `dim=768`,
+The **first real backend** is `provider_id=local-lan`, `model_id=embeddinggemma-300m`, `dim=768`,
 reached through `swamp-embed-proxy` (off-image) over the gated egress plane. The interface is *two
 concrete implementations forcing the seam*, **not a plugin framework** (same discipline as the coder's
 provider seam, `phase6-slice3-provider-abstraction.md` §6).
@@ -269,7 +269,7 @@ meta: 'semantic_version' = provider_id|model_id|dim|schema  → on mismatch, wip
   `delete_subtree` / `prune_absent`) drops its chunks AND vectors, so "deletion really removes content"
   extends to the semantic tier (slice-3 guarantee, preserved).
 - **Deterministic chunking:** fixed char/token window (target ≤ ~1024 tokens to stay safely under
-  EmbeddingGemma's 2048-token cap — the mycelium bakeoff saw ~11% of *dense* docs exceed 2048 at 1.28
+  EmbeddingGemma's 2048-token cap — a retrieval bakeoff saw ~11% of *dense* docs exceed 2048 at 1.28
   tok/char) with fixed overlap; boundaries are a pure function of the object's bytes, so re-chunking is
   reproducible and chunk IDs are stable.
 - The scoped semantic query JOINs `vectors → chunks → objects` under the **same scope+domain predicate**
@@ -368,7 +368,7 @@ the VM. The re-seal must rebuild the default-member swampd AND re-run `seal-t2-a
 note), else the gate flags a stale seal. → owner-split commit ◻ → dual-gh ◻ → graph baseline #7 ◻.
 
 Also proven this build: a **LIVE round-trip** of the real `swamp-embed-proxy` against the production
-`evo-x2:8102` EmbeddingGemma-300M returned 2×768-dim vectors through swampd's exact binary framing
+the `<embedding-host>:8102` EmbeddingGemma-300M returned 2×768-dim vectors through swampd's exact binary framing
 (non-gating smoke, confirms the first real backend end-to-end).
 
 The in-base / off-image split, restated (hold it firmly):
@@ -376,5 +376,5 @@ The in-base / off-image split, restated (hold it firmly):
 IN-BASE   (default-member → on-image → VM re-seal):  EmbeddingBackend trait, SocketBackend/NullBackend,
           chunks+vectors tables, cosine, `semantic` header, FTS floor. Zero new crates.
 OFF-IMAGE (optional extension, excluded from default-members): swamp-embed-proxy (HTTP client to the
-          gated provider), the EVO-X2 EmbeddingGemma runtime. Never in the sealed image.
+          gated provider), the LAN EmbeddingGemma runtime. Never in the sealed image.
 ```

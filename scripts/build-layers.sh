@@ -12,7 +12,7 @@
 #   scripts/build-layers.sh tamper    signed sysext with a flipped byte (verity fails) → should be REFUSED (L3b, O3)
 #
 # Runs mkosi in an ephemeral --privileged debian:trixie container (loop devices for the DDI + verity);
-# the beepboop host stays untouched. Reuses the throwaway Shrek key from scripts/build-in-container.sh.
+# the build host stays untouched. Reuses the throwaway Shrek key from scripts/build-in-container.sh.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"

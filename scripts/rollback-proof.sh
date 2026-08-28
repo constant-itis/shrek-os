@@ -13,7 +13,7 @@
 #                                                and falls back to v1. Final steady state = v1 (IMAGE_VERSION=1) = ROLLBACK.
 #
 # Everything runs in ephemeral debian:trixie containers (build/update) + a throwaway KVM VM (boot);
-# the beepboop host is never mutated. Builds are ~10 min each — set REBUILD=0 to reuse out/ artifacts.
+# the build host is never mutated. Builds are ~10 min each — set REBUILD=0 to reuse out/ artifacts.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"

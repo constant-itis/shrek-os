@@ -52,7 +52,7 @@ The filesystem is understood through three maps over the same objects. A query m
 two, or all three. They are layered, not alternatives.
 
 ```
-PHYSICAL MAP     where the bytes are        /home/sebastian/Projects/shrek-os/docs/isolation.md
+PHYSICAL MAP     where the bytes are        /home/user/Projects/shrek-os/docs/isolation.md
                  path · inode · mount · size · mtime · owner · mode
 
 STRUCTURAL MAP   how it is organized        project → docs → security docs → isolation.md
@@ -79,8 +79,8 @@ The Unix hierarchy is where bytes live, not how a person thinks. One project is 
 scattered:
 
 ```
-/home/sebastian/Projects/shrek-os      source
-/home/sebastian/Documents/Shrek notes  documentation
+/home/user/Projects/shrek-os           source
+/home/user/Documents/Shrek notes       documentation
 /mnt/nas/shrek-assets                  assets
 ```
 
@@ -252,7 +252,7 @@ personal-memory app you install and feed. **Shrek's intelligence layer deliberat
 that, and cannot be, without voiding the security model.**
 
 ```
-mycelium-style trusted app          Shrek filesystem intelligence
+memory-graph trusted app            Shrek filesystem intelligence
 ────────────────────────            ─────────────────────────────
 you HAND it your data               it is a SUBJECT of the kernel policy
 trusted to hold everything          Landlocked default-deny; physically cannot open ~/Vault
@@ -285,7 +285,7 @@ that would let that brain read outside the kernel fence.
   of §2 is static at v1: edges are derived from content and structure, not from access
   behavior. The *fields* for a living graph — edge weights, co-access counts, last-access
   timestamps — are reserved in the object record now (`swamp.md` §3) but inert. The upgrade
-  path is the existing mycelium FOSS engine, adapted to run *inside* `swampd`'s confinement
+  path is a reference memory-graph FOSS engine, adapted to run *inside* `swampd`'s confinement
   rather than as a trusted service (§7). Deferred because a self-reinforcing graph means
   `swampd` writes behavioral data about the human's access patterns — itself an asset an
   adversary would want — and that surface earns its own threat pass before it ships.

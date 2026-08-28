@@ -2,7 +2,7 @@
 # coder-audit.sh — a SECOND, decorrelated pass over a draft produced by the local coder tier
 # (askcoder / Qwen3-Coder-Next). The coder is smart-but-junior and makes RECURRING classes of
 # mistakes; this pass audits specifically for those classes instead of asking "is this good?"
-# (a same-model "is this good" pass inherits the same blind spots — mycelium #2073).
+# (a same-model "is this good" pass inherits the same blind spots).
 #
 # The KNOWN-DEFECTS list below is the "brain": the encoded memory of where the junior slips.
 # APPEND to it whenever a new recurring class is found — that is what makes the audit compound.

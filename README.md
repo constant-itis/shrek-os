@@ -49,7 +49,7 @@ demoted from *foundation* to *laboratory*.
 The LFS build is a **frozen artifact**: built once, understood, documented, pinned. It is
 NOT a living parallel distro and NOT in production CI. If it teaches us something, we port
 the lesson to the product image — never the code. This preserves the reason we liked LFS
-(bottom-up understanding of what Shrek stands on) without making Sebastian the personal
+(bottom-up understanding of what Shrek stands on) without making the maintainer the personal
 security-advisory-response-team and package repository for a full distribution forever.
 
 See [`docs/base-selection.md`](docs/base-selection.md) (ADR-001) for why Debian

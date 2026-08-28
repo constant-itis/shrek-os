@@ -2,7 +2,7 @@
 # Shrek OS Phase-1 — S6 (the core acceptance gate): boot the signed + dm-verity-sealed image in a
 # throwaway KVM VM under OVMF Secure Boot, headless, serial captured to out/vm-console.log.
 #
-# Runs qemu INSIDE a debian:trixie container (modern qemu + ovmf, /dev/kvm passthrough) so beepboop
+# Runs qemu INSIDE a debian:trixie container (modern qemu + ovmf, /dev/kvm passthrough) so the build host
 # stays untouched — same hermetic pattern as scripts/build-in-container.sh.
 #
 # BOOT CYCLE: first boot, OVMF is in SETUP MODE (blank OVMF_VARS) → systemd-boot auto-enrolls the

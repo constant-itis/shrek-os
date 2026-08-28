@@ -1,9 +1,8 @@
 # Menu engine — a shrek-owned command surface
 
 Bringing Omarchy's nested-searchable command-menu into Shrek OS as a **shrek-owned standalone
-Quickshell surface** launched alongside DMS. Feasibility (GO) and the port breakdown are in
-`docs/omarchy-portability.md` (Appendix); this doc records the **resolved architecture** after the
-spike and is the build reference going forward.
+Quickshell surface** launched alongside DMS. The upstream is Omarchy's menu (basecamp/omarchy, MIT);
+this doc records the **resolved architecture** after the spike and is the build reference going forward.
 
 ## Status
 

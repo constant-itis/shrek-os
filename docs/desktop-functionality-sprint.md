@@ -45,7 +45,7 @@ Confirmed missing → dead widgets:
   findings. Do this first.
 - [x] **S1 · Power / session (polkit)** *(S)* — **DONE** (dogfood-verified + interactive: Off powers off).
   `polkitd` alone was **not** enough — the sealed image breaks packaged-daemon integration in three
-  places, all now handled (see the build-model reference in mycelium): (1) `polkit.service` runs
+  places, all now handled (see the build-model notes): (1) `polkit.service` runs
   `User=polkitd`, but a layer's `sysusers.d` applies after `systemd-sysusers` and runtime `/etc` is a
   read-only confext overlay, so the user is **baked into the base `/etc`** at build (`image/mkosi.postinst`,
   uid/gid 701) alongside the `/etc/polkit-1/rules.d` dir; (2) the layer's `polkit.service` + dbus

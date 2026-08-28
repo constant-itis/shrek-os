@@ -47,7 +47,7 @@ installing a different OS.
 `ADOPT` = ship an existing component configured to a standard contract. `BUILD` = we author it.
 `DEFINE` = a real component exists to adopt, but **no cross-implementation contract does**, so
 swappability is by *our own* convention (a systemd user unit + our config schema), not a standard.
-Both rungs grounded by research 2026-08-18 (mycelium #2542 terminal, #2544 Wayland).
+Both rungs grounded by research 2026-08-18 (terminal + Wayland prior art).
 
 | Role | Contract (the seam) | Rung 1 (TTY) | Rung 2 (Wayland) |
 | --- | --- | --- | --- |

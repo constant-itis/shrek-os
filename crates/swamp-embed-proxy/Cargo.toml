@@ -8,7 +8,7 @@ edition.workspace = true
 # It is NOT sealed into the appliance image and is NOT a control plane. It runs BROKER-SIDE, outside the
 # sealed base: swampd speaks a tiny PLAINTEXT length-prefixed binary framing to this proxy over a LOCAL
 # unix socket (the sealed provider-profile channel), and ONLY this process reaches the LAN embedding
-# provider (evo-x2:8102 EmbeddingGemma) over the gated egress plane. That split keeps swampd — the most
+# provider (the embedding host:8102, e.g. EmbeddingGemma) over the gated egress plane. That split keeps swampd — the most
 # dangerous process in the system — network-free (handled_access_net=0): no HTTP client, no model
 # weights, no inference deps in the base (§1.3). Mirrors crates/model-proxy, but the provider is
 # PLAINTEXT LAN HTTP (no auth, no secret), so this crate carries NO TLS tree — its one dependency is

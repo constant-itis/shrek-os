@@ -8,7 +8,7 @@
 # but the coder binary talking to a model.
 #
 # The model is a DETERMINISTIC canned HTTP responder (fixed tool-call sequence ⇒ reproducible outputs);
-# LIVE=1 instead points `shrek-model` at the real local 35B (192.168.1.152:8100) — same coder binary,
+# LIVE=1 instead points `shrek-model` at a real local model server (a LAN host:8100) — same coder binary,
 # same protocol path, only the backing server changes (informational, non-gating).
 #
 # What only a real run can show (unit tests cover the pure parser/loop pieces):
@@ -25,9 +25,10 @@ set -uo pipefail
 PIN_SHA256="670bcd3cbc103f00d8bb5098edc370f32397ee4c134231436bafa659bb3c068e"
 PIN_URL="https://storage.googleapis.com/gvisor/releases/release/20260810.0/x86_64/runsc"
 LIVE="${LIVE:-0}"
-# The real local 35B endpoint for the LIVE smoke (recalled infra; LAN, no auth). shrek-model resolves
+# The local model endpoint for the LIVE smoke (a LAN host, no auth). shrek-model resolves
 # here when LIVE=1; the deterministic gate maps it to the in-oracle canned responder instead.
-LIVE_MODEL_IP="${LIVE_MODEL_IP:-192.168.1.152}"
+# Override for your own setup: LIVE_MODEL_IP=<your LAN model host>.
+LIVE_MODEL_IP="${LIVE_MODEL_IP:-127.0.0.1}"
 
 if [ "${IN_CONTAINER:-0}" != "1" ]; then
   REPO_ROOT="$(git rev-parse --show-toplevel)"
@@ -47,7 +48,7 @@ if [ "${IN_CONTAINER:-0}" != "1" ]; then
   # Default bridge for BOTH gate and live: the deterministic gate reaches its in-netns responder, and
   # for the live smoke the container reaches the real LAN model via docker's normal NAT egress — the
   # sandbox→eth0 forward stays INSIDE the container netns (plane policy accept), so it never crosses
-  # beepboop's host FORWARD DROP (the #2651 blocker that `--network host` exposed). No host firewall
+  # the host's FORWARD DROP (a blocker that `--network host` exposed). No host firewall
   # mutation. (SHREK_FWD_ALLOW remains the documented opt-in if a host needs the explicit ACCEPT.)
   echo "=== launching privileged debian:trixie oracle (LIVE=$LIVE) ==="
   exec docker run --rm --privileged --cgroupns=private \

@@ -3,7 +3,7 @@
 //! network-free and speaks a tiny plaintext binary framing to this proxy over a LOCAL unix socket.
 //!
 //! ```text
-//!  swampd  --unix socket, binary framing-->  swamp-embed-proxy  --plaintext HTTP-->  evo-x2:8102
+//!  swampd  --unix socket, binary framing-->  swamp-embed-proxy  --plaintext HTTP-->  embedding host:8102
 //!  (no network, no http, no model)           (this process: HTTP + JSON)            (EmbeddingGemma)
 //! ```
 //!
@@ -15,7 +15,7 @@
 //!
 //! Env (broker-side operational config; NEVER caller-influenced):
 //!   SWAMP_EMBED_SOCKET    unix socket to listen on          (default /run/swamp-embed.sock)
-//!   SWAMP_EMBED_UPSTREAM  provider host:port                (default 192.168.1.152:8102)
+//!   SWAMP_EMBED_UPSTREAM  provider host:port                (default 127.0.0.1:8102)
 //!   SWAMP_EMBED_MODEL     model id sent to /v1/embeddings   (default embeddinggemma-300m)
 //!   SWAMP_EMBED_PATH      request path                      (default /v1/embeddings)
 
@@ -27,7 +27,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use tinyjson::JsonValue;
 
 const DEFAULT_SOCKET: &str = "/run/swamp-embed.sock";
-const DEFAULT_UPSTREAM: &str = "192.168.1.152:8102";
+const DEFAULT_UPSTREAM: &str = "127.0.0.1:8102";
 const DEFAULT_MODEL: &str = "embeddinggemma-300m";
 const DEFAULT_PATH: &str = "/v1/embeddings";
 
@@ -312,7 +312,7 @@ mod tests {
 
     #[test]
     fn hostport_and_status_helpers() {
-        assert_eq!(split_hostport("192.168.1.152:8102"), Some(("192.168.1.152".to_string(), 8102)));
+        assert_eq!(split_hostport("127.0.0.1:8102"), Some(("127.0.0.1".to_string(), 8102)));
         assert_eq!(split_hostport("noport"), None);
         assert_eq!(status_code(b"HTTP/1.1 200 OK\r\n\r\n"), Some(200));
         assert_eq!(status_code(b"HTTP/1.1 503 x\r\n"), Some(503));

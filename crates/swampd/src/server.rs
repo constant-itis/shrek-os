@@ -202,7 +202,7 @@ impl<'a> Server<'a> {
     }
 }
 
-/// Semantic-led fusion (slice-4 Fork F6 — the mycelium bake-off proved equal-weight RRF drags a strong
+/// Semantic-led fusion (slice-4 Fork F6 — a prior retrieval bake-off proved equal-weight RRF drags a strong
 /// semantic ranking DOWN). Lead with the semantic order, then append lexical hits not already present as
 /// the exact-match booster/floor. Deduped by path, capped at `limit`. Both inputs already passed the
 /// SAME authority gate, so their union is authorized by construction.

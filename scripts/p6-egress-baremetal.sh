@@ -22,7 +22,7 @@
 #   sudo bash scripts/p6-egress-baremetal.sh
 #
 # HOST-HARDENING ACCEPTANCE (slice-6 / P6-1c): a hardened host mounts /run `noexec` (Pop!_OS/CIS
-# default — beepboop). gatekeeperd now stages the per-sandbox T2 rootfs on its OWN fresh exec tmpfs
+# default). gatekeeperd now stages the per-sandbox T2 rootfs on its OWN fresh exec tmpfs
 # (t2_plane::construct → mount_plane::stage_tmpfs) instead of inheriting /run's flags, so the guest's
 # PROT_EXEC map + gVisor's setup-root no longer depend on /run being exec. This smoke therefore does
 # NOT shadow /run/shrek-t2 anymore — running it on a noexec /run is the whole point: a green BM1 here

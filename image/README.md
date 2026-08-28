@@ -1,7 +1,7 @@
 # image/ — Phase-1 mkosi image definition (skeleton)
 
 The build runs **inside a Debian trixie container** (mkosi + modern systemd live there; the
-beepboop host stays untouched — see [`../docs/phase1-spike.md`](../docs/phase1-spike.md) §0).
+build host stays untouched — see [`../docs/phase1-spike.md`](../docs/phase1-spike.md) §0).
 
 ## Layout
 

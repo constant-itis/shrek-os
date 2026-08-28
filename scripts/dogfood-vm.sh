@@ -13,7 +13,7 @@
 # then greps the serial log for those lines to produce the M1 PASS/FAIL verdict.
 #
 # Runs qemu inside an ephemeral --privileged debian:trixie container (/dev/kvm passthrough), same
-# hermetic pattern as scripts/boot-vm.sh — beepboop stays untouched.
+# hermetic pattern as scripts/boot-vm.sh — the build host stays untouched.
 #
 # Prereqs (run first): scripts/build-desktop-layer.sh ; DOGFOOD=1 scripts/build-in-container.sh 1 ;
 #                      INCLUDE_DEV=1 scripts/build-layers.sh desktop   (produces out/layer-store.raw)

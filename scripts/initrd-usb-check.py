@@ -11,7 +11,7 @@
 # a nonsense result, since the VM boots with dm-verity. If you see that contradiction, it is the DECODER
 # that is wrong, not the initrd: this tool scans for each zstd frame magic and decodes all frames.
 #
-# Requires python3-zstandard + binutils(objcopy). The beepboop host lacks python3-zstandard, so run in a
+# Requires python3-zstandard + binutils(objcopy). If the build host lacks python3-zstandard, run in a
 # throwaway container:
 #   docker run --rm -v $PWD/out/shrek_1_x86-64.efi:/uki.efi:ro -v $PWD/scripts/initrd-usb-check.py:/c.py:ro \
 #     debian:trixie bash -c 'apt-get update -qq && apt-get install -y -qq python3-zstandard binutils && python3 /c.py /uki.efi'

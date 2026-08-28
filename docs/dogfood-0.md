@@ -76,7 +76,7 @@ Derived from what building this workspace actually requires (verified 2026-08-21
 - Explicitly **excluded** from Dogfood-0: mkosi/qemu/docker (image construction), heavy IDEs. Add only
   if a later dogfood workload empirically needs them.
 
-The toolchain manifest is **inventory-derived from the owner's actual workstation** (beepboop) so the
+The toolchain manifest is **inventory-derived from the maintainer's actual workstation** so the
 layer reflects real usage, then **pinned** so the layer is reproducible.
 
 ## Milestones (in order)
