@@ -50,10 +50,39 @@ internal NVMe/SATA disk — `lsblk -o NAME,SIZE,RM,MODEL`, expect `RM=1`):
 sudo dd if=out/install0-target-<name>.raw of=/dev/sdX bs=4M status=progress conv=fsync
 ```
 
-## 4. Apple firmware: rEFInd shim
+Verify the flash before trusting it — `dd` exiting 0 does not mean the bytes landed. Cheap USB
+2.0 sticks silently drop bits, and dm-verity fails the whole boot on a single bad block (it
+lands in emergency mode with `device-mapper: verity: reached maximum errors`). Read the stick
+back over its own USB path and check both verity partitions against the roothash (the roothash
+is in the sealed cmdline — `objcopy --only-section=.cmdline` on the UKI, or `grep roothash=` the
+staged `shrek-cmdline.txt`):
 
-2012-era Mac firmware hangs on systemd-boot directly. rEFInd boots fine and chainloads the
-UKI. `dd` wipes the ESP, so reinstall rEFInd on the stick's ESP (partition 1) after writing:
+```
+sudo veritysetup verify /dev/sdX2 /dev/sdX3 <roothash>
+```
+
+Run the source image as a control the same way (`losetup -fP out/install0-target-<name>.raw`,
+then `veritysetup verify <loop>p2 <loop>p3 <roothash>`) — the control must pass, so a stick
+failure means the media, not the command. If the stick fails, re-`dd` and re-verify; a second
+failure means the drive is bad — use a different stick (ideally USB 3.0).
+
+## 4. Apple firmware: rEFInd shim + loose kernel/initrd
+
+Old Apple firmware fails the UKI in two independent ways, so booting it needs both a loader
+shim and a change in how the initrd is delivered:
+
+1. **systemd-boot won't run** — 2012-era Mac firmware hangs on `systemd-bootx64.efi`. rEFInd
+   runs fine and chainloads from the ESP, so install rEFInd as the removable-media loader.
+2. **The UKI's embedded initrd is never delivered** — even launched via rEFInd, pointing at the
+   whole UKI (`loader /EFI/Linux/shrek_1_x86-64.efi`) boots the kernel with *no initrd* and
+   panics `Kernel panic - not syncing: No working init found`. systemd-stub hands the embedded
+   initrd to the kernel through the EFI `LINUX_EFI_INITRD_MEDIA_GUID` / `LoadFile2` protocol,
+   which this firmware doesn't service — the initrd is silently dropped and the dm-verity root
+   never assembles. The fix is to decompose the UKI on the ESP and let rEFInd deliver a *loose*
+   kernel + initrd (the `initrd=` EFI-stub file load, the same mechanism that loads the kernel),
+   which the firmware does support.
+
+`dd` wipes the ESP, so after writing the stick reinstall rEFInd and stage the loose files:
 
 ```
 # fetch the loader (no root needed)
@@ -61,6 +90,14 @@ apt-get download refind && dpkg-deb -x refind_*.deb /tmp/refind-x
 udisksctl mount -b /dev/sdX1                       # mounts the ESP
 ESP=/run/media/$USER/<esp-label>
 cp /tmp/refind-x/usr/share/refind/refind/refind_x64.efi "$ESP/EFI/BOOT/BOOTX64.EFI"
+
+# decompose the UKI into loose kernel + initrd + its sealed cmdline
+UKI="$ESP/EFI/Linux/shrek_1_x86-64.efi"
+objcopy -O binary --only-section=.linux   "$UKI" "$ESP/shrek-vmlinuz"
+objcopy -O binary --only-section=.initrd  "$UKI" "$ESP/shrek-initrd.img"
+objcopy -O binary --only-section=.cmdline "$UKI" /tmp/c.bin && tr -d '\0' < /tmp/c.bin; echo
+# ^ prints the full sealed cmdline (roothash=... console=tty0 console=ttyS0) — paste it
+#   verbatim into the options= line below; a bare vmlinuz has no embedded cmdline.
 ```
 
 `"$ESP/EFI/BOOT/refind.conf"`:
@@ -69,18 +106,24 @@ cp /tmp/refind-x/usr/share/refind/refind/refind_x64.efi "$ESP/EFI/BOOT/BOOTX64.E
 timeout 20
 use_nvram false
 scanfor manual
+
+# PRIMARY: loose kernel + initrd — the firmware-compatible initrd delivery.
 menuentry "Shrek OS" {
-    loader /EFI/Linux/shrek_1_x86-64.efi
+    loader /shrek-vmlinuz
+    initrd /shrek-initrd.img
+    options "<full sealed cmdline from objcopy: roothash=... console=tty0 console=ttyS0>"
 }
-# diagnostics: forces the physical screen as primary console
-menuentry "Shrek OS (debug console=tty0)" {
+
+# Fallback: the whole UKI. Its embedded initrd is not delivered on 2012 Mac firmware
+# (panics "No working init found"); kept only for firmware that does service LoadFile2.
+menuentry "Shrek OS (UKI - may not boot on Mac)" {
     loader /EFI/Linux/shrek_1_x86-64.efi
-    options "console=tty0 loglevel=7"
 }
 ```
 
-Boot: hold Option at chime -> "EFI Boot" -> rEFInd -> Shrek OS. If it stalls, boot the debug
-entry and read the screen.
+Boot: hold Option at chime -> "EFI Boot" -> rEFInd -> "Shrek OS" (the loose-kernel entry, not
+the UKI fallback). The sealed cmdline already carries `console=tty0`, so kernel output renders
+on the physical panel; if it drops to emergency mode, read the screen there.
 
 ## 5. Broadcom BCM4331 Wi-Fi (optional, non-free)
 
