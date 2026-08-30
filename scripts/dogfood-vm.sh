@@ -370,5 +370,26 @@ grep -qa 'SHREK-DOGFOOD Sconnect seed-service=active' "$LOG" \
   && ok "the boot-time hosts-seed oneshot ran (localhost resolvable on a fresh box)" \
   || bad "shrek-hosts-seed.service not active ($(grep -a 'SHREK-DOGFOOD Sconnect seed-service=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Bench-0 (ADR-003 Part 2): rootless-container Bench runtime proof (scored only when shrek-bench merged).
+# Fable's smallest-next-proof, phase B (sealed-boot userns/AppArmor posture). Skipped cleanly on stores
+# without the shrek-bench sysext so pre-Bench dogfood runs do not newly FAIL.
+if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "$LOG"; then
+  echo "  bench pool: $(grep -a 'SHREK-DOGFOOD BENCH pool=' "$LOG" | tail -1 | sed 's/.*BENCH pool=//')"
+  for pair in \
+    "userns=ok|sealed unprivileged userns available (unshare -U on the real image)" \
+    "overlay-native=ok|NATIVE rootless overlay driver (not vfs/fuse)" \
+    "graphroot-on-pool=ok|graphroot on the persistent /home bench pool (baked storage.conf)" \
+    "uidmap=ok|subuid maps the full 65536 range (setuid newuidmap survived the merge)" \
+    "run-exit42=ok|container execs a real ELF off the noexec pool -> rc 42 (rule-2 proof)" \
+    "noexec-negctl=ok|direct exec from the noexec pool is BLOCKED (pool really is noexec)"; do
+    tok=${pair%%|*}; desc=${pair#*|}
+    if grep -qa "SHREK-DOGFOOD BENCH ${tok}" "$LOG"; then ok "bench — ${desc}"
+    else bad "bench — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH //')]"; fi
+  done
+  echo "  bench cgroup/info: $(grep -a 'SHREK-DOGFOOD BENCH cgroup' "$LOG" | tail -1 | sed 's/.*BENCH //')"
+elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
+  echo "  (bench proof skipped — shrek-bench sysext not in this store)"
+fi
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

@@ -582,4 +582,66 @@ else
     say "S7 weather-tab=FAIL [$(grep -o '"id": *"weather"[^}]*' "$DSET" 2>/dev/null | tr -d '\n')]"
 fi
 
+# --- Bench-0 (ADR-003 Part 2): rootless-container Bench runtime on the REAL sealed boot ---------------
+# Fable's smallest-next-proof, phase B — the sealed userns/AppArmor posture a debian:trixie container
+# cannot faithfully fake (bench0-prevalidate proved the mechanics; this proves them on the sealed image).
+# The shrek-bench Onion (podman/crun/conmon/fuse-overlayfs/uidmap/catatonit) is merged; /etc/subuid+subgid
+# are baked (mkosi.postinst); /usr/share/containers/*.conf point rootless graphroot at the /home pool.
+# `set +e` for the whole block: every assertion must run and report a SHREK-DOGFOOD BENCH line regardless
+# of individual rc (a bare failing cmd under set -e would abort before $? is captured — the #2815 trap).
+set +e
+BSEED=/usr/share/shrek/bench/seeds
+BPOOL=/home/.shrek/benches
+bdev() { runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" PATH=/usr/bin:/bin "$@"; }
+if command -v podman >/dev/null 2>&1; then
+    # (i) sealed-boot unprivileged-userns posture (Fable assertion i; apparmor_restrict_unprivileged_userns
+    #     is the one distro decision that would break it — assert live, don't trust the Debian default).
+    if bdev unshare -U true 2>/dev/null; then say "BENCH userns=ok"; else say "BENCH userns=FAIL"; fi
+    # bench pool = a noexec,nosuid,nodev fs on the PERSISTENT /home plane (root sets it up here; a
+    # bench_plane systemd unit will in the product). loop-ext4 first (real superblock + prjquota), bind
+    # -remount-noexec fallback so a loop hiccup doesn't waste the whole VM cycle.
+    mkdir -p "$BPOOL"
+    if ! mountpoint -q "$BPOOL"; then
+        [ -f "$BPOOL.img" ] || { dd if=/dev/zero of="$BPOOL.img" bs=1M count=512 status=none 2>/dev/null && mkfs.ext4 -q -O project,quota "$BPOOL.img" 2>/dev/null; }
+        mount -o loop,noexec,nosuid,nodev "$BPOOL.img" "$BPOOL" 2>/dev/null \
+          || { mount --bind "$BPOOL" "$BPOOL" 2>/dev/null && mount -o remount,bind,noexec,nosuid,nodev "$BPOOL" 2>/dev/null; }
+    fi
+    mkdir -p "$BPOOL/storage" "$BPOOL/tmp"; chown -R dev:dev "$BPOOL"
+    say "BENCH pool=[$(findmnt -no OPTIONS "$BPOOL" 2>/dev/null || echo unmounted)]"
+    # (ii) native rootless overlay + graphroot on the /home pool, driven by the BAKED system storage.conf.
+    DRV=$(bdev podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null); [ -n "$DRV" ] || DRV=ERR
+    GR=$(bdev podman info --format '{{.Store.GraphRoot}}' 2>/dev/null); [ -n "$GR" ] || GR=ERR
+    say "BENCH driver=$DRV graphroot=$GR"
+    [ "$DRV" = overlay ] && say "BENCH overlay-native=ok" || say "BENCH overlay-native=FAIL"
+    case "$GR" in "$BPOOL"*) say "BENCH graphroot-on-pool=ok";; *) say "BENCH graphroot-on-pool=FAIL";; esac
+    # (iii) subuid mapped to the full 65536 range (setuid newuidmap survived the sysext merge).
+    UMW=$(bdev podman unshare cat /proc/self/uid_map 2>/dev/null | awk '$3==65536{print 65536}' | head -1)
+    [ "${UMW:-0}" = 65536 ] && say "BENCH uidmap=ok width=$UMW" || say "BENCH uidmap=FAIL width=${UMW:-none}"
+    # ensure dev's session bus is up — podman's default (systemd) cgroup manager creates the container's
+    # transient scope via the user D-Bus; the headless probe doesn't otherwise guarantee it (a real
+    # graphical bench session always has it via dbus-user-session). Best-effort.
+    bdev systemctl --user start dbus.socket >/dev/null 2>&1 || true
+    # (iv) THE proof: load the offline seed + run a real compiled ELF (exit 42) off the noexec pool.
+    bdev podman load -i "$BSEED/exit42.tar" >/dev/null 2>&1
+    if bdev env DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" podman run --rm --network=none --no-hosts --runtime crun localhost/exit42 2>/tmp/brun.err; then BRC=0; else BRC=$?; fi
+    if [ "$BRC" -ne 42 ]; then
+        # fall back to the cgroupfs manager (no session-bus / systemd-scope dependency) — isolates a
+        # cgroup-manager wiring failure from a genuine container-runtime failure. Whichever runs the ELF
+        # off the noexec pool proves rule 2; the log names which path worked (a product cgroup-mgr signal).
+        if bdev podman --cgroup-manager=cgroupfs run --rm --network=none --no-hosts --runtime crun localhost/exit42 2>/tmp/brun2.err; then BRC2=0; else BRC2=$?; fi
+        say "BENCH run-retry cgroupfs-rc=$BRC2 systemd-rc=$BRC systemd-err=[$(tr -d '\r' </tmp/brun.err 2>/dev/null | tail -2 | tr '\n' '|')]"
+        [ "$BRC2" -eq 42 ] && BRC=42
+    fi
+    [ "$BRC" -eq 42 ] && say "BENCH run-exit42=ok rc=$BRC" || say "BENCH run-exit42=FAIL rc=$BRC err=[$(tr -d '\r' </tmp/brun2.err 2>/dev/null | tail -2 | tr '\n' '|')]"
+    # (v) negative control: exec the SAME ELF directly from the noexec pool -> must be blocked (not 42/0).
+    cp "$BSEED/exit42.elf" "$BPOOL/probe-exec" 2>/dev/null; chmod +x "$BPOOL/probe-exec" 2>/dev/null
+    if "$BPOOL/probe-exec" >/dev/null 2>&1; then NRC=0; else NRC=$?; fi
+    { [ "$NRC" -ne 42 ] && [ "$NRC" -ne 0 ]; } && say "BENCH noexec-negctl=ok rc=$NRC" || say "BENCH noexec-negctl=FAIL rc=$NRC"
+    # (vi) informational: cgroup manager/version + dev-slice delegation (bench lands under user-1000.slice).
+    say "BENCH cgroup mgr=$(bdev podman info --format '{{.Host.CgroupManager}}' 2>/dev/null) ver=$(bdev podman info --format '{{.Host.CgroupVersion}}' 2>/dev/null) delegate=$(systemctl show user@1000.service -p Delegate --value 2>/dev/null)"
+else
+    say "BENCH podman=MISSING (shrek-bench sysext not merged into /usr?)"
+fi
+set -e
+
 say "DONE boot=$n"
