@@ -5,7 +5,9 @@ Part 2 runtime feasibility (MVP step 2) VERIFIED GREEN on the sealed VM (2026-08
 Part 1 baseline-app + browser Onions BUILT + MERGE-PROVEN + RENDER-PROVEN on the sealed
 boot (2026-08-30, dogfood PASS=81/0); Part 2 MVP step 3 (the `prjquota` Bench storage pool)
 BUILT + PROVEN on the sealed boot (2026-08-30, dogfood PASS=83/0 — project quota EDQUOT-enforced
-on the growable `/home`).**
+on the growable `/home`); Part 2 MVP step 4 (the `bench_plane` lifecycle supervisor + `shrek bench`
+CLI + the persistent state model) BUILT + PROVEN (2026-08-30, dogfood PASS=88/0 — `gatekeeperd bench`
+create→run→quota→destroy end-to-end on the sealed image, plus a 14/14 host oracle).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -230,7 +232,22 @@ ADR-002 promote path `promote <name> → Workshop`.
    write past a 1 MiB project cap fails "Disk quota exceeded" at exactly the cap. bench_plane (step 4)
    caps each Bench with `setquota -P`.
 4. **`bench_plane.rs` (lifecycle supervisor) + `shrek bench` CLI** (create/enter/run/reset/
-   quota/destroy) + the persistent-grant state model above.
+   quota/destroy) + the persistent-grant state model above. **✅ DONE & GREEN (2026-08-30, dogfood
+   PASS=88/0 + host oracle 14/14).** `crates/gatekeeperd/src/bench_record.rs` is the durable state
+   model (the `net_binding.rs` record shape, but on the persistent `/home` not volatile `/run`):
+   `SHREK-BENCH 1` line-text records under `/home/.shrek/benches/records`, atomic temp+rename,
+   fail-closed parse, `next_project_id` allocation from a base. `bench_plane.rs` is the supervisor —
+   a SIBLING of `t2_plane` (imports `mount_plane`/`net_plane` as libs like `t2_plane.rs:28-31`,
+   **never touches `t2_plane.rs`**): `create` allocates an ext4 project id + caps it (`chattr -p +P`
+   + `setquota -P`) + writes the record; `run`/`enter` drop to `dev`'s rootless podman
+   (`--network=none --no-hosts`, `/work` = the quota-scoped data dir); `reset` wipes data but keeps
+   identity+quota; `quota` re-caps; `destroy` frees the id + removes everything; `reissue` re-applies
+   quotas at boot (the records are the source of truth `/run` is rebuilt from). `grant`/`network`
+   are explicit stubs (step 5); `promote` is later. The `gatekeeperd bench` verb (a new `main.rs`
+   dispatch arm) is the privileged supervisor; `shrek bench` forwards to it (mirrors `shrek run` →
+   `gatekeeperd sandbox`). Proven: 10 unit tests, `scripts/bench-plane-proof.sh` (14/14 in a
+   privileged container — record + project-quota EDQUOT enforcement for a non-root writer + id
+   reuse), and a sealed-boot BENCH-SUP stage (create→run exit42→quota-enforce→destroy).
 5. **Route FS + egress grants through the existing Gatekeeper** (rule 3 — FS via
    `relocate_rw` into `/run/shrek/bench/<id>/grants/`; egress via late-attach `inject()`).
 6. **Ship one offline Scratch seed** — a base image loaded via `podman load` from a tarball
@@ -284,8 +301,9 @@ model is proven — not just a container launcher.
   (firefox-esr + gnome-text-editor draw real frames; VM screendump lies about GTK render, #2923).
   "Install one app via the chosen mechanism" (Part 2) is provable only when the `shrek-bench`
   runtime lands (MVP step 2+), by design — the owner chose ADR-first over a same-day AppImage demo.
-- No system-index bump for Part 1 (packaging/config/manifest, zero Rust). Part 2's
-  `bench_plane.rs` + CLI *are* Rust → they bump the graph baseline when they land.
+- No system-index bump for Part 1 (packaging/config/manifest, zero Rust), nor for Part 2 step 3
+  (config/systemd/shell). Part 2 step 4's `bench_plane.rs` + `bench_record.rs` + CLI **are** Rust, so
+  they **DO** bump the graph baseline (refreshed post-merge).
 
 ## Open questions — resolved by Fable review (2026-08-30)
 
