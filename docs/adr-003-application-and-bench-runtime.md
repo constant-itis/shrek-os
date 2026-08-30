@@ -7,7 +7,12 @@ boot (2026-08-30, dogfood PASS=81/0); Part 2 MVP step 3 (the `prjquota` Bench st
 BUILT + PROVEN on the sealed boot (2026-08-30, dogfood PASS=83/0 — project quota EDQUOT-enforced
 on the growable `/home`); Part 2 MVP step 4 (the `bench_plane` lifecycle supervisor + `shrek bench`
 CLI + the persistent state model) BUILT + PROVEN (2026-08-30, dogfood PASS=88/0 — `gatekeeperd bench`
-create→run→quota→destroy end-to-end on the sealed image, plus a 14/14 host oracle).**
+create→run→quota→destroy end-to-end on the sealed image, plus a 14/14 host oracle);
+Part 2 MVP step 5 (route FS + egress grants through the existing Gatekeeper — rule 3, the
+security-critical core) BUILT + PROVEN (2026-08-30 — a 30/30 host oracle runs REAL rootless podman: an
+FS grant round-trips writes to `dev`, a `--ro` grant denies writes, and a networked `run` late-attaches a
+veth + the sealed nft allow-list into the bench netns; plus the sealed-boot BENCH-GRANT stage proving
+grant materialization + boot re-issuance on the real prjquota `/home`).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -248,8 +253,33 @@ ADR-002 promote path `promote <name> → Workshop`.
    `gatekeeperd sandbox`). Proven: 10 unit tests, `scripts/bench-plane-proof.sh` (14/14 in a
    privileged container — record + project-quota EDQUOT enforcement for a non-root writer + id
    reuse), and a sealed-boot BENCH-SUP stage (create→run exit42→quota-enforce→destroy).
-5. **Route FS + egress grants through the existing Gatekeeper** (rule 3 — FS via
-   `relocate_rw` into `/run/shrek/bench/<id>/grants/`; egress via late-attach `inject()`).
+5. **Route FS + egress grants through the existing Gatekeeper** (rule 3 — the security-critical core).
+   **✅ DONE & GREEN (2026-08-30, host oracle 30/0 with REAL rootless podman + the sealed-boot BENCH-GRANT
+   stage).** `bench_plane.rs` wires the `grant`/`network` verbs (no `t2_plane.rs` edit — it imports
+   `mount_plane`/`net_plane` as libs, `t2_plane.rs:28-31`).
+   - **FS grants** (`grant <name> <dir> --rw|--ro`): pin the dir TOCTOU-safely beneath the `/home/<dev>`
+     anchor (`open_anchor`+`pin_beneath`), then `relocate_rw`/`relocate_ro` it into the HOST mount ns at
+     `/run/shrek/bench/<id>/grants/<leaf>` (rw/ro, always `noexec,nodev,nosuid`) — NOT a private ns like
+     T2, because `dev`'s rootless podman is a separate process tree that must SEE the mount. Podman binds
+     it at `/grants/<leaf>`. **USERNS = default rootless mapping (container-root ⇔ host-`dev`), not
+     `keep-id`** — a grant dir is `dev`-owned by construction so a container-root workload reads/writes it
+     and writes land back as `dev`; `keep-id` was empirically WRONG (it makes container-root a subuid that
+     cannot write the `dev`-owned grant). An arbitrary image with a non-root `USER` needs an idmapped `-v`
+     (deferred with the arbitrary-image story). **PROPAGATION INVARIANT (proven):** the relocate bind is
+     only visible to podman's persistent pause mount-ns if `/` is `rshared` (real systemd default) — so
+     the boot `reissue` unit must NOT `PrivateMounts`/`MountFlags=slave`. **ProtectHome:** the per-bench
+     `grants` dir is `dev`-owned `0700` (Fable fix 1). Grants persist in the record and are
+     re-materialized at boot by `shrek-bench-reissue.service` (`/run` is volatile).
+   - **Egress grants** (`network <name> <profile>`): the profile is validated against sealed
+     `shrek_policy::egress` (default-deny; `none` revokes) and recorded. Benches run `--network=none`; a
+     networked `run` starts DETACHED, discovers the netns leader (`podman inspect`), verifies it is in a
+     DISTINCT netns (pid-recycle guard, Fable fix 4), then root `gatekeeperd` `inject()`s the veth + sealed
+     nft allow-list and re-verifies identity. The pre-spawn `create_and_inject()` is structurally
+     unavailable to rootless podman. The start→inject window is fail-SAFE (zero egress until injection,
+     never more than granted), so no rendezvous barrier is needed for a user-authority Bench. A networked
+     bench binds its own sealed-profile `/etc/hosts` (coexists with `--no-hosts`; Shrek's `/etc/hosts`
+     symlink #2816 is avoided). **net_plane hardening (Fable fix 3, shared with T1/T2):** a per-sandbox
+     `input` hook drops all veth-sourced traffic so a bench cannot reach host-local listeners.
 6. **Ship one offline Scratch seed** — a base image loaded via `podman load` from a tarball
    in the sysext (safer than `additionalimagestores` under merged `/usr`, which risks the
    kernel's overlay stacking-depth-2 limit — VERIFY before choosing).
@@ -303,7 +333,8 @@ model is proven — not just a container launcher.
   runtime lands (MVP step 2+), by design — the owner chose ADR-first over a same-day AppImage demo.
 - No system-index bump for Part 1 (packaging/config/manifest, zero Rust), nor for Part 2 step 3
   (config/systemd/shell). Part 2 step 4's `bench_plane.rs` + `bench_record.rs` + CLI **are** Rust, so
-  they **DO** bump the graph baseline (refreshed post-merge).
+  they **DO** bump the graph baseline; Part 2 step 5 also touches Rust (`bench_plane.rs` grant/egress
+  wiring + the `net_plane.rs` host-local input-drop), so it bumps too (refreshed post-merge).
 
 ## Open questions — resolved by Fable review (2026-08-30)
 
