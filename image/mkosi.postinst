@@ -38,6 +38,42 @@ grep -q '^dev:' "$BUILDROOT/etc/passwd" || {
 }
 echo "postinst: dev desktop user -> $(grep '^dev:' "$BUILDROOT/etc/passwd")"
 
+# Bench-0 (ADR-003 Part 2): rootless Podman for the Bench plane needs a subordinate uid/gid range for
+# `dev` so `newuidmap`/`newgidmap` (setuid, from the shrek-bench Onion's `uidmap` pkg) can map a full
+# 65536-wide user namespace — without it podman rootless degrades to a single uid and most images break
+# on chown. These live in /etc/subuid + /etc/subgid, which a sysext CANNOT provide (a sysext extends
+# /usr only) and which the runtime /etc is sealed read-only, so — exactly like the dev/swamp/polkitd
+# users above — they must be baked into the sealed base /etc now. Range 100000:65536 is the Debian
+# useradd default block, clear of the low system/reserved uids (shrek=700, dev=1000, swamp=20001).
+# Verified in a trixie container (bench0-prevalidate): this bake yields a 0..1000..65536 uid_map.
+grep -q '^dev:' "$BUILDROOT/etc/subuid" || echo 'dev:100000:65536' >> "$BUILDROOT/etc/subuid"
+grep -q '^dev:' "$BUILDROOT/etc/subgid" || echo 'dev:100000:65536' >> "$BUILDROOT/etc/subgid"
+echo "postinst: dev subid range -> subuid $(grep '^dev:' "$BUILDROOT/etc/subuid") / subgid $(grep '^dev:' "$BUILDROOT/etc/subgid")"
+
+# Bench-0 (ADR-003 Part 2): podman's /etc/containers footprint. A sysext extends /usr ONLY, so the
+# shrek-bench Onion's storage.conf/containers.conf ride /usr/share/containers (podman reads there), but
+# the containers-common package's /etc files (policy.json, registries.conf) get STRIPPED from a sysext and
+# /etc is sealed read-only at runtime — so they must be baked into the base /etc now, same as subuid above
+# and the desktop layer's polkit rules. policy.json is MANDATORY (podman refuses every image op without an
+# image-signature policy); the Bench MVP runs offline seeds (podman load) so an accept-anything default is
+# correct — real signature enforcement for *pulled* images is a later egress/trust decision. registries.conf
+# disables unqualified short-name search (offline seeds use fully-qualified localhost/ names), matching the
+# default-deny egress posture. Inert on a non-bench build (no podman until the shrek-bench sysext merges).
+install -d -o 0 -g 0 -m 0755 "$BUILDROOT/etc/containers"
+cat > "$BUILDROOT/etc/containers/policy.json" <<'CPOL'
+{
+    "default": [ { "type": "insecureAcceptAnything" } ]
+}
+CPOL
+cat > "$BUILDROOT/etc/containers/registries.conf" <<'CREG'
+# Shrek Bench plane (ADR-003): offline seeds are referenced by fully-qualified localhost/ names, so no
+# unqualified short-name registry search is permitted (matches Shrek's default-deny / named-egress model).
+unqualified-search-registries = []
+CREG
+chown 0:0 "$BUILDROOT/etc/containers/policy.json" "$BUILDROOT/etc/containers/registries.conf"
+chmod 0644 "$BUILDROOT/etc/containers/policy.json" "$BUILDROOT/etc/containers/registries.conf"
+echo "postinst: podman /etc/containers -> $(ls -1 "$BUILDROOT/etc/containers" | tr '\n' ' ')"
+
 # Dogfood-0 (M3): the `swamp` system user+group. gatekeeperd writes its session/authority records
 # root:swamp 0640 (session_view.rs `swamp_ids()` resolves BOTH the swamp user in /etc/passwd and the
 # swamp group in /etc/group by NAME — absent either, the chown silently falls back to root:root and the

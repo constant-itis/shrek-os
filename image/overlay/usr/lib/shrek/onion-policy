@@ -23,3 +23,7 @@ enable shrek-dev
 # "Install Shrek OS" launcher. It does not expose destructive disk authority through agent capability
 # APIs; the installer job runs only from the human-launched Calamares flow.
 enable shrek-installer
+# Bench-0 (ADR-003 Part 2): the rootless-container runtime sysext (podman/crun/…, scripts/build-bench-layer.sh)
+# for the Bench plane. Sealed-enabled so oniond merges it when the store carries it (INCLUDE_BENCH=1 build);
+# a listed-but-absent layer is simply not merged (no error), same as shrek-dev. docs/adr-003-*.md.
+enable shrek-bench

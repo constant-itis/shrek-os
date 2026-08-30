@@ -18,6 +18,7 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 INCLUDE_DEV="${INCLUDE_DEV:-0}"
+INCLUDE_BENCH="${INCLUDE_BENCH:-0}"
 MODE="${1:-good}"
 case "$MODE" in good|select|inject|unsigned|tamper|desktop|installer) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop|installer]" >&2; exit 1 ;; esac
 # Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (DMS + Qt runtime)
@@ -39,7 +40,7 @@ echo "=== building layer DDIs + store (mode=${MODE}) in debian:trixie ==="
 mkdir -p out/layers
 docker run --rm --privileged \
   -v "${REPO_ROOT}:/work" -w /work \
-  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" -e INCLUDE_DEV="${INCLUDE_DEV}" \
+  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" -e INCLUDE_DEV="${INCLUDE_DEV}" -e INCLUDE_BENCH="${INCLUDE_BENCH}" \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update -qq >/dev/null
@@ -110,6 +111,14 @@ docker run --rm --privileged \
       if ls out/layers/shrek-dev*.raw >/dev/null 2>&1; then
         cp "$(ls out/layers/shrek-dev*.raw | head -1)" out/store-stage/extensions/shrek-dev.raw
         echo "--- staged shrek-dev toolchain sysext into the store ---"
+      fi
+    fi
+    if [ "$MODE" = "desktop" ] && [ "${INCLUDE_BENCH:-0}" = "1" ]; then
+      # Bench-0 (ADR-003 Part 2): stage the shrek-bench rootless-container runtime sysext when it was
+      # built (scripts/build-bench-layer.sh). Same listed-but-absent tolerance as shrek-dev.
+      if ls out/layers/shrek-bench*.raw >/dev/null 2>&1; then
+        cp "$(ls out/layers/shrek-bench*.raw | head -1)" out/store-stage/extensions/shrek-bench.raw
+        echo "--- staged shrek-bench runtime sysext into the store ---"
       fi
     fi
     if [ "$MODE" = "installer" ]; then
