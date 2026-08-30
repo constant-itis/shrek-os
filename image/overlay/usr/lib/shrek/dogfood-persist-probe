@@ -642,17 +642,39 @@ if command -v podman >/dev/null 2>&1; then
     # (i) sealed-boot unprivileged-userns posture (Fable assertion i; apparmor_restrict_unprivileged_userns
     #     is the one distro decision that would break it — assert live, don't trust the Debian default).
     if bdev unshare -U true 2>/dev/null; then say "BENCH userns=ok"; else say "BENCH userns=FAIL"; fi
-    # bench pool = a noexec,nosuid,nodev fs on the PERSISTENT /home plane (root sets it up here; a
-    # bench_plane systemd unit will in the product). loop-ext4 first (real superblock + prjquota), bind
-    # -remount-noexec fallback so a loop hiccup doesn't waste the whole VM cycle.
-    mkdir -p "$BPOOL"
-    if ! mountpoint -q "$BPOOL"; then
-        [ -f "$BPOOL.img" ] || { dd if=/dev/zero of="$BPOOL.img" bs=1M count=512 status=none 2>/dev/null && mkfs.ext4 -q -O project,quota "$BPOOL.img" 2>/dev/null; }
-        mount -o loop,noexec,nosuid,nodev "$BPOOL.img" "$BPOOL" 2>/dev/null \
-          || { mount --bind "$BPOOL" "$BPOOL" 2>/dev/null && mount -o remount,bind,noexec,nosuid,nodev "$BPOOL" 2>/dev/null; }
+    # bench pool = a noexec,nosuid,nodev bind sub-mount on the PERSISTENT, prjquota-armed shrek-data /home,
+    # now stood up at boot by shrek-bench-pool.service (ADR-003 step 3, the PRODUCT mechanism — was a probe-
+    # local loopback stopgap). Verify the service ran; keep a fallback so a service miss still exercises the
+    # podman assertions, and NAME which path set it up (a real product signal, not silent self-healing).
+    if mountpoint -q "$BPOOL" && findmnt -no OPTIONS "$BPOOL" 2>/dev/null | grep -q noexec; then
+        say "BENCH pool-service=ok"
+    else
+        say "BENCH pool-service=FAIL fell-back"
+        mkdir -p "$BPOOL"
+        mount --bind "$BPOOL" "$BPOOL" 2>/dev/null && mount -o remount,bind,noexec,nosuid,nodev "$BPOOL" 2>/dev/null
+        mkdir -p "$BPOOL/storage" "$BPOOL/tmp"; chown -R dev:dev "$BPOOL"
     fi
-    mkdir -p "$BPOOL/storage" "$BPOOL/tmp"; chown -R dev:dev "$BPOOL"
     say "BENCH pool=[$(findmnt -no OPTIONS "$BPOOL" 2>/dev/null || echo unmounted)]"
+    # (prjquota) rule 1 — prove a Bench can be DISK-CAPPED by project quota on the GROWABLE /home. Assign a
+    # project id to a pool subdir, cap it at 1 MiB, and show a 4 MiB write is refused (EDQUOT). This is the
+    # substrate bench_plane (step 4) caps each Bench with. Needs shrek-data mkfs -O quota,project +
+    # home.mount `prjquota` + the `quota` tools (setquota/repquota) — the whole point of step 3.
+    QDIR="$BPOOL/.qtest"; QPROJ=7777; rm -rf "$QDIR"; mkdir -p "$QDIR"; chown dev:dev "$QDIR"
+    if chattr -p "$QPROJ" +P "$QDIR" 2>/tmp/bq.err && setquota -P "$QPROJ" 0 1024 0 0 /home 2>>/tmp/bq.err; then
+        # Two load-bearing details (each cost a VM cycle to pin down):
+        #  * write as NON-ROOT (`dev`): root is EXEMPT from quota enforcement (CAP_SYS_RESOURCE), so a
+        #    root write sails past the cap while repquota shows it over-limit. A real Bench runs as `dev`.
+        #  * conv=fsync: ext4 delayed allocation defers block allocation (and the quota check) to writeback,
+        #    so a plain buffered write returns before EDQUOT can fire; fsync forces allocation during dd.
+        # With both, a `dev` write crossing the 1 MiB hard cap fails EDQUOT (blocks at ~960 KiB).
+        if runuser -u dev -- dd if=/dev/zero of="$QDIR/fill" bs=64k count=64 conv=fsync 2>/tmp/bq.dd; then QW=wrote-all; else QW=blocked; fi
+        say "BENCH prjquota-write=$QW after=[$(repquota -P /home 2>/dev/null | awk -v p="#$QPROJ" '$1==p{print}' | tr -s ' ')] dd=[$(tr -d '\r' </tmp/bq.dd 2>/dev/null | tail -1)]"
+        # PASS only if the block was EDQUOT ("Disk quota exceeded"), not an unrelated write error.
+        if [ "$QW" = blocked ] && grep -qi "quota" /tmp/bq.dd 2>/dev/null; then say "BENCH prjquota=ok"; else say "BENCH prjquota=FAIL wrote-past-cap"; fi
+    else
+        say "BENCH prjquota=FAIL setup [$(tr -d '\r' </tmp/bq.err 2>/dev/null | tail -1)]"
+    fi
+    setquota -P "$QPROJ" 0 0 0 0 /home 2>/dev/null || true; rm -rf "$QDIR"
     # (ii) native rootless overlay + graphroot on the /home pool, driven by the BAKED system storage.conf.
     DRV=$(bdev podman info --format '{{.Store.GraphDriverName}}' 2>/dev/null); [ -n "$DRV" ] || DRV=ERR
     GR=$(bdev podman info --format '{{.Store.GraphRoot}}' 2>/dev/null); [ -n "$GR" ] || GR=ERR

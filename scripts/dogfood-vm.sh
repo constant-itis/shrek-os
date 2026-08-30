@@ -403,6 +403,8 @@ fi
 if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  bench pool: $(grep -a 'SHREK-DOGFOOD BENCH pool=' "$LOG" | tail -1 | sed 's/.*BENCH pool=//')"
   for pair in \
+    "pool-service=ok|Bench pool stood up at boot by shrek-bench-pool.service (noexec sub-mount on shrek-data /home, step 3)" \
+    "prjquota=ok|per-Bench PROJECT quota enforced on the growable /home — 4MiB write past a 1MiB cap -> EDQUOT (rule 1)" \
     "userns=ok|sealed unprivileged userns available (unshare -U on the real image)" \
     "overlay-native=ok|NATIVE rootless overlay driver (not vfs/fuse)" \
     "graphroot-on-pool=ok|graphroot on the persistent /home bench pool (baked storage.conf)" \
