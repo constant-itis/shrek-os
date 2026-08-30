@@ -3,7 +3,9 @@
 **Status:** 🟢 Proposed — **Fable-reviewed GO-WITH-FIXES (2026-08-30, corrections folded);
 Part 2 runtime feasibility (MVP step 2) VERIFIED GREEN on the sealed VM (2026-08-30);
 Part 1 baseline-app + browser Onions BUILT + MERGE-PROVEN + RENDER-PROVEN on the sealed
-boot (2026-08-30, dogfood PASS=81/0).**
+boot (2026-08-30, dogfood PASS=81/0); Part 2 MVP step 3 (the `prjquota` Bench storage pool)
+BUILT + PROVEN on the sealed boot (2026-08-30, dogfood PASS=83/0 — project quota EDQUOT-enforced
+on the growable `/home`).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -216,7 +218,17 @@ ADR-002 promote path `promote <name> → Workshop`.
    `t2_plane.rs`.**
 3. **Dedicated growable Bench storage pool** on `/home` with `prjquota` quotas (rule 1) —
    productionize the throwaway pool from step 2 (installer-format + `home.mount` + `dogfood-
-   data-disk.sh`).
+   data-disk.sh`). **✅ DONE & GREEN (2026-08-30, sealed VM, dogfood PASS=83/0).** shrek-data is
+   formatted `-O quota,project` (installer + `dogfood-data-disk.sh`) and mounted `prjquota` at the
+   INITIAL mount — ext4 only engages quota there, a later `remount,prjquota` leaves "Quota mode:
+   none" (proven). `shrek-home-quota-prep.service` runs BEFORE `home.mount` and retrofits the
+   feature onto any pre-step-3 disk (`e2fsck` + `tune2fs -O quota,project`) so the `prjquota` mount
+   can never brick. The Bench pool itself is a **noexec,nosuid,nodev bind sub-mount** on that growable
+   fs (`shrek-bench-pool.service` — rule 2's "the noexec pool is a new sub-mount to build"), replacing
+   the step-2 loopback stopgap so benches share `/home`'s space AND get project quotas. The dogfood
+   probe proves EDQUOT enforcement end-to-end: a `dev` (non-root — root is quota-exempt) `conv=fsync`
+   write past a 1 MiB project cap fails "Disk quota exceeded" at exactly the cap. bench_plane (step 4)
+   caps each Bench with `setquota -P`.
 4. **`bench_plane.rs` (lifecycle supervisor) + `shrek bench` CLI** (create/enter/run/reset/
    quota/destroy) + the persistent-grant state model above.
 5. **Route FS + egress grants through the existing Gatekeeper** (rule 3 — FS via
@@ -301,4 +313,6 @@ model is proven — not just a container launcher.
   stacking-depth-2 risk) — VERIFY at step 6.
 - Linger/logout: benches-die-on-logout is the MVP posture; durable linger needs another
   `/home` redirect — revisit only if it bites.
-- `prjquota` on `shrek-data`: touches the installer format path — plan at step 3.
+- ~~`prjquota` on `shrek-data`: touches the installer format path — plan at step 3.~~ **RESOLVED at
+  step 3 (2026-08-30):** `mkfs -O quota,project` in the installer + `home.mount prjquota` at initial
+  mount + a pre-mount `tune2fs` retrofit for old disks (brick-safe). Proven EDQUOT-enforcing (PASS=83/0).
