@@ -688,18 +688,25 @@ if command -v podman >/dev/null 2>&1; then
     # transient scope via the user D-Bus; the headless probe doesn't otherwise guarantee it (a real
     # graphical bench session always has it via dbus-user-session). Best-effort.
     bdev systemctl --user start dbus.socket >/dev/null 2>&1 || true
-    # (iv) THE proof: load the offline seed + run a real compiled ELF (exit 42) off the noexec pool.
-    bdev podman load -i "$BSEED/exit42.tar" >/dev/null 2>&1
-    if bdev env DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" podman run --rm --network=none --no-hosts --runtime crun localhost/exit42 2>/tmp/brun.err; then BRC=0; else BRC=$?; fi
+    # (iv) THE proof: load the REAL offline seed (alpine+coreutils+ffmpeg+exit42, step 6) + run the baked
+    #      exit42 helper — a real compiled ELF that execs off the fresh overlay superblock on the noexec pool.
+    bdev podman load -i "$BSEED/scratch.tar" >/dev/null 2>&1
+    if bdev env DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" podman run --rm --network=none --no-hosts --runtime crun localhost/scratch exit42 2>/tmp/brun.err; then BRC=0; else BRC=$?; fi
     if [ "$BRC" -ne 42 ]; then
         # fall back to the cgroupfs manager (no session-bus / systemd-scope dependency) — isolates a
         # cgroup-manager wiring failure from a genuine container-runtime failure. Whichever runs the ELF
         # off the noexec pool proves rule 2; the log names which path worked (a product cgroup-mgr signal).
-        if bdev podman --cgroup-manager=cgroupfs run --rm --network=none --no-hosts --runtime crun localhost/exit42 2>/tmp/brun2.err; then BRC2=0; else BRC2=$?; fi
+        if bdev podman --cgroup-manager=cgroupfs run --rm --network=none --no-hosts --runtime crun localhost/scratch exit42 2>/tmp/brun2.err; then BRC2=0; else BRC2=$?; fi
         say "BENCH run-retry cgroupfs-rc=$BRC2 systemd-rc=$BRC systemd-err=[$(tr -d '\r' </tmp/brun.err 2>/dev/null | tail -2 | tr '\n' '|')]"
         [ "$BRC2" -eq 42 ] && BRC=42
     fi
     [ "$BRC" -eq 42 ] && say "BENCH run-exit42=ok rc=$BRC" || say "BENCH run-exit42=FAIL rc=$BRC err=[$(tr -d '\r' </tmp/brun2.err 2>/dev/null | tail -2 | tr '\n' '|')]"
+    # (iv-b) the seed is a REAL media base, not a bare ELF — prove ffmpeg is present + runs (the step-8
+    #        north-star substrate: an offline video convert in a Bench). Just -version here; a real transcode
+    #        with granted in/out dirs is step 8's job.
+    if bdev env DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" podman run --rm --network=none --no-hosts --runtime crun localhost/scratch ffmpeg -hide_banner -version >/tmp/bff.log 2>&1; then
+        say "BENCH seed-ffmpeg=ok [$(head -1 /tmp/bff.log | tr -d '\r')]"
+    else say "BENCH seed-ffmpeg=FAIL [$(tr -d '\r' </tmp/bff.log 2>/dev/null | tail -1)]"; fi
     # (v) negative control: exec the SAME ELF directly from the noexec pool -> must be blocked (not 42/0).
     cp "$BSEED/exit42.elf" "$BPOOL/probe-exec" 2>/dev/null; chmod +x "$BPOOL/probe-exec" 2>/dev/null
     if "$BPOOL/probe-exec" >/dev/null 2>&1; then NRC=0; else NRC=$?; fi
@@ -708,17 +715,22 @@ if command -v podman >/dev/null 2>&1; then
     say "BENCH cgroup mgr=$(bdev podman info --format '{{.Host.CgroupManager}}' 2>/dev/null) ver=$(bdev podman info --format '{{.Host.CgroupVersion}}' 2>/dev/null) delegate=$(systemctl show user@1000.service -p Delegate --value 2>/dev/null)"
 
     # --- Bench supervisor (ADR-003 Part 2 step 4): drive `gatekeeperd bench` END-TO-END on the real
-    # sealed image — create (project quota) -> run the exit42 seed IN the bench via rootless podman ->
-    # enforce the cap (non-root) -> destroy. Uses the /home defaults (pool + records + /home fs); the
-    # exit42 image is already loaded in dev's store by the Bench-0 stage above (tagged localhost/exit42).
+    # sealed image — create (project quota) -> run the exit42 helper IN the bench via rootless podman ->
+    # enforce the cap (non-root) -> destroy. Uses the /home defaults (pool + records + /home fs) and the
+    # default seed name localhost/scratch (no SHREK_BENCH_SEED override — this exercises the product path).
     GKB=/usr/libexec/shrek/gatekeeperd
     if [ -x "$GKB" ]; then
         if "$GKB" bench create probe1 --quota 1024 >/tmp/bs.log 2>&1; then
             say "BENCH-SUP create=ok proj=$(sed -n 's/^project //p' "$BPOOL/records/probe1" 2>/dev/null) rec=[$(tr '\n' ',' <"$BPOOL/records/probe1" 2>/dev/null)]"
         else say "BENCH-SUP create=FAIL [$(tr -d '\r' </tmp/bs.log | tail -1)]"; fi
-        # run the seed IN the bench via the supervisor (proves rootless podman run THROUGH bench_plane).
-        SHREK_BENCH_SEED=localhost/exit42 "$GKB" bench run probe1 >/tmp/bs2.log 2>&1; BSRC=$?
+        # PROVE the product seed loader (bench_plane ensure_seed, step 6): drop the Bench-0 pre-loaded image
+        # so the supervisor MUST re-load the offline seed from the sysext archive (/usr/.../scratch.tar,
+        # digest-keyed) before it can run — the real vanilla-boot path where nothing pre-loaded the seed.
+        bdev podman rmi -f localhost/scratch >/dev/null 2>&1
+        # run the exit42 helper IN the bench via the supervisor (proves ensure_seed autoload + rootless run).
+        "$GKB" bench run probe1 -- exit42 >/tmp/bs2.log 2>&1; BSRC=$?
         [ "$BSRC" -eq 42 ] && say "BENCH-SUP run-exit42=ok rc=$BSRC" || say "BENCH-SUP run-exit42=FAIL rc=$BSRC [$(tr -d '\r' </tmp/bs2.log | tail -2 | tr '\n' '|')]"
+        bdev podman image exists localhost/scratch && say "BENCH-SUP seed-autoload=ok" || say "BENCH-SUP seed-autoload=FAIL (ensure_seed did not re-load the sysext archive)"
         # record state returns to stopped after the run.
         [ "$(sed -n 's/^state //p' "$BPOOL/records/probe1" 2>/dev/null)" = stopped ] && say "BENCH-SUP state-stopped=ok" || say "BENCH-SUP state-stopped=FAIL"
         # the supervisor's project cap is EDQUOT-enforced for a non-root writer in the bench data dir.

@@ -410,6 +410,7 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
     "graphroot-on-pool=ok|graphroot on the persistent /home bench pool (baked storage.conf)" \
     "uidmap=ok|subuid maps the full 65536 range (setuid newuidmap survived the merge)" \
     "run-exit42=ok|container execs a real ELF off the noexec pool -> rc 42 (rule-2 proof)" \
+    "seed-ffmpeg=ok|the offline seed is a real media base — ffmpeg present + runs (step-8 north-star substrate)" \
     "noexec-negctl=ok|direct exec from the noexec pool is BLOCKED (pool really is noexec)"; do
     tok=${pair%%|*}; desc=${pair#*|}
     if grep -qa "SHREK-DOGFOOD BENCH ${tok}" "$LOG"; then ok "bench — ${desc}"
@@ -421,6 +422,7 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
     echo "  bench-sup create: $(grep -a 'SHREK-DOGFOOD BENCH-SUP create=' "$LOG" | tail -1 | sed 's/.*BENCH-SUP //')"
     for pair in \
       "create=ok|supervisor creates a Bench with a project quota + durable record" \
+      "seed-autoload=ok|ensure_seed re-loads the offline seed from the sysext archive when absent (product loader)" \
       "run-exit42=ok|gatekeeperd bench run executes the seed via rootless podman (rc 42)" \
       "state-stopped=ok|the record returns to state=stopped after the run" \
       "quota-enforce=ok|the supervisor's per-Bench cap is EDQUOT-enforced (non-root writer)" \

@@ -46,14 +46,21 @@ echo 'dev:100000:65536' > /etc/subgid
 chown -R dev:dev /home/dev
 RT=/run/user/1000; mkdir -p "$RT"; chown dev:dev "$RT"
 bdev(){ runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" PATH=/usr/bin:/bin "$@"; }
-# offline seed the supervisor's `run` uses (a real image, tagged into dev's local store as localhost/scratch).
+# offline seed the supervisor's `run` uses (a real image, tagged into dev's local store as localhost/scratch;
+# busybox stands in for the shipped alpine+ffmpeg seed — same load/run mechanics, no 52M pull in the oracle).
 bdev podman pull -q docker.io/library/busybox:latest >/dev/null 2>&1 && bdev podman tag docker.io/library/busybox:latest localhost/scratch >/dev/null 2>&1
+# step 6: stage the seed as a sysext-style OCI-archive + digest sidecar (the built image Id) so ensure_seed's
+# product loader can be proven — it re-loads localhost/scratch from this tar when the image is absent/stale.
+mkdir -p /seed; chown dev:dev /seed   # dev's rootless podman writes the archive here
+bdev podman save --format oci-archive -o /seed/scratch.tar localhost/scratch >/dev/null 2>&1
+bdev podman image inspect localhost/scratch --format '{{.Id}}' > /seed/scratch.tar.digest 2>/dev/null
 
 export SHREK_BENCH_POOL=/mnt/pool
 export SHREK_BENCH_DIR=/mnt/pool/records
 export SHREK_BENCH_FS=/mnt/pool
 export SHREK_BENCH_ANCHOR=/home/dev
 export SHREK_BENCH_SEED=localhost/scratch
+export SHREK_BENCH_SEED_TAR=/seed/scratch.tar
 GK=/gatekeeperd
 
 echo "--- create two benches (distinct auto-allocated project ids) ---"
@@ -149,6 +156,20 @@ ip netns list 2>/dev/null | grep -q bench_gamma && bad "egress plumbing not torn
 echo "--- destroy tears down grants + the /run bench dir ---"
 $GK bench destroy gamma >/dev/null 2>&1
 { [ ! -d /run/shrek/bench/gamma ] && [ ! -f /mnt/pool/records/gamma ]; } && ok "destroy removed grant mounts + /run dir + record" || bad "destroy left residue"
+
+echo "===== STEP 6: the offline-seed product loader (ensure_seed, digest-keyed) ====="
+echo "--- ensure_seed re-loads the seed from the sysext archive when the image is absent ---"
+bdev podman rmi -f localhost/scratch >/dev/null 2>&1
+bdev podman image exists localhost/scratch && bad "seed image should be absent before the load test" || ok "seed image removed (simulates a fresh boot with nothing pre-loaded)"
+$GK bench create seedt >/dev/null 2>&1
+$GK bench run seedt -- true >/tmp/seed.log 2>&1; SRC=$?
+{ [ "$SRC" -eq 0 ] && bdev podman image exists localhost/scratch; } && ok "ensure_seed loaded localhost/scratch from the tar + ran (rc0)" || bad "ensure_seed did not load the seed [rc=$SRC $(tail -1 /tmp/seed.log)]"
+# freshness: with the image now loaded at the sidecar's id, a second run must NOT re-load (idempotent).
+ID1=$(bdev podman image inspect localhost/scratch --format '{{.Id}}' 2>/dev/null)
+$GK bench run seedt -- true >/dev/null 2>&1
+ID2=$(bdev podman image inspect localhost/scratch --format '{{.Id}}' 2>/dev/null)
+[ -n "$ID1" ] && [ "$ID1" = "$ID2" ] && ok "a fresh seed is not re-loaded (digest match = idempotent)" || bad "seed id churned across runs ($ID1 -> $ID2)"
+$GK bench destroy seedt >/dev/null 2>&1
 
 umount /mnt/pool 2>/dev/null || true
 echo "=== bench-plane oracle: PASS=$pass FAIL=$fail ==="
