@@ -113,6 +113,10 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   echo "!!! DOGFOOD=1: enabling persistent /home (home.mount) + the M1 persistence probe !!!"
   install -d "$LOCALFS_WANTS" "$MU_WANTS"
   ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
+  # ADR-003 Part 2 step 3: retrofit /home for project quota (before home.mount) + the noexec Bench pool
+  # sub-mount (after it) both ride /home, so enable them in lockstep with home.mount.
+  ln -sf ../shrek-home-quota-prep.service "$LOCALFS_WANTS/shrek-home-quota-prep.service"
+  ln -sf ../shrek-bench-pool.service "$LOCALFS_WANTS/shrek-bench-pool.service"
   ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
 elif [ "$LIVE_INSTALLER" = "1" ]; then
   echo "!!! LIVE_INSTALLER=1: interactive live media — masking proof gates and installed-state mounts !!!"
@@ -121,7 +125,7 @@ elif [ "$LIVE_INSTALLER" = "1" ]; then
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
-  rm -f "$LOCALFS_WANTS/home.mount"
+  rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service"
 else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
@@ -137,8 +141,12 @@ else
     ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
     install -d "$LOCALFS_WANTS"
     ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
+    # ADR-003 Part 2 step 3: quota retrofit (pre-mount) + noexec Bench pool sub-mount ride /home — enable
+    # both in lockstep with home.mount.
+    ln -sf ../shrek-home-quota-prep.service "$LOCALFS_WANTS/shrek-home-quota-prep.service"
+    ln -sf ../shrek-bench-pool.service "$LOCALFS_WANTS/shrek-bench-pool.service"
   else
-    rm -f "$LOCALFS_WANTS/home.mount"
+    rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service"
   fi
 fi
 

@@ -10,6 +10,16 @@
 # local-fs.target.wants/home.mount for a DOGFOOD or INSTALLABLE image. It has no [Install] section, so
 # systemd presets cannot accidentally enable it. The systemd unit name MUST be `home.mount` to match
 # Where=/home.
+#
+# ADR-003 Part 2 step 3 — PROJECT quotas (`prjquota`): the shrek-data fs is formatted `-O quota,project`
+# (installer + dogfood-data-disk.sh), and ext4 only ENGAGES quota enforcement when a quota option is given
+# at the INITIAL mount — a later `remount,prjquota` sets the flag but leaves "Quota mode: none" (proven in
+# the dogfood VM). So `prjquota` MUST live here, on home.mount. That in turn requires the fs to carry the
+# `project` feature or ext4 refuses to mount (which would brick /home + boot): shrek-home-quota-prep.service
+# runs BEFORE this and retrofits the feature onto any older disk (offline `tune2fs -O quota,project`), so
+# this mount is safe on both fresh and pre-step-3 disks. The Bench plane then caps each Bench by project id
+# on the growable /home. /home itself stays exec (users run things in $HOME); only the Bench pool sub-mount
+# (shrek-bench-pool.service) is noexec.
 [Unit]
 Description=Persistent /home on the shrek-data data disk (Dogfood-0 M1)
 Documentation=file:///usr/share/doc/shrek/dogfood-0.md
@@ -21,4 +31,4 @@ Before=umount.target local-fs.target
 What=/dev/disk/by-label/shrek-data
 Where=/home
 Type=ext4
-Options=nosuid,nodev,x-systemd.device-timeout=10s
+Options=nosuid,nodev,prjquota,x-systemd.device-timeout=10s

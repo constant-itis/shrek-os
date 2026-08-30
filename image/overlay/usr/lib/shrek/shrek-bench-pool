@@ -1,0 +1,47 @@
+#!/bin/sh
+# shrek-bench-pool — stand up the Bench container-storage pool. ADR-003 Part 2 step 3.
+#
+# The Bench plane's mutable container storage (podman rootless graphroot + the image-pull staging dir)
+# lives on the PERSISTENT, growable /home plane (ext4 label shrek-data), NOT volatile /var and NOT the
+# 128M swamp-state. Two properties the raw /home mount does not give it, both realized here:
+#
+#   * NOEXEC (rule 2) — /home itself is exec (users run things in $HOME), but the Bench graphroot must be
+#     noexec for host-side safety: `dev`'s shell must not be able to exec a binary dropped into the pool.
+#     noexec is a vfsmount property, so we build a NEW sub-mount: bind the pool dir onto itself and remount
+#     noexec,nosuid,nodev. A container's overlay rootfs is a FRESH superblock mounted WITHOUT noexec, so it
+#     does not inherit this — exec still works IN the container (proven in the Bench-0 dogfood stage); the
+#     noexec only closes the host-side drop-and-exec path. (The `vfs` storage driver is forbidden precisely
+#     because it binds a plain dir as rootfs, which WOULD inherit noexec — storage.conf pins native overlay.)
+#   * PROJECT QUOTA (rule 1) — the pool rides the shrek-data fs, which is formatted `-O quota,project` and
+#     mounted `prjquota` (home.mount), so bench_plane (step 4) can cap each Bench by project id on the
+#     growable /home. This sub-mount is the same fs, so its writes are quota-accounted by shrek-data.
+#
+# Idempotent + fail-safe: safe to re-run (mountpoint guard), and never blocks boot (the service is a
+# oneshot ordered after home.mount; a failure here only means no Bench pool, not a broken boot).
+set -eu
+
+POOL=/home/.shrek/benches
+
+# PROJECT-quota enforcement is armed by home.mount's `prjquota` option (ext4 only engages quota at the
+# INITIAL mount — a remount here would set the flag but leave "Quota mode: none"), so nothing to do for
+# quota here; bench_plane (step 4) caps each Bench with `setquota -P` on this same fs.
+
+# The pool root must exist ON shrek-data before the self-bind (home.mount has already mounted /home).
+mkdir -p "$POOL"
+
+# Build the noexec sub-mount: bind the dir onto itself, then remount with the hardening flags. A bare
+# `mount --bind` does NOT carry noexec (the kernel ignores non-bind flags on the initial bind(2)), so the
+# explicit second remount is load-bearing — the same two-step the Bench-0 proof used.
+if ! mountpoint -q "$POOL"; then
+    mount --bind "$POOL" "$POOL"
+    mount -o remount,bind,noexec,nosuid,nodev "$POOL"
+fi
+
+# podman's baked storage.conf/containers.conf point rootless_storage_path -> storage/ and
+# image_copy_tmp_dir -> tmp/ under the pool. Create them owned by the desktop user so rootless podman (as
+# `dev`) owns its own graphroot. 0700 keeps the pool private to dev.
+mkdir -p "$POOL/storage" "$POOL/tmp"
+chown dev:dev "$POOL" "$POOL/storage" "$POOL/tmp"
+chmod 0700 "$POOL"
+
+echo "shrek-bench-pool: $POOL ready [$(findmnt -no OPTIONS "$POOL" 2>/dev/null || echo not-a-mount)]"

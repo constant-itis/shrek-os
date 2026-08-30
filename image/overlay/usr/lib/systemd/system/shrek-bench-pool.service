@@ -1,0 +1,26 @@
+# shrek-bench-pool.service — stand up the Bench container-storage pool on the growable shrek-data /home.
+# ADR-003 Part 2 step 3. The pool is a noexec,nosuid,nodev bind sub-mount on /home (rule 2) whose backing
+# fs carries project quotas (rule 1). Ordered after home.mount so /home (shrek-data) is present first.
+#
+# The unit FILE ships in the sealed overlay unconditionally, but is ENABLED (local-fs.target.wants) only
+# on images that carry the persistent /home, in lockstep with home.mount — build-in-container.sh stages
+# both together for DOGFOOD / INSTALLABLE, and stages neither for a CI image with no shrek-data disk.
+[Unit]
+Description=Shrek Bench container-storage pool (noexec sub-mount on the shrek-data /home) — ADR-003 Part 2
+Documentation=file:///usr/share/doc/shrek/adr-003-application-and-bench-runtime.md
+DefaultDependencies=no
+Requires=home.mount
+After=home.mount
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/shrek-bench-pool
+# Lazy-detach on stop; /home unmounts on shutdown regardless, this just keeps the mount table tidy.
+ExecStop=/bin/sh -c 'mountpoint -q /home/.shrek/benches && umount -l /home/.shrek/benches || true'
+
+[Install]
+WantedBy=local-fs.target

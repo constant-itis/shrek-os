@@ -30,5 +30,7 @@ fi
 command -v mkfs.ext4 >/dev/null || { echo "mkfs.ext4 not found — install e2fsprogs" >&2; exit 1; }
 truncate -s "$SIZE" "$DISK"
 # -F: operate on a regular file; -q: quiet. Label lets home.mount find it as /dev/disk/by-label/shrek-data.
-mkfs.ext4 -F -q -L "$LABEL" "$DISK"
+# -O quota,project (ADR-003 Part 2 step 3): arm PROJECT quotas so the Bench pool on /home is quota-capable
+# (home.mount mounts it `prjquota`). The dogfood oracle disk must be recreated (FRESH=1) to gain the feature.
+mkfs.ext4 -F -q -O quota,project -L "$LABEL" "$DISK"
 echo "created $DISK — ext4 label=$LABEL size=$SIZE (sparse: $(du -h "$DISK" | cut -f1) used)"

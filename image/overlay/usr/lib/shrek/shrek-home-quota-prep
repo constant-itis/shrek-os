@@ -1,0 +1,33 @@
+#!/bin/sh
+# shrek-home-quota-prep — make the shrek-data /home disk PROJECT-quota-capable BEFORE home.mount. ADR-003
+# Part 2 step 3.
+#
+# home.mount mounts /home with the `prjquota` option (the only way ext4 engages quota enforcement — it is
+# ignored on a later remount). ext4 REFUSES `prjquota` on a fs that lacks the `project` feature, which would
+# brick the /home mount (and boot). Fresh disks are formatted `-O quota,project` (installer +
+# dogfood-data-disk.sh), so this is a no-op for them; but a pre-step-3 disk (an existing dogfood /home, or a
+# real install being A/B-updated to a step-3 image) has no such feature. This oneshot RETROFITS it offline —
+# the device is not yet mounted (ordered Before=home.mount) — so home.mount always succeeds.
+#
+# Idempotent + safe: skips instantly once the feature is present; never fails boot (all steps best-effort).
+set -u
+
+DEV=/dev/disk/by-label/shrek-data
+
+# Wait briefly for the labelled device (matches home.mount's device-timeout=10s); absent ⇒ nothing to do.
+i=0
+while [ ! -b "$DEV" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+[ -b "$DEV" ] || { echo "shrek-home-quota-prep: $DEV not present — skipping"; exit 0; }
+
+# Already project-capable? done.
+if tune2fs -l "$DEV" 2>/dev/null | grep -qiw project; then
+    echo "shrek-home-quota-prep: $DEV already project-quota-capable"
+    exit 0
+fi
+
+# Retrofit: adding a fs feature needs a clean fs, so fsck first (auto-answer, non-fatal), then enable the
+# quota + project features. This GUARANTEES home.mount's `prjquota` precondition, so the mount cannot brick.
+# tune2fs feature-add is reliable (validated on a plain ext4); the || only logs so boot is never blocked here.
+echo "shrek-home-quota-prep: retrofitting quota,project onto $DEV"
+e2fsck -fy "$DEV" >/dev/null 2>&1 || true
+tune2fs -O quota,project "$DEV" >/dev/null 2>&1 || echo "shrek-home-quota-prep: tune2fs feature add failed — home.mount prjquota may fail"

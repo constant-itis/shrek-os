@@ -58,6 +58,10 @@
 # only the .wants enablement is a build input (like the masks above). Scoped so the tracked symlinks in
 # the same .wants dirs (shrek-onion, gatekeeperd, systemd-networkd, …) stay under version control.
 /image/overlay/usr/lib/systemd/system/local-fs.target.wants/home.mount
+# ADR-003 Part 2 step 3: the quota-retrofit + Bench pool sub-mount enable symlinks are staged in lockstep
+# with home.mount (ride /home), so they are DOGFOOD/INSTALLABLE-gated the same way. The unit FILES are tracked.
+/image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-home-quota-prep.service
+/image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-bench-pool.service
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-dogfood-persist.service
 # Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;
 # the daily persistent /home disk out/shrek-data.raw is also under out/ and never committed).

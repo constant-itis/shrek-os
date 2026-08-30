@@ -137,7 +137,10 @@ dd if="$layers" of="$layers_part" bs=16M status=progress conv=fsync
 e2label "$layers_part" shrek-layers
 
 echo "formatting persistent owner state"
-mkfs.ext4 -F -L shrek-data "$home_part"
+# ADR-003 Part 2 step 3: `-O quota,project` arms PROJECT quotas on the shrek-data /home fs, so the Bench
+# plane can cap each Bench's disk use on the growable /home (home.mount adds the `prjquota` option). The
+# noexec Bench pool sub-mount (shrek-bench-pool.service) lives on this same fs.
+mkfs.ext4 -F -O quota,project -L shrek-data "$home_part"
 
 # Apple-firmware boot enablement (best-effort, Apple-ONLY on purpose):
 # 2012-era Apple firmware hangs on systemd-boot and never delivers the UKI's embedded initrd, so on

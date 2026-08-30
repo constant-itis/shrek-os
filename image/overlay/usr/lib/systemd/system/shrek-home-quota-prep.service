@@ -1,0 +1,19 @@
+# shrek-home-quota-prep.service — make the shrek-data /home disk PROJECT-quota-capable BEFORE home.mount.
+# ADR-003 Part 2 step 3. home.mount mounts /home with `prjquota`, and ext4 refuses that option unless the fs
+# carries the `project` feature; this oneshot retrofits it offline (the device is not yet mounted) so the
+# mount never bricks. A no-op on a fresh `-O quota,project` disk. Enabled in lockstep with home.mount.
+[Unit]
+Description=Retrofit project-quota feature onto the shrek-data /home disk (pre-home.mount) — ADR-003 Part 2
+Documentation=file:///usr/share/doc/shrek/adr-003-application-and-bench-runtime.md
+DefaultDependencies=no
+Before=home.mount local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/shrek-home-quota-prep
+
+[Install]
+WantedBy=local-fs.target
