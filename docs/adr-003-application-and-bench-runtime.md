@@ -12,7 +12,13 @@ Part 2 MVP step 5 (route FS + egress grants through the existing Gatekeeper — 
 security-critical core) BUILT + PROVEN (2026-08-30 — a 30/30 host oracle runs REAL rootless podman: an
 FS grant round-trips writes to `dev`, a `--ro` grant denies writes, and a networked `run` late-attaches a
 veth + the sealed nft allow-list into the bench netns; plus the sealed-boot BENCH-GRANT stage proving
-grant materialization + boot re-issuance on the real prjquota `/home`).**
+grant materialization + boot re-issuance on the real prjquota `/home`);
+Part 2 MVP step 6 (ship one offline Scratch seed) BUILT + PROVEN (2026-08-30 — the delivery mechanism was
+decided EMPIRICALLY: `podman load` of the sysext OCI-archive runs green on native rootless overlay, so
+`additionalimagestores` is NOT used; the seed is a real `alpine`+`coreutils`+`ffmpeg`+`exit42` base
+(~52M, `podman load`ed on demand by `bench_plane`'s digest-keyed `ensure_seed`); host oracle 33/0 and the
+sealed-boot BENCH/BENCH-SUP stages prove the seed runs + `ffmpeg` is present + the loader re-materializes
+the image from the archive).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -283,6 +289,26 @@ ADR-002 promote path `promote <name> → Workshop`.
 6. **Ship one offline Scratch seed** — a base image loaded via `podman load` from a tarball
    in the sysext (safer than `additionalimagestores` under merged `/usr`, which risks the
    kernel's overlay stacking-depth-2 limit — VERIFY before choosing).
+   **✅ DONE & GREEN (2026-08-30, host oracle 33/0 + the sealed-boot BENCH/BENCH-SUP stages).**
+   - **DELIVERY decided empirically** (`scratchpad/seed-derisk.sh`, real rootless podman 5.4.2): `podman
+     load` of the sysext archive runs green end-to-end on the NATIVE `overlay` driver (`exit42` → rc 42,
+     `ffmpeg -version` → rc 0); `additionalimagestores` under the already-overlayed merged `/usr` could
+     not be cleanly validated (its failure mode — overlay-on-overlay stacking depth — is structural, not
+     environmental) and is a version-coupled containers-storage layout, not a stable interchange format.
+     `podman load` wins; `additionalimagestores`/composefs is filed as a later disk-dedup optimization for
+     when per-user layer duplication actually hurts (it is NOT a launch gate).
+   - **The seed is a real base**, not the `exit42` stand-in: `alpine`+`coreutils`+`ffmpeg` (the step-8
+     media north-star) + the `exit42` helper baked in (so the seed IS the rule-2 proof image). Built by
+     `scripts/build-bench-seed.sh` — base pinned by digest, every apk pinned by version, `podman save
+     --format oci-archive` (~52M, vs ~133M docker-archive). The seed tar + its `.digest` sidecar are
+     GITIGNORED build products (rebuilt on demand, the quickshell-staging posture — a 52M artifact that
+     churns does not belong in git history); `exit42.tar` is removed, `exit42.elf` is retained (the
+     committed rule-2 ELF + the host-side `noexec` negative-control artifact + the seed helper source).
+   - **The product loader** is `bench_plane`'s `ensure_seed()` (called from `run`): `podman load`s the
+     sysext archive into `dev`'s rootless store iff the image is absent OR stale. Staleness is DIGEST-keyed
+     (the `.digest` sidecar records the built image Id; a mutable `localhost/scratch` tag would otherwise
+     pin a user to the old image after an OS-shipped seed update). Best-effort + fail-open (no baked tar ⇒
+     no-op, the oracle path). This is the one Rust change in step 6 → it bumps the system-index baseline.
 7. **Constrained `.desktop` export** from a Bench via a `shrek-bench-run` wrapper
    (steal distrobox's export UX + the fixed-baked-key discipline from `shrek-menu`, never
    a path/command — same rule as the menu provider).
@@ -334,7 +360,9 @@ model is proven — not just a container launcher.
 - No system-index bump for Part 1 (packaging/config/manifest, zero Rust), nor for Part 2 step 3
   (config/systemd/shell). Part 2 step 4's `bench_plane.rs` + `bench_record.rs` + CLI **are** Rust, so
   they **DO** bump the graph baseline; Part 2 step 5 also touches Rust (`bench_plane.rs` grant/egress
-  wiring + the `net_plane.rs` host-local input-drop), so it bumps too (refreshed post-merge).
+  wiring + the `net_plane.rs` host-local input-drop), so it bumps too (refreshed post-merge). Part 2 step 6
+  is mostly seed/config (a new `build-bench-seed.sh`, gitignored artifacts, repointed proofs) but adds a
+  small `bench_plane.rs` `ensure_seed()` loader, so it bumps as well.
 
 ## Open questions — resolved by Fable review (2026-08-30)
 
@@ -358,8 +386,13 @@ model is proven — not just a container launcher.
    graphroot.
 
 ### Still genuinely open (not blockers, flagged for their step)
-- Offline seed delivery: `podman load` tarball vs `additionalimagestores` (overlay
-  stacking-depth-2 risk) — VERIFY at step 6.
+- ~~Offline seed delivery: `podman load` tarball vs `additionalimagestores` (overlay
+  stacking-depth-2 risk) — VERIFY at step 6.~~ **RESOLVED at step 6 (2026-08-30): `podman load` (proven
+  green on native rootless overlay); `additionalimagestores` rejected (structural overlay-stacking-depth
+  risk under merged `/usr`).** Backlog: `additionalimagestores`/composefs as a disk-dedup optimization
+  (the shipped seed adds ~52M to every signed sysext `.raw` + every update download — the eventual
+  argument to revive a shared read-only store), and pull-signature enforcement on the seed (MVP =
+  `insecureAcceptAnything`).
 - Linger/logout: benches-die-on-logout is the MVP posture; durable linger needs another
   `/home` redirect — revisit only if it bites.
 - ~~`prjquota` on `shrek-data`: touches the installer format path — plan at step 3.~~ **RESOLVED at
