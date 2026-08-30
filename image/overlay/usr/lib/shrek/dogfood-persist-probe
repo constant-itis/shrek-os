@@ -582,6 +582,51 @@ else
     say "S7 weather-tab=FAIL [$(grep -o '"id": *"weather"[^}]*' "$DSET" 2>/dev/null | tr -d '\n')]"
 fi
 
+# --- ADR-003 Part 1: baseline-application MERGE proof on the REAL sealed boot ------------------------
+# The shrek-browser (firefox-esr) + shrek-apps Onions merge onto the sealed /usr; assert the binaries,
+# their .desktop entries, the real font set (emoji + CJK — the thin-font fix), and the promoted CLI utils
+# are actually PRESENT on the merged /usr. This is the "does it LAND" half; whether firefox/GTK actually
+# draw pixels is proven separately by scripts/apps-render-proof.sh (VM screendump lies about GTK, #2923).
+# `set +e` so every check reports a SHREK-DOGFOOD line regardless of individual rc. Gated on presence so
+# stores WITHOUT the Part-1 layers skip cleanly (no new FAIL on a pre-Part-1 dogfood run), same as Bench.
+set +e
+have() { command -v "$1" >/dev/null 2>&1; }
+desk() { [ -f "/usr/share/applications/$1" ]; }
+# BROWSER: firefox-esr as its own Onion (owner decision 2).
+if have firefox-esr; then
+    { have firefox-esr && desk firefox-esr.desktop; } && say "APPS browser=ok" \
+      || say "APPS browser=FAIL bin=$(command -v firefox-esr 2>/dev/null||echo no) desktop=$([ -f /usr/share/applications/firefox-esr.desktop ]&&echo yes||echo no)"
+else
+    say "APPS browser=ABSENT (shrek-browser sysext not merged into /usr)"
+fi
+# APPS: the everyday baseline set. Gate the whole block on the file manager as the tell.
+if have nautilus; then
+    { have nautilus && desk org.gnome.Nautilus.desktop; } && say "APPS filemanager=ok" \
+      || say "APPS filemanager=FAIL bin=$(command -v nautilus 2>/dev/null||echo no) desktop=$(ls /usr/share/applications/*[Nn]autilus*.desktop 2>/dev/null|head -1||echo no)"
+    # viewers: image (loupe), PDF (papers), media (mpv) — bins present + a .desktop each.
+    vfail=""
+    for b in loupe papers mpv; do have "$b" || vfail="$vfail $b"; done
+    ls /usr/share/applications/*[Ll]oupe*.desktop >/dev/null 2>&1 || ls /usr/share/applications/org.gnome.Loupe.desktop >/dev/null 2>&1 || vfail="$vfail loupe.desktop"
+    [ -z "$vfail" ] && say "APPS viewers=ok" || say "APPS viewers=FAIL missing[$vfail]"
+    # editor + archive manager (+ the backends file-roller shells out to for the common formats).
+    have gnome-text-editor && say "APPS editor=ok" || say "APPS editor=FAIL"
+    { have file-roller && have unzip && have zip && { have 7z || have 7za; } && have xz; } \
+      && say "APPS archive=ok" || say "APPS archive=FAIL file-roller=$(have file-roller&&echo y||echo n) unzip=$(have unzip&&echo y||echo n) 7z=$({ have 7z||have 7za;}&&echo y||echo n) xz=$(have xz&&echo y||echo n)"
+    # fonts — the thin-font fix: emoji kills tofu boxes, CJK gives coverage. Check the font FILES directly
+    # (fontconfig may not be on this /usr); glob the noto trees for a color-emoji + a CJK face.
+    EMOJI=$(find /usr/share/fonts -iname 'NotoColorEmoji*' 2>/dev/null | head -1)
+    CJK=$(find /usr/share/fonts -iname '*NotoSansCJK*' -o -iname '*NotoSerifCJK*' -o -iname 'NotoSansCJK*' 2>/dev/null | head -1)
+    { [ -n "$EMOJI" ] && [ -n "$CJK" ]; } && say "APPS fonts=ok emoji=[$(basename "$EMOJI" 2>/dev/null)] cjk=[$(basename "$CJK" 2>/dev/null)]" \
+      || say "APPS fonts=FAIL emoji=[${EMOJI:-none}] cjk=[${CJK:-none}]"
+    # everyday CLI utils promoted from the installer sysext onto the installed disk (fd installs as fdfind).
+    cfail=""
+    for b in curl wget git ssh jq rg fdfind less htop rsync; do have "$b" || cfail="$cfail $b"; done
+    [ -z "$cfail" ] && say "APPS cli=ok" || say "APPS cli=FAIL missing[$cfail]"
+else
+    say "APPS filemanager=ABSENT (shrek-apps sysext not merged into /usr)"
+fi
+set -e
+
 # --- Bench-0 (ADR-003 Part 2): rootless-container Bench runtime on the REAL sealed boot ---------------
 # Fable's smallest-next-proof, phase B — the sealed userns/AppArmor posture a debian:trixie container
 # cannot faithfully fake (bench0-prevalidate proved the mechanics; this proves them on the sealed image).

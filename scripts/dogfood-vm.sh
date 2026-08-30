@@ -370,6 +370,33 @@ grep -qa 'SHREK-DOGFOOD Sconnect seed-service=active' "$LOG" \
   && ok "the boot-time hosts-seed oneshot ran (localhost resolvable on a fresh box)" \
   || bad "shrek-hosts-seed.service not active ($(grep -a 'SHREK-DOGFOOD Sconnect seed-service=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- ADR-003 Part 1: baseline-application MERGE proof (scored only when the Part-1 Onions are merged).
+# The browser (shrek-browser) and app set (shrek-apps) are independent layers, so score each on its own
+# gate. A store without a given layer emits an ABSENT line and is skipped cleanly (no new FAIL). Whether
+# firefox/GTK actually RENDER is a separate proof (scripts/apps-render-proof.sh — screendump lies, #2923).
+if grep -qa 'SHREK-DOGFOOD APPS browser=ok' "$LOG"; then
+  ok "browser — firefox-esr merged onto /usr with its .desktop entry (shrek-browser Onion)"
+elif grep -qa 'SHREK-DOGFOOD APPS browser=FAIL' "$LOG"; then
+  bad "browser — firefox-esr merge incomplete [$(grep -a 'SHREK-DOGFOOD APPS browser=FAIL' "$LOG" | tail -1 | sed 's/.*APPS //')]"
+elif grep -qa 'SHREK-DOGFOOD APPS browser=ABSENT' "$LOG"; then
+  echo "  (browser proof skipped — shrek-browser sysext not in this store)"
+fi
+if grep -qa 'SHREK-DOGFOOD APPS filemanager=ok\|SHREK-DOGFOOD APPS filemanager=FAIL' "$LOG"; then
+  for pair in \
+    "filemanager=ok|file manager (nautilus) merged with its .desktop entry" \
+    "viewers=ok|image/PDF/media viewers (loupe/papers/mpv) present" \
+    "editor=ok|GUI text editor (gnome-text-editor) present" \
+    "archive=ok|archive manager (file-roller) + unzip/zip/7z/xz backends present" \
+    "fonts=ok|the real font set landed — emoji + CJK (the thin-font fix)" \
+    "cli=ok|everyday CLI utils promoted onto the installed disk (curl/git/jq/rg/fd/…)"; do
+    tok=${pair%%|*}; desc=${pair#*|}
+    if grep -qa "SHREK-DOGFOOD APPS ${tok}" "$LOG"; then ok "apps — ${desc}"
+    else bad "apps — ${desc} [$(grep -a "SHREK-DOGFOOD APPS ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*APPS //')]"; fi
+  done
+elif grep -qa 'SHREK-DOGFOOD APPS filemanager=ABSENT' "$LOG"; then
+  echo "  (apps proof skipped — shrek-apps sysext not in this store)"
+fi
+
 # --- Bench-0 (ADR-003 Part 2): rootless-container Bench runtime proof (scored only when shrek-bench merged).
 # Fable's smallest-next-proof, phase B (sealed-boot userns/AppArmor posture). Skipped cleanly on stores
 # without the shrek-bench sysext so pre-Bench dogfood runs do not newly FAIL.
