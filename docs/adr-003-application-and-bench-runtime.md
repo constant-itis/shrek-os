@@ -18,7 +18,13 @@ decided EMPIRICALLY: `podman load` of the sysext OCI-archive runs green on nativ
 `additionalimagestores` is NOT used; the seed is a real `alpine`+`coreutils`+`ffmpeg`+`exit42` base
 (~52M, `podman load`ed on demand by `bench_plane`'s digest-keyed `ensure_seed`); host oracle 33/0 and the
 sealed-boot BENCH/BENCH-SUP stages prove the seed runs + `ffmpeg` is present + the loader re-materializes
-the image from the archive).**
+the image from the archive);
+Part 2 MVP step 7 (constrained `.desktop` export) BUILT + PROVEN (2026-08-30 — a Bench app exports as a
+`.desktop` whose `Exec` is only `/usr/bin/shrek-bench-run <bench> <key>`: the fixed-baked-key discipline,
+so the untrusted `.desktop` carries a KEY and the command lives in the root-owned record; Fable-reviewed
+GO-WITH-FIXES with all five must-fixes folded — env-override feature-gate, write-`.desktop`-as-dev,
+argv-preserving encoding, recorded filenames, and a dot-leading-path grant denylist; host oracle 45/0 +
+the sealed-boot BENCH-EXPORT stage).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -207,7 +213,8 @@ traversable by `dev`'s subuid range (`--userns=keep-id` vs idmapped mounts), and
 
 **`shrek bench` verbs** (ADR-002 already reserves the `shrek bench …` namespace):
 `create <name>` · `enter <name>` · `run <name> -- <cmd>` · `grant <name> <path> --rw` ·
-`network <name> <policy>` · `reset <name>` · `quota <name>` · `destroy <name>` · and the
+`network <name> <policy>` · `export <name> <key> -- <cmd>` · `run-export <name> <key>` ·
+`unexport <name> <key>` · `reset <name>` · `quota <name>` · `destroy <name>` · and the
 ADR-002 promote path `promote <name> → Workshop`.
 
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
@@ -312,6 +319,26 @@ ADR-002 promote path `promote <name> → Workshop`.
 7. **Constrained `.desktop` export** from a Bench via a `shrek-bench-run` wrapper
    (steal distrobox's export UX + the fixed-baked-key discipline from `shrek-menu`, never
    a path/command — same rule as the menu provider).
+   **✅ DONE & GREEN (2026-08-30, host oracle 45/0 + the sealed-boot BENCH-EXPORT stage; Fable
+   GO-WITH-FIXES, all 5 must-fixes folded).**
+   - **The discipline:** `shrek bench export <name> <key> [--label L] [--icon I] -- <cmd…>` records the
+     key→workload map in the **root-owned** record (only the privileged supervisor writes it) and writes a
+     `.desktop` whose `Exec` is only `/usr/bin/shrek-bench-run <name> <key>` — two charset-validated tokens,
+     **no command, no field codes**. `shrek-bench-run` (a compiled, baked wrapper) `env_clear`s and forwards
+     just those tokens to `gatekeeperd bench run-export`, which resolves the key **server-side** against the
+     record and runs it via the normal `run` path (grants apply). A forged/tampered `.desktop` can carry
+     only a key — an unregistered one is refused — so it can inject no host command. `unexport`/`destroy`
+     sweep the `.desktop`; the launcher (DMS + shrek-menu apps provider, #2827) surfaces it from
+     `~/.local/share/applications`.
+   - **Fable must-fixes folded:** (1) the `SHREK_BENCH_*` path overrides — the Bench trust anchor — are
+     compiled OUT of the shipped image (a new `oracle-env` cargo feature; the sealed build ignores the
+     environment entirely, so a redirected env crossing the sudo boundary can't point root `gatekeeperd` at
+     a dev-writable records/anchor dir); (2) the `.desktop` is written/removed **as dev** (runuser), never
+     root, so root never creates a file in a dev-controlled dir (symlink-redirect gadget); (3) the workload
+     is stored argv-faithfully (`%`-escaped per arg, not space-joined); (4) the exact `.desktop` filename is
+     recorded so sweeps delete precisely it (no `name`/`key` `-`-collision) and a cross-bench filename
+     collision is refused; (5) a grant whose anchor-relative path has a **dot-leading component** (`~/.local`,
+     `~/.config`, `~/.ssh`, …) is refused — else a workload could plant an *un*constrained `.desktop`.
 8. **Prove a Media workflow E2E** (the north-star acceptance below).
 
 ### North-star acceptance
@@ -362,7 +389,9 @@ model is proven — not just a container launcher.
   they **DO** bump the graph baseline; Part 2 step 5 also touches Rust (`bench_plane.rs` grant/egress
   wiring + the `net_plane.rs` host-local input-drop), so it bumps too (refreshed post-merge). Part 2 step 6
   is mostly seed/config (a new `build-bench-seed.sh`, gitignored artifacts, repointed proofs) but adds a
-  small `bench_plane.rs` `ensure_seed()` loader, so it bumps as well.
+  small `bench_plane.rs` `ensure_seed()` loader, so it bumps as well. Part 2 step 7 adds the export verbs +
+  the `Export` model + a new `shrek-bench-run` crate + the `oracle-env` feature-gate + the dot-path grant
+  denylist — all Rust, so it bumps too.
 
 ## Open questions — resolved by Fable review (2026-08-30)
 
