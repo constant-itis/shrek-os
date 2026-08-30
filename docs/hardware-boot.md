@@ -147,3 +147,50 @@ scripts/stage-b43-firmware.sh          # one-time, before the base build
 INSTALLABLE=1 scripts/build-in-container.sh 1
 # ... then the same payload -> writer-proof -> dd -> rEFInd flow above
 ```
+
+## 6. Live-installer USB (single stick, decide by hand)
+
+Sections 1-5 write an *installed* system to a stick — it boots straight into the finished
+desktop, with no installer and no partition tools. To hand someone a stick they can boot, look
+around, partition by hand, and *then* install from, build the **live installer** instead.
+
+The live installer has three logical disks (base + `shrek-layers` store carrying the desktop +
+installer sysexts + a `shrek-payload` disk with the sealed image to write). In a VM those are
+separate drives; on one stick they become extra GPT partitions. `scripts/build-installer-usb.sh`
+collapses them onto a single image — nothing is found by device path, so it Just Works:
+`gatekeeperd` mounts the store by `by-label/shrek-layers`, the installer reads
+`by-label/shrek-payload`, and `shrek-list-disks` excludes the stick itself (it backs the live
+root and carries Shrek labels). The builder also runs two hard gates before producing anything:
+it aborts unless the base is a real `LIVE_INSTALLER=1` build, and it runs `initrd-usb-check.py`
+on the UKI. rEFInd + the loose kernel/initrd (§4) are staged onto the ESP automatically.
+
+```
+LIVE_INSTALLER=1 scripts/build-in-container.sh 1 && cp out/shrek_1_x86-64.raw out/shrek-installer-base.raw
+scripts/build-installer-layer.sh          # installer sysext (vendors rEFInd via stage-refind.sh)
+scripts/build-layers.sh installer && cp out/layer-store.raw out/layer-store-installer.raw
+# (payload from §3 is reused: out/shrek-install-payload.raw)
+sudo scripts/make-and-flash-usb.sh /dev/sdX   # assembles the image, flashes, verity-verifies
+```
+
+Booting it (Apple: hold Option -> EFI Boot -> rEFInd -> "Shrek OS Installer") lands in a
+**user-driven live session**, not an auto-erase: `shrek-live-welcome` presents a chooser —
+**GParted**, a **terminal**, or **Install Shrek OS** — and `Super+Return` opens a terminal,
+`Super+W` reopens the chooser. The chooser + GParted are verified to render under the live
+sway/pixman session (`scripts/install0-live-boot-proof.sh` asserts the session is reached; a
+GPU-less VM screendump only shows window outlines for GTK clients, so GTK render is verified in
+a headless-sway + `grim` container — real hardware has a GPU and paints normally).
+
+## 7. rEFInd on the installed disk (Apple only)
+
+`shrek-install-target` stages rEFInd + a loose kernel/initrd on the *target* ESP too, so a Shrek
+installed to an internal disk boots on Apple firmware (which otherwise hangs on the dd'd
+systemd-boot). This is **gated to Apple firmware** (`/sys/class/dmi/id/sys_vendor`); every other
+machine keeps systemd-boot and full A/B update-counting + rollback. Override with
+`SHREK_FORCE_REFIND=1` / `0`.
+
+TRADEOFF (Apple only, unavoidable): a static rEFInd conf pins boot to the installed version, so
+systemd-boot's A/B update activation + auto-rollback do not apply on Macs — the firmware can't
+run systemd-boot there at all, so that path never existed on that hardware. systemd-boot is kept
+as `BOOTX64.systemd-boot.efi` for recovery. The rEFInd recipe is shared by the live USB and the
+installed disk via `shrek-stage-refind` (one source of truth). NOTE: the Apple staging path is
+CI-dark — the writer/live proofs run on x86 (sys_vendor != Apple) and skip it.
