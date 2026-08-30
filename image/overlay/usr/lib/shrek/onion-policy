@@ -27,3 +27,10 @@ enable shrek-installer
 # for the Bench plane. Sealed-enabled so oniond merges it when the store carries it (INCLUDE_BENCH=1 build);
 # a listed-but-absent layer is simply not merged (no error), same as shrek-dev. docs/adr-003-*.md.
 enable shrek-bench
+# ADR-003 Part 1 — the baseline application plane, delivered as signed Onions so a sealed dm-verity /usr
+# ships a functional-out-of-the-box daily driver (philosophy #2905) without an apt escape hatch. The browser
+# is its OWN layer (owner decision 2) so it updates independently of the rest of the app set. Both are
+# sealed-enabled so oniond merges them when the store carries them (INCLUDE_BROWSER=1 / INCLUDE_APPS=1
+# build); a listed-but-absent layer is simply not merged (no error), same as shrek-dev/shrek-bench.
+enable shrek-browser
+enable shrek-apps
