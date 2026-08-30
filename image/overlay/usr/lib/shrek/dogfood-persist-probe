@@ -764,6 +764,35 @@ if command -v podman >/dev/null 2>&1; then
         # destroy removes the record + the data dir + the /run bench dir (identity + quota + grants gone).
         "$GKB" bench destroy probe1 >/dev/null 2>&1
         { [ ! -f "$BPOOL/records/probe1" ] && [ ! -d "$BPOOL/b/probe1" ] && [ ! -d /run/shrek/bench/probe1 ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
+
+        # --- Bench EXPORT (ADR-003 Part 2 step 7): the constrained .desktop launcher plane on the SEALED
+        # image (env overrides compiled OUT here — the shipped build uses /home defaults). A FRESH bench
+        # (no egress grant) so run-export takes the PLAIN run path — the networked late-attach is the host
+        # oracle's job (the VM is endpoint-free). Export the baked exit42 seed helper as a launcher app:
+        # a CONSTRAINED .desktop written AS DEV + a key->workload map in the root-owned record; run-export
+        # resolves the key server-side + runs it (rc42); a forged key is refused; the wrapper is baked;
+        # destroy sweeps the .desktop.
+        DAPPS=/home/dev/.local/share/applications
+        install -d -o dev -g dev /home/dev/.local /home/dev/.local/share "$DAPPS" 2>/dev/null
+        DFILE="$DAPPS/shrek-bench-probe2-e42.desktop"
+        [ -x /usr/bin/shrek-bench-run ] && say "BENCH-EXPORT wrapper-baked=ok" || say "BENCH-EXPORT wrapper-baked=FAIL (/usr/bin/shrek-bench-run absent)"
+        "$GKB" bench create probe2 --quota 1024 >/tmp/bxc.log 2>&1
+        if "$GKB" bench export probe2 e42 --label "Exit42 App" -- exit42 >/tmp/bx.log 2>&1; then
+            { [ -f "$DFILE" ] && [ "$(stat -c %U "$DFILE" 2>/dev/null)" = dev ]; } && say "BENCH-EXPORT desktop-as-dev=ok" || say "BENCH-EXPORT desktop-as-dev=FAIL [$(stat -c '%U %a' "$DFILE" 2>/dev/null)]"
+            grep -qx 'Exec=/usr/bin/shrek-bench-run probe2 e42' "$DFILE" 2>/dev/null && say "BENCH-EXPORT fixed-exec=ok" || say "BENCH-EXPORT fixed-exec=FAIL [$(grep '^Exec=' "$DFILE" 2>/dev/null)]"
+            { grep -qiE '^(DBusActivatable|Actions|MimeType)=' "$DFILE" 2>/dev/null || grep '^Exec=' "$DFILE" 2>/dev/null | grep -qE '%[fFuUick]'; } && say "BENCH-EXPORT no-command=FAIL leaks-fieldcode-or-risky-directive" || say "BENCH-EXPORT no-command=ok"
+            grep -q '^export e42 ' "$BPOOL/records/probe2" && say "BENCH-EXPORT recorded=ok" || say "BENCH-EXPORT recorded=FAIL"
+            # run-export resolves the registered key server-side and runs the exit42 helper in the bench (rc42).
+            "$GKB" bench run-export probe2 e42 >/tmp/bx2.log 2>&1; XRC=$?
+            [ "$XRC" -eq 42 ] && say "BENCH-EXPORT run-export=ok rc=$XRC" || say "BENCH-EXPORT run-export=FAIL rc=$XRC [$(tr -d '\r' </tmp/bx2.log | tail -1)]"
+            # a forged / unregistered launcher key is REFUSED (the whole trust anchor: a .desktop carries only a key).
+            if "$GKB" bench run-export probe2 forged >/dev/null 2>&1; then say "BENCH-EXPORT forged-key-refused=FAIL accepted"; else say "BENCH-EXPORT forged-key-refused=ok"; fi
+        else
+            say "BENCH-EXPORT export=FAIL [$(tr -d '\r' </tmp/bx.log | tail -1)]"
+        fi
+        # destroy sweeps the exported .desktop(s) with the bench.
+        "$GKB" bench destroy probe2 >/dev/null 2>&1
+        [ ! -f "$DFILE" ] && say "BENCH-EXPORT destroy-sweep=ok" || say "BENCH-EXPORT destroy-sweep=FAIL (.desktop survived destroy)"
     else
         say "BENCH-SUP gatekeeperd=MISSING (not at $GKB)"
     fi

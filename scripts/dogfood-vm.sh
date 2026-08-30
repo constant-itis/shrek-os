@@ -447,6 +447,22 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
       else bad "bench-grant — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-GRANT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-GRANT //')]"; fi
     done
   fi
+  # Bench EXPORT (ADR-003 Part 2 step 7): the constrained .desktop launcher plane on the sealed image.
+  if grep -qa 'SHREK-DOGFOOD BENCH-EXPORT ' "$LOG"; then
+    for pair in \
+      "wrapper-baked=ok|the fixed shrek-bench-run launcher wrapper is baked at /usr/bin (the .desktop Exec target)" \
+      "desktop-as-dev=ok|export writes the .desktop AS DEV, not root (no symlink-redirect root-write gadget)" \
+      "fixed-exec=ok|the .desktop Exec is the fixed wrapper + exactly two tokens (no command)" \
+      "no-command=ok|the .desktop carries NO command and NO field codes (fixed-baked-key discipline)" \
+      "recorded=ok|the key->workload map is in the root-owned record (untamperable by the .desktop)" \
+      "run-export=ok|run-export resolves the key server-side + runs it in the Bench (rc 42)" \
+      "forged-key-refused=ok|an unregistered launcher key is refused (a forged .desktop injects nothing)" \
+      "destroy-sweep=ok|destroy sweeps the bench's exported .desktop files"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-EXPORT ${tok}" "$LOG"; then ok "bench-export — ${desc}"
+      else bad "bench-export — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-EXPORT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-EXPORT //')]"; fi
+    done
+  fi
 elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  (bench proof skipped — shrek-bench sysext not in this store)"
 fi

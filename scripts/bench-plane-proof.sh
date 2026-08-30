@@ -12,8 +12,10 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "=== building gatekeeperd (host) ==="
-cargo build -p gatekeeperd >/dev/null 2>&1
+echo "=== building gatekeeperd (host, --features oracle-env) ==="
+# oracle-env re-enables the SHREK_BENCH_* path overrides this oracle drives (records/pool/fs/anchor/run/
+# seed). The SHIPPED image build compiles them OUT (must-fix 1), so this feature is oracle-only.
+cargo build -p gatekeeperd --features oracle-env >/dev/null 2>&1
 GK="$(pwd)/target/debug/gatekeeperd"
 [ -x "$GK" ] || { echo "no gatekeeperd binary at $GK" >&2; exit 1; }
 
@@ -32,6 +34,11 @@ apt-get install -y -qq e2fsprogs quota podman uidmap iproute2 nftables >/dev/nul
 truncate -s 256M /pool.img
 mkfs.ext4 -F -q -O quota,project /pool.img
 mkdir -p /mnt/pool
+# Pre-create loop device NODES: a --privileged container grants the loop capability but not the /dev/loopN
+# nodes; under host loop pressure `mount -o loop` picks a HIGH free number whose node is absent and fails
+# intermittently ("no such bench" cascade — the mount silently didn't take). Create a wide range so any
+# free loop the kernel picks has a node. (STM docker-loop-mount-mkosi-image.)
+for i in $(seq 0 63); do [ -e /dev/loop$i ] || mknod -m660 /dev/loop$i b 7 $i; done
 mount -o loop,prjquota /pool.img /mnt/pool
 # FS grants relocate a bind into the HOST mount ns and rely on it PROPAGATING into dev's already-running
 # rootless-podman pause mount-ns. That propagation needs `/` to be rshared BEFORE the first podman command
@@ -170,6 +177,31 @@ $GK bench run seedt -- true >/dev/null 2>&1
 ID2=$(bdev podman image inspect localhost/scratch --format '{{.Id}}' 2>/dev/null)
 [ -n "$ID1" ] && [ "$ID1" = "$ID2" ] && ok "a fresh seed is not re-loaded (digest match = idempotent)" || bad "seed id churned across runs ($ID1 -> $ID2)"
 $GK bench destroy seedt >/dev/null 2>&1
+
+echo "===== STEP 7: constrained .desktop export (fixed-baked-key) ====="
+APPS=/home/dev/.local/share/applications
+$GK bench create exp1 >/dev/null 2>&1
+echo "--- fix 5: a grant into a dot-leading dir (~/.local) is refused ---"
+install -d -o dev -g dev "$APPS"
+$GK bench grant exp1 "$APPS" --rw >/dev/null 2>&1 && bad "dot-path grant (~/.local/...) should be refused" || ok "dot-path grant refused (a workload can't plant an unconstrained .desktop)"
+echo "--- export writes a CONSTRAINED .desktop (as dev) + records key->workload in the root-owned record ---"
+$GK bench export exp1 hello --label "Hello Bench" -- sh -c 'echo hi' >/tmp/e1.log 2>&1 && ok "export accepted" || bad "export failed [$(tail -1 /tmp/e1.log)]"
+DF="$APPS/shrek-bench-exp1-hello.desktop"
+[ -f "$DF" ] && ok ".desktop materialized" || bad ".desktop missing"
+[ "$(stat -c %U "$DF" 2>/dev/null)" = dev ] && ok ".desktop is dev-owned (written AS DEV, not root — fix 2)" || bad ".desktop not dev-owned [$(stat -c %U "$DF" 2>/dev/null)]"
+grep -qx 'Exec=/usr/bin/shrek-bench-run exp1 hello' "$DF" && ok ".desktop Exec is the fixed wrapper + exactly 2 tokens" || bad ".desktop Exec wrong [$(grep '^Exec=' "$DF")]"
+{ grep -qiE '^(DBusActivatable|Actions|MimeType)=' "$DF" || grep '^Exec=' "$DF" | grep -qE '%[fFuUick]'; } && bad ".desktop has a field code / risky directive [$(grep -iE '^(DBusActivatable|Actions|MimeType|Exec)=' "$DF"|tr '\n' '|')]" || ok ".desktop carries NO command + NO field codes + no risky directives (key discipline holds)"
+grep -q '^export hello ' /mnt/pool/records/exp1 && ok "export recorded in the root-owned record" || bad "export not recorded [$(grep export /mnt/pool/records/exp1|tr '\n' '|')]"
+echo "--- run-export resolves the key SERVER-SIDE and runs the workload; a forged key is refused ---"
+$GK bench run-export exp1 hello >/tmp/e2.log 2>&1 && ok "run-export resolves the registered key + runs (rc0)" || bad "run-export failed [$(tail -2 /tmp/e2.log|tr '\n' '|')]"
+$GK bench run-export exp1 bogus >/dev/null 2>&1 && bad "an unregistered key must be refused" || ok "unregistered launcher key refused (a forged .desktop can inject nothing)"
+echo "--- unexport + destroy sweep the .desktop ---"
+$GK bench unexport exp1 hello >/dev/null 2>&1 && ok "unexport accepted" || bad "unexport failed"
+{ [ ! -f "$DF" ] && ! grep -q '^export hello ' /mnt/pool/records/exp1; } && ok "unexport removed the .desktop + the record entry" || bad "unexport left residue"
+$GK bench export exp1 hello2 -- true >/dev/null 2>&1
+DF2="$APPS/shrek-bench-exp1-hello2.desktop"
+$GK bench destroy exp1 >/dev/null 2>&1
+[ ! -f "$DF2" ] && ok "destroy swept the bench's exported .desktop(s)" || bad "destroy left a .desktop behind"
 
 umount /mnt/pool 2>/dev/null || true
 echo "=== bench-plane oracle: PASS=$pass FAIL=$fail ==="
