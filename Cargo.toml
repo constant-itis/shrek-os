@@ -13,6 +13,7 @@ members = [
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
     "crates/shrekctl",    # operator CLI
     "crates/shrek",       # user-facing CLI: `shrek run` front door       (Phase 6)
+    "crates/shrek-bench-run", # exported-Bench .desktop launcher target   (ADR-003 Part 2 step 7)
     "crates/coder",       # coding-agent WORKLOAD for `shrek run` (model-driven) (Phase 6 slice-2)
     "crates/model-proxy", # broker-side authenticated egress proxy for hosted models (Phase 6 slice-3)
     "crates/claude-broker", # broker-side subscription-model provider: shells the logged-in claude CLI (Phase 6 slice-4)
@@ -40,6 +41,7 @@ default-members = [
     "crates/oniond",
     "crates/shrekctl",
     "crates/shrek",
+    "crates/shrek-bench-run",
     "crates/coder",
     "crates/shrek-gate-probe",
 ]

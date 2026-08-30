@@ -25,6 +25,7 @@ use crate::mount_plane::{open_anchor, pin_beneath, relocate_ro, relocate_rw};
 use crate::net_plane;
 use std::ffi::CString;
 use std::io;
+use std::io::Write as _;
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -37,7 +38,7 @@ const MNT_DETACH: i32 = 2;
 /// The Bench container-storage pool root (the noexec sub-mount stood up by `shrek-bench-pool.service`).
 /// Overridable for the host/container oracle via `SHREK_BENCH_POOL`.
 pub fn pool_dir() -> PathBuf {
-    std::env::var("SHREK_BENCH_POOL").unwrap_or_else(|_| "/home/.shrek/benches".to_string()).into()
+    bench_record::bench_env("SHREK_BENCH_POOL").unwrap_or_else(|| "/home/.shrek/benches".to_string()).into()
 }
 
 /// A Bench's own quota-scoped data directory, bound into the container at `/work`. Beneath `<pool>/b/`.
@@ -47,13 +48,13 @@ fn data_dir(pool: &Path, name: &str) -> PathBuf {
 
 /// The filesystem the ext4 project quota is set on (the shrek-data `/home`). Overridable for the oracle.
 fn quota_fs() -> String {
-    std::env::var("SHREK_BENCH_FS").unwrap_or_else(|_| "/home".to_string())
+    bench_record::bench_env("SHREK_BENCH_FS").unwrap_or_else(|| "/home".to_string())
 }
 
 /// The offline seed image a Bench runs from (step 6 ships the real Scratch/Media seed; the oracle loads
 /// a stand-in). A NAME, resolved by podman against the local store only (registries.conf search is empty).
 fn seed_image() -> String {
-    std::env::var("SHREK_BENCH_SEED").unwrap_or_else(|_| "localhost/scratch".to_string())
+    bench_record::bench_env("SHREK_BENCH_SEED").unwrap_or_else(|| "localhost/scratch".to_string())
 }
 
 /// The offline seed's OCI-archive, baked into the shrek-bench sysext and `podman load`ed into `dev`'s
@@ -62,8 +63,8 @@ fn seed_image() -> String {
 /// `additionalimagestores` on the already-overlayed merged /usr risks the kernel's overlay
 /// stacking-depth-2 limit. Overridable for the oracle (which stages its own tar).
 fn seed_tar() -> PathBuf {
-    std::env::var("SHREK_BENCH_SEED_TAR")
-        .unwrap_or_else(|_| "/usr/share/shrek/bench/seeds/scratch.tar".to_string())
+    bench_record::bench_env("SHREK_BENCH_SEED_TAR")
+        .unwrap_or_else(|| "/usr/share/shrek/bench/seeds/scratch.tar".to_string())
         .into()
 }
 
@@ -72,14 +73,14 @@ fn seed_tar() -> PathBuf {
 /// hence `dev`-owned by construction (so `dev`'s rootless podman reads/writes it and writes round-trip
 /// to `dev` — proven in the step-5 de-risk). Overridable for the oracle via `SHREK_BENCH_ANCHOR`.
 fn anchor_dir() -> PathBuf {
-    std::env::var("SHREK_BENCH_ANCHOR").unwrap_or_else(|_| format!("/home/{BENCH_USER}")).into()
+    bench_record::bench_env("SHREK_BENCH_ANCHOR").unwrap_or_else(|| format!("/home/{BENCH_USER}")).into()
 }
 
 /// Per-Bench VOLATILE runtime dir on `/run` (grants + the bench-owned hosts file). `/run` is tmpfs, so
 /// everything here is rebuilt at boot by `reissue` (the durable record on `/home` is the source of truth).
 /// Overridable via `SHREK_BENCH_RUN` (the oracle has no `/run/shrek`).
 fn bench_run_dir(id: &str) -> PathBuf {
-    let base = std::env::var("SHREK_BENCH_RUN").unwrap_or_else(|_| "/run/shrek/bench".to_string());
+    let base = bench_record::bench_env("SHREK_BENCH_RUN").unwrap_or_else(|| "/run/shrek/bench".to_string());
     PathBuf::from(base).join(id)
 }
 
@@ -144,6 +145,170 @@ impl Grant {
         let leaf = path.file_name()?.to_str()?.to_string();
         bench_record::valid_bench_name(&leaf).then_some(leaf)
     }
+}
+
+// ---- exports (step 7): the constrained .desktop launcher plane ------------------------------------
+
+/// %-escape the bytes that would break the space-delimited one-line record wire form (space, `%`, and any
+/// control char) so a label/argv arg round-trips FAITHFULLY (Fable step-7 fix 3: a space-join is lossy).
+fn pct_encode(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == ' ' || c.is_control() {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                o.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            o.push(c);
+        }
+    }
+    o
+}
+
+/// Inverse of [`pct_encode`]. Unknown/short `%` sequences pass through literally (never panics).
+fn pct_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut o = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 3 <= b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                o.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        o.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&o).into_owned()
+}
+
+/// A launcher export: a fixed KEY (mirrors shrek-menu's baked provider key — the untrusted `.desktop`
+/// carries the key, the trusted root-owned record carries the command). `file` is the exact `.desktop`
+/// basename written (recorded so unexport/destroy delete precisely it — Fable step-7 fix 4). `label`/`cmd`
+/// are `%`-escaped on the wire (fix 3). Wire: `<key> <file> <icon> <label%> <arg0%> [arg1% …]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Export {
+    key: String,
+    file: String,
+    icon: String,
+    label: String,
+    cmd: Vec<String>,
+}
+
+impl Export {
+    fn parse(s: &str) -> Option<Export> {
+        let mut it = s.split(' ');
+        let key = it.next()?.to_string();
+        let file = it.next()?.to_string();
+        let icon = it.next()?.to_string();
+        let label = pct_decode(it.next()?);
+        let cmd: Vec<String> = it.map(pct_decode).collect();
+        if cmd.is_empty() {
+            return None;
+        }
+        Some(Export { key, file, icon, label, cmd })
+    }
+
+    fn encode(&self) -> String {
+        let mut parts = vec![self.key.clone(), self.file.clone(), self.icon.clone(), pct_encode(&self.label)];
+        parts.extend(self.cmd.iter().map(|a| pct_encode(a)));
+        parts.join(" ")
+    }
+}
+
+/// An icon is a freedesktop icon NAME (never a path — an icon path under a bench-writable grant would let a
+/// workload control launcher-rendered pixels = UI spoofing, Fable step-7 fix 3-icon). Safe token, no `/`.
+fn valid_icon(i: &str) -> bool {
+    !i.is_empty()
+        && i.len() <= 128
+        && !i.starts_with('.')
+        && i.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// A `.desktop` basename is safe to `rm`/`mv` (no traversal/space) — defence in depth even though the name
+/// is generated from validated tokens and stored in the root-owned record.
+fn valid_desktop_file(f: &str) -> bool {
+    f.ends_with(".desktop")
+        && f.len() <= 200
+        && !f.contains("..")
+        && f.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+/// Sanitize a user-supplied `.desktop` label: drop control chars (no line/entry forging), cap length, trim.
+/// `None` (absent/empty) ⇒ the caller uses a computed default.
+fn sanitize_label(opt: Option<&str>) -> Option<String> {
+    let s = opt?;
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).take(64).collect();
+    let t = cleaned.trim();
+    (!t.is_empty()).then(|| t.to_string())
+}
+
+/// Dev's XDG applications dir — where launchers (DMS + shrek-menu apps provider, #2827) discover entries.
+/// Under the user-authority anchor (dev's home), so the per-user exports sit beside nothing sealed.
+fn desktop_apps_dir() -> PathBuf {
+    anchor_dir().join(".local/share/applications")
+}
+
+/// The constrained `.desktop` body: absolute `Exec` to the baked wrapper with exactly two charset-validated
+/// tokens, NO field codes (`%f`/`%u`/… — so launchers pass no file args), `Terminal=false`, a GenericName
+/// badge so an export can't silently masquerade as a baked app. `bench`/`key` are safe tokens (no space/
+/// newline) ⇒ Exec injection is impossible by construction. `label` backslash-escaped per the Desktop spec.
+fn desktop_content(bench: &str, key: &str, label: &str, icon: &str) -> String {
+    let name = label.replace('\\', "\\\\");
+    format!(
+        "[Desktop Entry]\n\
+         Version=1.0\n\
+         Type=Application\n\
+         Name={name}\n\
+         GenericName=Shrek Bench app\n\
+         Comment=Runs in the {bench} Bench (Shrek OS)\n\
+         Exec=/usr/bin/shrek-bench-run {bench} {key}\n\
+         Icon={icon}\n\
+         Terminal=false\n\
+         Categories=Utility;\n\
+         X-Shrek-Bench={bench}\n"
+    )
+}
+
+/// Write a `.desktop` into dev's applications dir AS DEV — never as root: root creating a file inside a
+/// dev-controlled dir is a symlink-redirect root-write gadget (Fable step-7 fix 2). Refuses to overwrite an
+/// existing file (⇒ `AlreadyExists`, the cross-bench filename-collision guard, fix 4). Content flows over
+/// stdin so it never transits argv; the dir + basename are positional args (validated, no interpolation).
+fn write_desktop_as_dev(file: &str, content: &str) -> io::Result<()> {
+    let dir = desktop_apps_dir();
+    let uid = dev_uid();
+    let script = r#"d="$1"; f="$2"; mkdir -p "$d" || exit 1; [ -e "$d/$f" ] && exit 3; t="$d/.$f.tmp.$$"; cat > "$t" || exit 1; chmod 644 "$t" || exit 1; mv "$t" "$d/$f""#;
+    let mut child = Command::new("runuser")
+        .arg("-u").arg(BENCH_USER).arg("--")
+        .arg("env").arg("HOME=/home/dev").arg(format!("XDG_RUNTIME_DIR=/run/user/{uid}")).arg("PATH=/usr/bin:/bin")
+        .arg("sh").arg("-c").arg(script)
+        .arg("sh").arg(dir.to_string_lossy().to_string()).arg(file)
+        .stdin(Stdio::piped())
+        .spawn()?;
+    child.stdin.take().unwrap().write_all(content.as_bytes())?;
+    match child.wait()?.code() {
+        Some(0) => Ok(()),
+        Some(3) => Err(io::Error::new(io::ErrorKind::AlreadyExists, "a .desktop with this name already exists (bench/key collision)")),
+        other => Err(io::Error::new(io::ErrorKind::Other, format!("desktop write (as dev) failed (rc {other:?})"))),
+    }
+}
+
+/// Remove an exported `.desktop` AS DEV (idempotent). Same trust reason as the writer: never root-unlink in
+/// dev's dir. The basename is validated + came from the root-owned record.
+fn remove_desktop_as_dev(file: &str) {
+    if !valid_desktop_file(file) {
+        return;
+    }
+    let dir = desktop_apps_dir();
+    let uid = dev_uid();
+    let _ = Command::new("runuser")
+        .arg("-u").arg(BENCH_USER).arg("--")
+        .arg("env").arg("HOME=/home/dev").arg(format!("XDG_RUNTIME_DIR=/run/user/{uid}")).arg("PATH=/usr/bin:/bin")
+        .arg("rm").arg("-f").arg(dir.join(file))
+        .status();
 }
 
 /// The record's single egress policy, if any (MVP: one `net` grant per Bench).
@@ -559,6 +724,7 @@ fn create(name: &str, quota_kib: u64) -> i32 {
             created: now_secs(),
             state: "created".into(),
             grants: vec![],
+            exports: vec![],
         };
         bench_record::write_record(&rdir, &rec)?;
         Ok(())
@@ -758,6 +924,17 @@ fn grant(name: &str, path_str: &str, rw: bool) -> i32 {
         eprintln!("bench grant: {} must be a directory strictly beneath {} (user-authority anchor)", canonical.display(), anchor.display());
         return 2;
     }
+    // Reject any grant whose anchor-relative path has a DOT-LEADING component (kills ~/.local, ~/.config,
+    // ~/.ssh, …). Granting e.g. ~/.local/share/applications would let a bench workload plant an
+    // UNCONSTRAINED .desktop (arbitrary Exec), collapsing the constrained-export story — and dotdirs hold
+    // secrets/config a Bench must start with none of (rule 4). `fs_leaf` already rejects a dot-leading
+    // BASENAME; this extends it to EVERY component of the resolved path (ADR-003 step-7 must-fix 5).
+    if let Ok(rel) = canonical.strip_prefix(&anchor) {
+        if rel.components().any(|c| matches!(c, std::path::Component::Normal(s) if s.to_string_lossy().starts_with('.'))) {
+            eprintln!("bench grant: {} has a dot-leading path component — refused (no ~/.config, ~/.local, ~/.ssh, …: a workload could plant an unconstrained .desktop or read secrets)", canonical.display());
+            return 2;
+        }
+    }
     if !std::fs::metadata(&canonical).map(|m| m.is_dir()).unwrap_or(false) {
         eprintln!("bench grant: {} is not a directory (only directory grants are supported)", canonical.display());
         return 2;
@@ -888,6 +1065,12 @@ fn destroy(name: &str) -> i32 {
         eprintln!("bench: no such bench {name}");
         return 4;
     };
+    // Sweep this Bench's exported launcher .desktop files (step 7) — as dev, from the record (fix 2/4).
+    for e in &rec.exports {
+        if let Some(x) = Export::parse(e) {
+            remove_desktop_as_dev(&x.file);
+        }
+    }
     // Order matters (Fable step-5 fix 6): STOP the container first so no live view survives, THEN tear
     // down egress plumbing and lazy-unmount the FS grants, THEN remove the /run bench dir.
     podman_rm(name);
@@ -898,6 +1081,108 @@ fn destroy(name: &str) -> i32 {
     let _ = std::fs::remove_dir_all(data_dir(&pool_dir(), name));
     let _ = bench_record::remove_record(&rdir, name);
     println!("bench: destroyed {name}");
+    0
+}
+
+/// export <name> <key> [--label L] [--icon I] -- <workload...>: register a launcher app for a Bench (step
+/// 7). Records the key→workload map in the ROOT-OWNED record (untamperable by the .desktop author) and
+/// writes a CONSTRAINED .desktop (Exec=`/usr/bin/shrek-bench-run <name> <key>`, no command) AS DEV. The
+/// fixed-baked-key mirror of shrek-menu: the .desktop carries only a key; the command lives in trusted state.
+fn export(name: &str, key: &str, label_opt: Option<&str>, icon_opt: Option<&str>, workload: &[String]) -> i32 {
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, name) else {
+        eprintln!("bench: no such bench {name}");
+        return 4;
+    };
+    if !bench_record::valid_bench_name(key) {
+        eprintln!("bench export: key {key:?} must be a safe token (alnum ._- , no leading dot, <=64)");
+        return 2;
+    }
+    if workload.is_empty() {
+        eprintln!("bench export: an empty workload is not allowed (give the command after --)");
+        return 2;
+    }
+    if workload.iter().any(|a| a.contains('\n')) {
+        eprintln!("bench export: a workload arg contains a newline");
+        return 2;
+    }
+    if rec.exports.iter().filter_map(|e| Export::parse(e)).any(|e| e.key == key) {
+        eprintln!("bench export: key {key:?} is already exported from {name} (unexport it first)");
+        return 1;
+    }
+    let label = sanitize_label(label_opt).unwrap_or_else(|| format!("{name}: {key}"));
+    let icon = icon_opt.filter(|i| valid_icon(i)).unwrap_or("application-x-executable").to_string();
+    let file = format!("shrek-bench-{name}-{key}.desktop");
+    if !valid_desktop_file(&file) {
+        eprintln!("bench export: generated .desktop name {file:?} is unsafe");
+        return 2;
+    }
+    // Write the .desktop AS DEV first — this catches a cross-bench filename collision (AlreadyExists)
+    // BEFORE we mutate the record, so a refused export leaves no orphan record line.
+    if let Err(e) = write_desktop_as_dev(&file, &desktop_content(name, key, &label, &icon)) {
+        eprintln!("bench export: .desktop write failed: {e}");
+        return 1;
+    }
+    let exp = Export { key: key.to_string(), file: file.clone(), icon, label, cmd: workload.to_vec() };
+    rec.exports.push(exp.encode());
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("bench export: record write failed: {e}");
+        remove_desktop_as_dev(&file); // roll back the orphan .desktop
+        return 1;
+    }
+    println!("bench: exported {name}:{key} -> [{}] (launcher app {file})", workload.join(" "));
+    0
+}
+
+/// run-export <name> <key>: the wrapper target. Resolve the key against the ROOT-OWNED record (server-side,
+/// so a forged .desktop can pass only a key, never a command) and run that workload in the Bench via the
+/// normal `run` path (FS/egress grants apply). An unregistered key is REFUSED — the whole trust anchor.
+fn run_export(name: &str, key: &str) -> i32 {
+    if !bench_record::valid_bench_name(key) {
+        eprintln!("bench run-export: invalid key {key:?}");
+        return 2;
+    }
+    let rdir = bench_record::records_dir();
+    let Some(rec) = bench_record::load_record(&rdir, name) else {
+        eprintln!("bench: no such bench {name}");
+        return 4;
+    };
+    let Some(exp) = rec.exports.iter().filter_map(|e| Export::parse(e)).find(|e| e.key == key) else {
+        eprintln!("bench run-export: {key:?} is not a registered export of {name} — refusing (the launcher key is unknown)");
+        return 4;
+    };
+    run(name, false, &exp.cmd)
+}
+
+/// unexport <name> <key>: drop the export from the record and remove its .desktop (as dev). Idempotent-ish:
+/// a missing key is an error (rc 4), a missing .desktop is fine.
+fn unexport(name: &str, key: &str) -> i32 {
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, name) else {
+        eprintln!("bench: no such bench {name}");
+        return 4;
+    };
+    let before = rec.exports.len();
+    let mut removed_file = None;
+    rec.exports.retain(|e| match Export::parse(e) {
+        Some(x) if x.key == key => {
+            removed_file = Some(x.file);
+            false
+        }
+        _ => true,
+    });
+    if rec.exports.len() == before {
+        eprintln!("bench unexport: no export {key:?} in {name}");
+        return 4;
+    }
+    if let Some(f) = &removed_file {
+        remove_desktop_as_dev(f);
+    }
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("bench unexport: record write failed: {e}");
+        return 1;
+    }
+    println!("bench: unexported {name}:{key}");
     0
 }
 
@@ -1026,13 +1311,49 @@ pub fn cli(args: &[String]) -> i32 {
                 _ => { eprintln!("usage: gatekeeperd bench network <name> <profile|none>"); 2 }
             }
         }
+        "export" => {
+            // export <name> <key> [--label L] [--icon I] -- <workload...>
+            let mut name = None;
+            let mut key = None;
+            let mut label = None;
+            let mut icon = None;
+            let mut workload: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--" => { workload = rest[i + 1..].to_vec(); break; }
+                    "--label" => { i += 1; label = rest.get(i).cloned(); }
+                    "--icon" => { i += 1; icon = rest.get(i).cloned(); }
+                    other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
+                    other if !other.starts_with('-') && key.is_none() => key = Some(other.to_string()),
+                    other => { eprintln!("bench export: unexpected arg {other}"); return 2; }
+                }
+                i += 1;
+            }
+            match (name, key) {
+                (Some(n), Some(k)) => export(&n, &k, label.as_deref(), icon.as_deref(), &workload),
+                _ => { eprintln!("usage: gatekeeperd bench export <name> <key> [--label L] [--icon I] -- <cmd...>"); 2 }
+            }
+        }
+        "run-export" => {
+            match (rest.first(), rest.get(1)) {
+                (Some(n), Some(k)) => run_export(n, k),
+                _ => { eprintln!("usage: gatekeeperd bench run-export <name> <key>"); 2 }
+            }
+        }
+        "unexport" => {
+            match (rest.first(), rest.get(1)) {
+                (Some(n), Some(k)) => unexport(n, k),
+                _ => { eprintln!("usage: gatekeeperd bench unexport <name> <key>"); 2 }
+            }
+        }
         // The ADR-002 promote path is a later MVP step. Explicit stub so the verb surface is stable and a
         // caller gets a clear "not yet", never a silent success.
         "promote" => {
             eprintln!("bench promote: deferred to a later MVP step (ADR-002 promote → Workshop)");
             3
         }
-        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|reset|quota|destroy|list|reissue> …"); 2 }
+        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|reset|quota|destroy|list|reissue> …"); 2 }
         other => { eprintln!("bench: unknown verb {other}"); 2 }
     }
 }
@@ -1065,6 +1386,62 @@ mod tests {
     }
 
     #[test]
+    fn export_roundtrips_argv_with_spaces_and_percent() {
+        let e = Export {
+            key: "convert".into(),
+            file: "shrek-bench-media-convert.desktop".into(),
+            icon: "application-x-executable".into(),
+            label: "Convert Video (100%)".into(),
+            cmd: vec!["ffmpeg".into(), "-i".into(), "my clip.mp4".into(), "out 50%.webm".into()],
+        };
+        let wire = e.encode();
+        assert!(!wire.contains('\n'), "wire is single-line");
+        // the space-bearing label/args are %-escaped so the space-split parse is faithful.
+        assert!(wire.split(' ').count() >= 8, "each field is one space-free token: {wire}");
+        assert_eq!(Export::parse(&wire), Some(e), "argv + label round-trip exactly (fix 3)");
+    }
+
+    #[test]
+    fn export_parse_rejects_empty_workload() {
+        // key + file + icon + label but no argv ⇒ not a valid export.
+        assert!(Export::parse("k shrek-bench-a-k.desktop icon Label").is_none());
+    }
+
+    #[test]
+    fn desktop_content_is_constrained() {
+        let d = desktop_content("media", "convert", "My App", "app-icon");
+        assert!(d.contains("Exec=/usr/bin/shrek-bench-run media convert"), "absolute wrapper Exec, 2 tokens");
+        assert!(!d.contains('%'), "NO desktop field codes (%f/%u/…) — launchers pass no file args: {d}");
+        assert!(d.contains("Terminal=false"));
+        assert!(d.contains("Type=Application"));
+        assert!(d.contains("GenericName=Shrek Bench app"), "badge so an export can't masquerade as a baked app");
+        assert!(!d.contains("DBusActivatable"));
+        assert!(!d.contains("\nActions="));
+        assert!(!d.contains("MimeType"));
+    }
+
+    #[test]
+    fn export_hardening_validators() {
+        assert!(valid_icon("org.gnome.TextEditor"));
+        assert!(!valid_icon("/home/dev/evil.png"), "icon path (spoof surface) rejected");
+        assert!(!valid_icon(".hidden"));
+        assert!(valid_desktop_file("shrek-bench-a-b.desktop"));
+        assert!(!valid_desktop_file("../../etc/x.desktop"));
+        assert!(!valid_desktop_file("evil.sh"));
+        assert_eq!(sanitize_label(Some("  hi\nthere  ")).as_deref(), Some("hithere"), "control chars stripped, trimmed");
+        assert_eq!(sanitize_label(Some("   ")), None);
+        assert_eq!(sanitize_label(None), None);
+    }
+
+    #[test]
+    fn pct_roundtrips() {
+        for s in ["", "plain", "a b c", "100%", "tab\tnl\nend", "unicode-café"] {
+            assert_eq!(pct_decode(&pct_encode(s)), s, "roundtrip {s:?}");
+        }
+        assert!(!pct_encode("a b%c\n").contains(' '), "no space survives encode");
+    }
+
+    #[test]
     fn seed_freshness_digest_keyed() {
         // sidecar present: only an EXACT id match is fresh (a stale/absent load must re-pull).
         assert!(seed_is_fresh(Some("abc123"), "abc123"), "matching id is fresh");
@@ -1078,11 +1455,16 @@ mod tests {
 
     #[test]
     fn seed_tar_default_and_override() {
-        // default lives in the sysext seeds dir; SHREK_BENCH_SEED_TAR steers the oracle's staged archive.
+        // default lives in the sysext seeds dir (the shipped build ALWAYS uses it — overrides compiled out).
         std::env::remove_var("SHREK_BENCH_SEED_TAR");
         assert_eq!(seed_tar(), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
+        // SHREK_BENCH_SEED_TAR steers the oracle's staged archive ONLY in the oracle-env build; a shipped
+        // build ignores it entirely (must-fix 1 — env can't redirect the trust anchor).
         std::env::set_var("SHREK_BENCH_SEED_TAR", "/tmp/x/scratch.tar");
+        #[cfg(feature = "oracle-env")]
         assert_eq!(seed_tar(), PathBuf::from("/tmp/x/scratch.tar"));
+        #[cfg(not(feature = "oracle-env"))]
+        assert_eq!(seed_tar(), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
         std::env::remove_var("SHREK_BENCH_SEED_TAR");
     }
 
@@ -1160,6 +1542,7 @@ mod tests {
             name: "b".into(), id: "b".into(), project: 100_000, quota_kib: 1024,
             created: 0, state: "created".into(),
             grants: vec!["fs-ro /home/dev/in".into(), "net github-https".into()],
+            exports: vec![],
         };
         assert_eq!(egress_profile(&r), Some("github-https".to_string()));
         r.grants = vec!["fs-rw /home/dev/out".into()];

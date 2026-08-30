@@ -22,12 +22,26 @@ use std::io::{self, Write};
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::path::{Path, PathBuf};
 
+/// Read a `SHREK_BENCH_*` path/name override. These redirect the trust anchor of the whole Bench plane
+/// (records dir, pool, quota fs, grant anchor, /run base, seed), so they are honored ONLY in the oracle
+/// build (`--features oracle-env`). The shipped image compiles them out — `bench_env` is a const `None`,
+/// so the sealed defaults are used unconditionally and no environment can point root `gatekeeperd` at a
+/// dev-writable dir (ADR-003 step-7 must-fix 1). Shared by [`records_dir`] and `bench_plane`.
+#[cfg(feature = "oracle-env")]
+pub(crate) fn bench_env(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|s| !s.is_empty())
+}
+#[cfg(not(feature = "oracle-env"))]
+pub(crate) fn bench_env(_var: &str) -> Option<String> {
+    None
+}
+
 /// Default location of the durable Bench records — on the PERSISTENT `/home` plane (not volatile `/run`),
 /// beside the container-storage pool. Overridable for the host/container oracle (no `/home`) via
-/// `SHREK_BENCH_DIR`, mirroring the record env overrides elsewhere.
+/// `SHREK_BENCH_DIR` in the `oracle-env` build only.
 pub fn records_dir() -> PathBuf {
-    std::env::var("SHREK_BENCH_DIR")
-        .unwrap_or_else(|_| "/home/.shrek/benches/records".to_string())
+    bench_env("SHREK_BENCH_DIR")
+        .unwrap_or_else(|| "/home/.shrek/benches/records".to_string())
         .into()
 }
 
@@ -64,6 +78,9 @@ pub struct BenchRecord {
     pub state: String,
     /// granted host paths (step 5). Empty in step 4.
     pub grants: Vec<String>,
+    /// exported launcher apps (step 7): opaque `Export::encode` strings (key + .desktop file + icon +
+    /// %-escaped label + %-escaped argv). Parsed by `bench_plane::Export`. Empty before step 7.
+    pub exports: Vec<String>,
 }
 
 impl BenchRecord {
@@ -79,6 +96,9 @@ impl BenchRecord {
         s.push_str(&format!("state {}\n", self.state));
         for g in &self.grants {
             s.push_str(&format!("grant {g}\n"));
+        }
+        for e in &self.exports {
+            s.push_str(&format!("export {e}\n"));
         }
         s.push_str("END\n");
         s
@@ -98,6 +118,7 @@ impl BenchRecord {
         let mut created = None;
         let mut state = None;
         let mut grants = Vec::new();
+        let mut exports = Vec::new();
         let mut saw_end = false;
         for line in lines {
             if line == "END" {
@@ -113,6 +134,7 @@ impl BenchRecord {
                 "created" => created = Some(v.parse::<u64>().ok()?),
                 "state" => state = Some(v.to_string()),
                 "grant" => grants.push(v.to_string()),
+                "export" => exports.push(v.to_string()),
                 _ => return None, // unknown field ⇒ fail closed (never silently ignore)
             }
         }
@@ -124,6 +146,7 @@ impl BenchRecord {
             created: created?,
             state: state?,
             grants,
+            exports,
         };
         // The record's own name must be a safe token (defence in depth: the filename already is one).
         if !saw_end || !valid_bench_name(&rec.name) {
@@ -154,6 +177,13 @@ pub fn write_record(dir: &Path, rec: &BenchRecord) -> io::Result<PathBuf> {
     for g in &rec.grants {
         if g.contains('\n') {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "grant path contains newline"));
+        }
+    }
+    for e in &rec.exports {
+        // exports are %-escaped by Export::encode (no space/newline survive), so a raw newline here would
+        // be a caller bug bypassing the encoder — refuse it (a newline would forge extra record lines).
+        if e.contains('\n') {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "export entry contains newline"));
         }
     }
     fs::create_dir_all(dir)?;
@@ -252,6 +282,7 @@ mod tests {
             created: 42,
             state: "created".into(),
             grants: vec![],
+            exports: vec![],
         }
     }
 
@@ -272,6 +303,7 @@ mod tests {
         let d = tmpdir();
         let mut r = rec("media", 100_000);
         r.grants = vec!["/home/dev/in".into(), "/home/dev/out".into()];
+        r.exports = vec!["convert shrek-bench-media-convert.desktop app-x ffmpeg%20job ffmpeg -i".into()];
         r.state = "running".into();
         let p = write_record(&d, &r).unwrap();
         // mode is 0644

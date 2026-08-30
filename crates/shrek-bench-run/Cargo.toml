@@ -1,0 +1,12 @@
+[package]
+name = "shrek-bench-run"
+version.workspace = true
+edition.workspace = true
+
+# The fixed launcher target of an exported Bench .desktop (ADR-003 Part 2 step 7). Compiled (not a shell
+# script — avoids BASH_ENV/ENV/IFS hazards fed from launcher-inherited env) and baked to
+# /usr/bin/shrek-bench-run; the constrained .desktop Exec points at its absolute path. It forwards exactly
+# two safe tokens (bench, key) to the privileged supervisor and NOTHING else. No dependencies by design.
+[[bin]]
+name = "shrek-bench-run"
+path = "src/main.rs"

@@ -13,3 +13,9 @@ shrek-policy = { path = "../shrek-policy" }
 # docs/phase5-consolidation.md §2). The oracle/VM builds opt in with `--features spike`;
 # scripts/spike-stripped-proof.sh regresses that a default build has no pin-verity surface.
 spike = []
+# `oracle-env` gates the `SHREK_BENCH_*` path/name overrides (records dir, pool, quota fs, grant anchor,
+# /run base, seed) to the host/container oracle ONLY. It is DEFAULT-OFF: the shipped image build compiles
+# them out, so root `gatekeeperd bench …` ALWAYS uses the sealed defaults and a redirected environment
+# crossing the sudo boundary can never point it at a dev-writable records/anchor dir (ADR-003 step-7
+# must-fix 1 — the Bench trust anchor). The oracle opts in with `--features oracle-env`.
+oracle-env = []

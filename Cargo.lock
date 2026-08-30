@@ -261,6 +261,10 @@ name = "shrek"
 version = "0.0.1"
 
 [[package]]
+name = "shrek-bench-run"
+version = "0.0.1"
+
+[[package]]
 name = "shrek-gate-probe"
 version = "0.0.1"
 

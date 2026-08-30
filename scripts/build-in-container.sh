@@ -34,7 +34,7 @@ cargo build --release
 # `--features spike` AND the gate, so the shipped gatekeeperd has no pin-verity surface.
 cargo build --release -p gatekeeperd --features spike
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
-install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl,shrek} image/overlay/usr/libexec/shrek/
+install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl,shrek,shrek-bench-run} image/overlay/usr/libexec/shrek/
 # User-facing CLIs on PATH (Dogfood M2): `shrek` is the Phase-6 front door and `shrekctl` the operator
 # CLI — both belong on PATH so the box behaves like a normal machine (owner hit `shrek: command not
 # found`). The daemons stay in /usr/libexec/shrek (not PATH); shrek finds gatekeeperd/agentd via the
@@ -42,6 +42,9 @@ install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl,shrek} 
 install -d image/overlay/usr/bin
 ln -sf ../libexec/shrek/shrek    image/overlay/usr/bin/shrek
 ln -sf ../libexec/shrek/shrekctl image/overlay/usr/bin/shrekctl
+# The exported-Bench .desktop launcher target must be on PATH at the absolute path its Exec names
+# (/usr/bin/shrek-bench-run) — ADR-003 Part 2 step 7.
+ln -sf ../libexec/shrek/shrek-bench-run image/overlay/usr/bin/shrek-bench-run
 # Phase-5 slice-7 (B1): the sealed closed-world in-sandbox acceptance probe (spike-only, strip before
 # ship with the other gate scaffolding). Enrolled in gatekeeperd's compiled-in CLOSED_WORLD so it
 # legitimately derives T-first on the sealed image (a shell cannot — B1 treats it as open-world).
