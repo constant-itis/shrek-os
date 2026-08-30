@@ -117,6 +117,8 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   # sub-mount (after it) both ride /home, so enable them in lockstep with home.mount.
   ln -sf ../shrek-home-quota-prep.service "$LOCALFS_WANTS/shrek-home-quota-prep.service"
   ln -sf ../shrek-bench-pool.service "$LOCALFS_WANTS/shrek-bench-pool.service"
+  # ADR-003 Part 2 step 5: boot re-issuance of Bench project quotas + FS grants (after the pool mount).
+  ln -sf ../shrek-bench-reissue.service "$LOCALFS_WANTS/shrek-bench-reissue.service"
   ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
 elif [ "$LIVE_INSTALLER" = "1" ]; then
   echo "!!! LIVE_INSTALLER=1: interactive live media — masking proof gates and installed-state mounts !!!"
@@ -125,7 +127,7 @@ elif [ "$LIVE_INSTALLER" = "1" ]; then
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
-  rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service"
+  rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service" "$LOCALFS_WANTS/shrek-bench-reissue.service"
 else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
@@ -145,8 +147,9 @@ else
     # both in lockstep with home.mount.
     ln -sf ../shrek-home-quota-prep.service "$LOCALFS_WANTS/shrek-home-quota-prep.service"
     ln -sf ../shrek-bench-pool.service "$LOCALFS_WANTS/shrek-bench-pool.service"
+    ln -sf ../shrek-bench-reissue.service "$LOCALFS_WANTS/shrek-bench-reissue.service"
   else
-    rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service"
+    rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service" "$LOCALFS_WANTS/shrek-bench-reissue.service"
   fi
 fi
 

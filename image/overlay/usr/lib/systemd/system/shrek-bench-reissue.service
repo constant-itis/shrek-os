@@ -1,0 +1,33 @@
+# shrek-bench-reissue.service — boot-time re-issuance of the volatile Bench state (ADR-003 Part 2 step 5).
+# `/home` is durable but `/run` is not, so at boot the supervisor re-reads every durable bench record and
+# re-applies the state the records are the source of truth for: each Bench's ext4 project quota AND its FS
+# grants (re-pinned TOCTOU-safely beneath the home anchor and re-relocated as host-ns binds under
+# /run/shrek/bench/<id>/grants). It also sweeps any egress veth/nft residue from a crash (a granted profile
+# is re-injected per `run`, never persisted as a live netns).
+#
+# The unit FILE ships in the sealed overlay unconditionally; it is ENABLED (local-fs.target.wants) only on
+# images that carry the persistent /home + the Bench pool, in lockstep with shrek-bench-pool.service
+# (build-in-container.sh). Ordered AFTER the pool mount so the records + the pool are present.
+#
+# CRITICAL (Fable step-5 fix 5): this unit MUST NOT isolate its mount namespace. It relocates grant binds
+# into the HOST mount ns so they propagate (via rshared /) into dev's rootless-podman pause ns; a
+# PrivateMounts=/MountFlags=slave/ProtectHome here would strand every re-materialized grant in a dead ns.
+[Unit]
+Description=Shrek Bench boot re-issuance (project quotas + FS grants) — ADR-003 Part 2 step 5
+Documentation=file:///usr/share/doc/shrek/adr-003-application-and-bench-runtime.md
+DefaultDependencies=no
+Requires=home.mount shrek-bench-pool.service
+After=home.mount shrek-bench-pool.service
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# The privileged Bench supervisor: re-apply every durable bench's quota + FS grants; NOT sandboxed (see
+# the CRITICAL note above — grant binds must reach dev's podman ns through the shared host mount tree).
+ExecStart=/usr/libexec/shrek/gatekeeperd bench reissue
+
+[Install]
+WantedBy=local-fs.target

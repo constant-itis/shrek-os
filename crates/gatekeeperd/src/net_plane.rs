@@ -123,9 +123,26 @@ impl SandboxNet {
         for ip in no_masq {
             carveouts.push_str(&format!("    ip saddr {c} ip daddr {ip} return\n", c = self.cont_ip));
         }
+        // HOST-LOCAL reach denial (Fable ADR-003 step-5 review, fix 3). The `forward` chain gates
+        // container→INTERNET, but a packet from the veth destined to the HOST ITSELF (host_ip, or any
+        // address the host owns) is delivered LOCALLY and hits the `input` hook, never `forward` — so
+        // without this a sandbox reaches every host-local listener over its veth. A per-sandbox `input`
+        // chain drops anything arriving on THIS sandbox's veth: the container only ever needs host_ip as
+        // a next-hop ROUTER (that is forwarding, handled in `forward`), never as a destination. Scoped to
+        // `iif host_if` so it touches only this sandbox and cannot fall open (a `policy drop` base input
+        // chain would hijack the host's own traffic). T2/T1 egress inherit the hardening for free — the
+        // brokers they reach (model-proxy/swamp) are forward-reached server-netns dsts, not host-local.
+        let hostlocal = format!(
+            "\x20 chain input {{\n\
+             \x20   type filter hook input priority 0; policy accept;\n\
+             \x20   iif \"{h}\" drop\n\
+             \x20 }}\n",
+            h = self.host_if,
+        );
         format!(
             "table ip {t} {{\n\
              {antispoof}\
+             {hostlocal}\
              \x20 chain forward {{\n\
              \x20   type filter hook forward priority 0; policy accept;\n\
              {allows}\
@@ -445,6 +462,19 @@ mod tests {
         // policy is ACCEPT (does not hijack the host's global forward hook)
         assert!(rs.contains("policy accept"));
         assert!(!rs.contains("policy drop"));
+    }
+
+    #[test]
+    fn ruleset_denies_host_local_reach_from_the_veth() {
+        // Fable ADR-003 step-5 fix 3: a per-sandbox `input` chain drops everything arriving on this
+        // sandbox's veth, so a container can never reach a host-local listener over it (the veth is a
+        // next-hop router for FORWARDED egress only). Scoped to `iif host_if`, policy accept (no hijack).
+        let net = SandboxNet::for_id("hl1");
+        let rs = net.ruleset(&[Endpoint { ip: Ipv4Addr::new(1, 1, 1, 1), proto: Proto::Tcp, port: 443 }], &[]);
+        assert!(rs.contains("hook input"), "a per-sandbox input hook must exist");
+        assert!(rs.contains(&format!("iif \"{}\" drop", net.host_if)), "input drops all traffic on this veth");
+        // The egress allow still lives in forward (host-local denial does not touch internet egress).
+        assert!(rs.contains(&format!("ip saddr {} ip daddr 1.1.1.1 tcp dport 443 accept", net.cont_ip)));
     }
 
     #[test]

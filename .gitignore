@@ -62,6 +62,8 @@
 # with home.mount (ride /home), so they are DOGFOOD/INSTALLABLE-gated the same way. The unit FILES are tracked.
 /image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-home-quota-prep.service
 /image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-bench-pool.service
+# ADR-003 Part 2 step 5: boot re-issuance of Bench quotas + FS grants — same DOGFOOD/INSTALLABLE gating.
+/image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-bench-reissue.service
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-dogfood-persist.service
 # Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;
 # the daily persistent /home disk out/shrek-data.raw is also under out/ and never committed).
