@@ -724,9 +724,34 @@ if command -v podman >/dev/null 2>&1; then
         # the supervisor's project cap is EDQUOT-enforced for a non-root writer in the bench data dir.
         if su dev -s /bin/sh -c "dd if=/dev/zero of=$BPOOL/b/probe1/fill bs=64k count=64 conv=fsync" 2>/tmp/bs3.err; then BSQ=wrote-all; else BSQ=blocked; fi
         { [ "$BSQ" = blocked ] && grep -qi quota /tmp/bs3.err; } && say "BENCH-SUP quota-enforce=ok" || say "BENCH-SUP quota-enforce=FAIL [$(tr -d '\r' </tmp/bs3.err | tail -1)]"
-        # destroy removes the record + the data dir (identity + quota gone).
+
+        # --- Bench GRANTS (ADR-003 Part 2 step 5): route an FS grant through the Gatekeeper on the REAL
+        # sealed mount ns + the real prjquota /home + the real /home/dev anchor. The live CONTAINER
+        # round-trip (grant readable/writable inside podman) + LIVE egress inject are proven in the host
+        # oracle (which has a writable seed + DNS); this endpoint-free sealed VM proves what only it can:
+        # the grant materializes as a host-ns NOEXEC bind on the sealed image, is ProtectHome-safe
+        # (dev-owned 0700), survives boot re-issuance, and the network verb honors sealed egress policy.
+        install -d -o dev -g dev /home/dev/g_out 2>/dev/null
+        if "$GKB" bench grant probe1 /home/dev/g_out --rw >/tmp/bg.log 2>&1; then
+            GD=/run/shrek/bench/probe1/grants/g_out
+            { findmnt -no OPTIONS "$GD" 2>/dev/null | grep -q noexec; } && say "BENCH-GRANT materialized-noexec=ok" || say "BENCH-GRANT materialized-noexec=FAIL [$(findmnt -no OPTIONS "$GD" 2>/dev/null)]"
+            { [ "$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)" = "1000 700" ]; } && say "BENCH-GRANT protecthome-0700=ok" || say "BENCH-GRANT protecthome-0700=FAIL [$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)]"
+            grep -q '^grant fs-rw /home/dev/g_out' "$BPOOL/records/probe1" && say "BENCH-GRANT recorded=ok" || say "BENCH-GRANT recorded=FAIL"
+            # boot re-issuance: drop the /run bind (as a reboot would) then `reissue` must re-materialize it.
+            umount "$GD" 2>/dev/null; rm -rf /run/shrek/bench/probe1
+            "$GKB" bench reissue >/tmp/bgr.log 2>&1
+            { findmnt -no OPTIONS "$GD" 2>/dev/null | grep -q noexec; } && say "BENCH-GRANT reissue-rematerialize=ok" || say "BENCH-GRANT reissue-rematerialize=FAIL [$(tr -d '\r' </tmp/bgr.log | tail -1)]"
+        else
+            say "BENCH-GRANT grant=FAIL [$(tr -d '\r' </tmp/bg.log | tail -1)]"
+        fi
+        # network verb is default-deny: a sealed profile records, an unknown one is refused.
+        "$GKB" bench network probe1 github-https >/dev/null 2>&1
+        grep -q '^grant net github-https' "$BPOOL/records/probe1" && say "BENCH-GRANT egress-recorded=ok" || say "BENCH-GRANT egress-recorded=FAIL"
+        if "$GKB" bench network probe1 allow-all >/dev/null 2>&1; then say "BENCH-GRANT egress-deny-unknown=FAIL accepted"; else say "BENCH-GRANT egress-deny-unknown=ok"; fi
+
+        # destroy removes the record + the data dir + the /run bench dir (identity + quota + grants gone).
         "$GKB" bench destroy probe1 >/dev/null 2>&1
-        { [ ! -f "$BPOOL/records/probe1" ] && [ ! -d "$BPOOL/b/probe1" ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
+        { [ ! -f "$BPOOL/records/probe1" ] && [ ! -d "$BPOOL/b/probe1" ] && [ ! -d /run/shrek/bench/probe1 ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
     else
         say "BENCH-SUP gatekeeperd=MISSING (not at $GKB)"
     fi

@@ -424,10 +424,25 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
       "run-exit42=ok|gatekeeperd bench run executes the seed via rootless podman (rc 42)" \
       "state-stopped=ok|the record returns to state=stopped after the run" \
       "quota-enforce=ok|the supervisor's per-Bench cap is EDQUOT-enforced (non-root writer)" \
-      "destroy=ok|destroy removes the record + the data dir"; do
+      "destroy=ok|destroy removes the record + the data dir + the /run bench dir"; do
       tok=${pair%%|*}; desc=${pair#*|}
       if grep -qa "SHREK-DOGFOOD BENCH-SUP ${tok}" "$LOG"; then ok "bench-sup — ${desc}"
       else bad "bench-sup — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-SUP ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-SUP //')]"; fi
+    done
+  fi
+  # Bench GRANTS (ADR-003 Part 2 step 5): score the FS-grant + egress-policy plane on the sealed image
+  # (the live container round-trip + live egress inject are the host oracle's job — VM is endpoint-free).
+  if grep -qa 'SHREK-DOGFOOD BENCH-GRANT ' "$LOG"; then
+    for pair in \
+      "materialized-noexec=ok|an FS grant relocates into the host ns as a noexec bind on the sealed /home" \
+      "protecthome-0700=ok|the per-Bench grants dir is dev-owned 0700 (no ProtectHome side-door)" \
+      "recorded=ok|the FS grant is recorded durably (survives reboot)" \
+      "reissue-rematerialize=ok|boot reissue re-pins + re-materializes the FS grant after /run is wiped" \
+      "egress-recorded=ok|the network verb records a sealed egress profile" \
+      "egress-deny-unknown=ok|the network verb refuses a non-sealed profile (default-deny)"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-GRANT ${tok}" "$LOG"; then ok "bench-grant — ${desc}"
+      else bad "bench-grant — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-GRANT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-GRANT //')]"; fi
     done
   fi
 elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
