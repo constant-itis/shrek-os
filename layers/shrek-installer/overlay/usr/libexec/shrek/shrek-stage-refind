@@ -1,0 +1,72 @@
+#!/bin/sh
+# shrek-stage-refind — make an ESP boot on 2012-era Apple firmware.
+#
+# Two independent Apple-firmware failures, one fix each (docs/hardware-boot.md §4):
+#   1. systemd-boot hangs on that firmware  -> install rEFInd as the loader the firmware runs.
+#   2. the UKI's embedded initrd is never delivered (LoadFile2 unsupported) -> decompose the UKI
+#      into a LOOSE kernel + initrd, which rEFInd hands over via the EFI-stub initrd= path.
+#
+# Single source of truth for the recipe: called by BOTH shrek-install-target (installed disk) and
+# scripts/build-installer-usb.sh (live USB). Caller owns mount/umount; we take a mountpoint.
+#
+# ORDERING IS DELIBERATE (do not "tidy"): everything that can fail — UKI extraction, validation,
+# refind.conf — runs BEFORE the loader is swapped. The BOOTX64.EFI replacement is the LAST write,
+# so a mid-run failure leaves the working systemd-boot loader in place rather than an unconfigured
+# rEFInd that autoscans the UKI and panics "No working init found" on the exact target firmware.
+# systemd-boot is preserved as BOOTX64.systemd-boot.efi so it stays recoverable.
+#
+# CAVEAT (installed disk): a static rEFInd conf pins boot to THIS version's kernel/roothash, which
+# defeats systemd-boot's A/B update-counting + auto-rollback. shrek-install-target therefore only
+# invokes this on Apple firmware (where systemd-boot can't boot anyway); other hardware keeps
+# systemd-boot and full A/B. See docs/hardware-boot.md §4.
+set -eu
+
+usage() { echo "usage: shrek-stage-refind <esp-mountpoint> <refind_x64.efi> [menu-title]" >&2; exit 64; }
+ESP="${1:-}"; REFIND="${2:-}"; TITLE="${3:-Shrek OS}"
+[ -n "$ESP" ] && [ -n "$REFIND" ] || usage
+[ -d "$ESP" ]    || { echo "ESP mountpoint not a dir: $ESP" >&2; exit 66; }
+[ -f "$REFIND" ] || { echo "refind_x64.efi not found: $REFIND" >&2; exit 66; }
+command -v objcopy >/dev/null 2>&1 || { echo "objcopy (binutils) required" >&2; exit 69; }
+
+# Newest UKI by version (sort -V handles boot-counted names like shrek_2_x86-64+3-0.efi and avoids
+# the lexical shrek_10 < shrek_2 trap). At install time there is exactly one, uncounted.
+uki=$(ls "$ESP"/EFI/Linux/shrek_*_x86-64.efi 2>/dev/null | sort -V | tail -1 || true)
+[ -n "$uki" ] || { echo "no UKI at $ESP/EFI/Linux/shrek_*_x86-64.efi" >&2; exit 67; }
+
+mkdir -p "$ESP/EFI/BOOT"    # safe: creating the dir does not change which loader the firmware runs
+
+# --- everything fallible happens here, BEFORE the loader swap ---------------------------------
+# Loose kernel + initrd. A missing PE section extracts to a 0-byte file at exit 0, so validate.
+objcopy -O binary --only-section=.linux  "$uki" "$ESP/shrek-vmlinuz"
+objcopy -O binary --only-section=.initrd "$uki" "$ESP/shrek-initrd.img"
+tmpc=$(mktemp); trap 'rm -f "$tmpc"' EXIT
+objcopy -O binary --only-section=.cmdline "$uki" "$tmpc"
+cmdline=$(tr -d '\0' < "$tmpc"); rm -f "$tmpc"; trap - EXIT
+case "$cmdline" in *roothash=*) ;; *) echo "extracted cmdline has no roothash= (UKI decompose failed)" >&2; exit 65 ;; esac
+[ -s "$ESP/shrek-vmlinuz" ] && [ -s "$ESP/shrek-initrd.img" ] || { echo "empty kernel/initrd extract" >&2; exit 65; }
+
+uki_rel=${uki#"$ESP"}
+case "$uki_rel" in /*) ;; *) uki_rel="/$uki_rel" ;; esac    # tolerate a trailing-slash mountpoint
+cat > "$ESP/EFI/BOOT/refind.conf" <<EOF
+timeout 20
+use_nvram false
+scanfor manual
+
+menuentry "$TITLE" {
+    loader /shrek-vmlinuz
+    initrd /shrek-initrd.img
+    options "$cmdline"
+}
+
+menuentry "$TITLE (UKI - may not boot on Mac)" {
+    loader $uki_rel
+}
+EOF
+
+# --- LAST: swap the loader, only now that the loose files + conf are in place -----------------
+if [ -f "$ESP/EFI/BOOT/BOOTX64.EFI" ] && [ ! -f "$ESP/EFI/BOOT/BOOTX64.systemd-boot.efi" ]; then
+    cp "$ESP/EFI/BOOT/BOOTX64.EFI" "$ESP/EFI/BOOT/BOOTX64.systemd-boot.efi"
+fi
+cp "$REFIND" "$ESP/EFI/BOOT/BOOTX64.EFI"
+sync
+echo "shrek-stage-refind: staged rEFInd on $ESP (roothash cmdline OK, title='$TITLE')"

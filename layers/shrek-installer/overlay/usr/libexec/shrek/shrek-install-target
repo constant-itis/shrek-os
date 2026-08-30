@@ -139,5 +139,42 @@ e2label "$layers_part" shrek-layers
 echo "formatting persistent owner state"
 mkfs.ext4 -F -L shrek-data "$home_part"
 
+# Apple-firmware boot enablement (best-effort, Apple-ONLY on purpose):
+# 2012-era Apple firmware hangs on systemd-boot and never delivers the UKI's embedded initrd, so on
+# that hardware we replace the loader with rEFInd + a loose kernel/initrd. This PINS boot to the
+# installed version and defeats systemd-boot's A/B update-counting + auto-rollback — a tradeoff that
+# is forced on Apple (systemd-boot can't boot there at all) but would REGRESS working machines
+# elsewhere. So every other vendor keeps systemd-boot and full A/B. Override: SHREK_FORCE_REFIND=1/0.
+vendor="$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || true)"
+stage_refind=0
+case "${SHREK_FORCE_REFIND:-auto}" in
+    1) stage_refind=1 ;;
+    0) stage_refind=0 ;;
+    *) case "$vendor" in Apple*) stage_refind=1 ;; esac ;;
+esac
+
+if [ "$stage_refind" = 1 ]; then
+    esp_part=$(part_path "$TARGET_DISK" 1)
+    refind_efi=/usr/share/refind/refind/refind_x64.efi
+    if [ -b "$esp_part" ] && [ -f "$refind_efi" ]; then
+        echo "Apple firmware (vendor='$vendor'): staging rEFInd + loose kernel on target ESP ($esp_part)"
+        esp_mnt=/run/shrek-target-esp
+        mkdir -p "$esp_mnt"
+        if mount "$esp_part" "$esp_mnt"; then
+            /usr/libexec/shrek/shrek-stage-refind "$esp_mnt" "$refind_efi" "Shrek OS" \
+                || echo "WARNING: rEFInd staging failed; installed disk may not boot on Apple firmware (systemd-boot left in place)" >&2
+            umount "$esp_mnt" 2>/dev/null || true
+            rmdir "$esp_mnt" 2>/dev/null || true
+        else
+            echo "WARNING: could not mount target ESP $esp_part; skipping rEFInd staging" >&2
+        fi
+    else
+        echo "WARNING: ESP ($esp_part) or $refind_efi missing; skipping rEFInd staging" >&2
+        echo "         (installed disk will not boot on Apple firmware without it)" >&2
+    fi
+else
+    echo "non-Apple firmware (vendor='$vendor'): keeping systemd-boot + A/B updates; no rEFInd staging"
+fi
+
 sync
 echo "INSTALL-0 complete: remove installer media and boot $TARGET_DISK"

@@ -9,6 +9,11 @@ HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} - run scripts/build-in-container.sh once first" >&2; exit 1; }
 
+# Vendor refind_x64.efi into the overlay before the sysext build (host egress; the build container
+# has none). The installer needs it to make Apple targets bootable. Not a Packages= entry — refind's
+# postinst hard-fails in the mkosi chroot. See scripts/stage-refind.sh.
+scripts/stage-refind.sh
+
 echo "=== building shrek-installer sysext (Calamares 3.3.14-1) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 docker run --rm --privileged \

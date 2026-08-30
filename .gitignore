@@ -68,3 +68,6 @@
 /out/dogfood-console.log
 /out/dogfood-data.raw
 /out/shrek-data.raw
+
+# Vendored rEFInd loader staged by scripts/stage-refind.sh (build input, not source)
+/layers/shrek-installer/overlay/usr/share/refind/

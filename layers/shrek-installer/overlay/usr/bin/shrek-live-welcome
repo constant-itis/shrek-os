@@ -1,0 +1,68 @@
+#!/bin/sh
+# Shrek OS live-medium welcome: the live USB must let the user DECIDE, not auto-erase.
+# Robust by design: waits for the Wayland session, and NEVER exits on a transient zenity failure
+# (a bare exit would leave a blank compositor with no way back) — it just reloops the chooser.
+# (Verified: the chooser + GParted render under this sway/pixman session; see docs/hardware-boot.md.)
+set -u
+
+# Serial-visible marker so the headless VM proof can assert the live session was reached.
+klog() {
+    { sudo -n sh -c "printf '%s\n' \"shrek-live: $*\" > /dev/kmsg" 2>/dev/null \
+        || printf '%s\n' "shrek-live: $*" > /dev/kmsg 2>/dev/null; } || true
+}
+klog "live session ready"
+
+# Wait for the compositor to actually be up before launching GUI dialogs (fixes the race where
+# zenity fired before the Wayland socket existed and failed instantly).
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+i=0
+while [ "$i" -lt 30 ]; do
+    if [ -n "${WAYLAND_DISPLAY:-}" ] && [ -S "$rt/$WAYLAND_DISPLAY" ]; then break; fi
+    i=$((i + 1)); sleep 1
+done
+
+# Run a GUI program as root under the current Wayland session (GParted needs root; the live
+# session has no polkit agent, so prefer NOPASSWD sudo, mirroring shrek-install-calamares).
+run_root() {
+    if [ "$(id -u)" = 0 ]; then
+        env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="$rt" \
+            QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland "$@"
+    elif sudo -n true >/dev/null 2>&1; then
+        sudo -n env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="$rt" \
+            QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland "$@"
+    else
+        pkexec env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="$rt" \
+            QT_QPA_PLATFORM=wayland GDK_BACKEND=wayland "$@"
+    fi
+}
+
+term() { command -v foot >/dev/null 2>&1 && foot || xterm 2>/dev/null || true; }
+
+do_action() {
+    case "$1" in
+        gparted)  run_root gparted ;;
+        terminal) term ;;
+        install)  shrek-install-calamares ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Automation hook (headless VM proof): run one action without a click, then fall into the chooser.
+# Set via SHREK_LIVE_AUTORUN env or /run/shrek-live-autorun. No-op for a real user (both unset).
+autorun="${SHREK_LIVE_AUTORUN:-}"
+[ -z "$autorun" ] && [ -r /run/shrek-live-autorun ] && autorun="$(cat /run/shrek-live-autorun 2>/dev/null || true)"
+[ -n "$autorun" ] && do_action "$autorun" || true
+
+while :; do
+    choice="$(zenity --list --radiolist --width=560 --height=380 \
+        --title="Shrek OS — Live USB" \
+        --text="Live medium. Explore or partition first, then install when you're ready.\n\n(Super+Return = terminal, Super+W = this menu.)" \
+        --column="" --column="Action" --column="What it does" \
+        --print-column=2 \
+        TRUE  gparted  "Open GParted — inspect / resize / partition disks by hand" \
+        FALSE terminal "Open a terminal (gparted, parted, gdisk, lsblk all available)" \
+        FALSE install  "Install Shrek OS  (ERASES an entire disk)" \
+        2>/dev/null)" || choice=""
+    # Never exit: a transient zenity failure or a Cancel just reloops (Super+W also reopens it).
+    if [ -n "$choice" ]; then do_action "$choice" || true; else sleep 2; fi
+done
