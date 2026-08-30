@@ -33,6 +33,11 @@ fn main() {
             Some("status") => session_status(&argv[2..]),
             _ => session(&argv[1..]),
         }),
+        // ADR-003 Part 2: the Bench plane front door. A thin forwarder to `gatekeeperd bench …` (the
+        // supervisor re-validates every verb + owns the privileged lifecycle/quota ops), mirroring
+        // `shrek run` → `gatekeeperd sandbox`. Bench containers run as `dev`'s rootless podman; the
+        // supervisor drops privilege internally.
+        Some("bench") => std::process::exit(bench(&argv[1..])),
         Some("-h") | Some("--help") | None => {
             usage();
             std::process::exit(0);
@@ -78,7 +83,39 @@ fn usage() {
     eprintln!("    --limit N            max hits (default 50)");
     eprintln!("    --socket PATH        swampd query socket (default: $SWAMP_QUERY_SOCK or /run/swamp/query.sock)");
     eprintln!();
+    eprintln!();
+    eprintln!("  shrek bench <verb> …    the Bench plane — a persistent, quota-capped rootless-container");
+    eprintln!("      home you install tools into without touching the sealed /usr. Verbs:");
+    eprintln!("    create <name> [--quota KiB]   make a Bench (default 4 GiB project quota)");
+    eprintln!("    run <name> [-- CMD…]          run a container in the Bench (no network)");
+    eprintln!("    enter <name>                  interactive shell in the Bench");
+    eprintln!("    quota <name> [KiB]            show or set the Bench's disk cap");
+    eprintln!("    reset <name>                  wipe the Bench's data, keep its identity + quota");
+    eprintln!("    destroy <name>                remove the Bench entirely");
+    eprintln!("    list                          list all Benches");
+    eprintln!("      (grant/network arrive in step 5; promote → Workshop later)");
+    eprintln!();
     eprintln!("  (planned) shrek history | related | status; shrek audit --agent");
+}
+
+/// `shrek bench <verb> …` — forward verbatim to `gatekeeperd bench …` and exec it, replacing this
+/// process so the supervisor's exit status IS shrek's (same fidelity as `shrek run`). The supervisor
+/// re-validates the verb + args and owns the privileged lifecycle; this front door adds no logic. Bench
+/// lifecycle needs the privilege the supervisor runs at (pool mounts, ext4 project quota) — run it with
+/// that privilege, exactly as the proofs do.
+fn bench(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) {
+        usage();
+        return 0;
+    }
+    let gk = std::env::var("SHREK_GATEKEEPERD").unwrap_or_else(|_| "gatekeeperd".to_string());
+    let mut a: Vec<String> = vec!["bench".into()];
+    a.extend(args.iter().cloned());
+    let err = Command::new(&gk).args(&a).exec();
+    eprintln!("shrek bench: cannot exec `{gk}`: {err}");
+    eprintln!("             set SHREK_GATEKEEPERD or ensure gatekeeperd is on PATH, and run with the");
+    eprintln!("             privilege the Bench supervisor needs (pool mounts + ext4 project quota).");
+    127
 }
 
 /// Parsed `shrek run` request, resolved to what the engine needs.

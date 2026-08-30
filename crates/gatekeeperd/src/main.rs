@@ -410,6 +410,13 @@ fn main() {
     if argv.first().map(String::as_str) == Some("session-view") {
         std::process::exit(gatekeeperd::session_view::cli(&argv[1..]));
     }
+    // `bench` (ADR-003 Part 2 step 4) is the Bench lifecycle supervisor — create/run/enter/reset/quota/
+    // destroy/list/reissue for the user-authority mutable-compute plane. A SIBLING of the sandbox/T2
+    // constructor, NOT an extension of it: Bench containers run under `dev`'s rootless podman, so this
+    // verb manages their durable state + quota (privileged) and drops to `dev` for the container ops.
+    if argv.first().map(String::as_str) == Some("bench") {
+        std::process::exit(gatekeeperd::bench_plane::cli(&argv[1..]));
+    }
     // SPIKE-ONLY (slice-8 pin oracle / VM gate): create/measure an fs-verity fixture. Compiled out of
     // production/default builds — this whole dispatch arm exists ONLY under `--features spike` (finding
     // F1). A default build has no `pin-verity` verb: the argument falls through to the broker path and

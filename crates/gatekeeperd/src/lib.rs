@@ -5,6 +5,8 @@
 //! share one implementation. Nothing here pulls an external dependency — see `linux_uapi`.
 
 pub mod authority_record;
+pub mod bench_plane;
+pub mod bench_record;
 pub mod ingest_admit;
 pub mod linux_uapi;
 pub mod mount_plane;
