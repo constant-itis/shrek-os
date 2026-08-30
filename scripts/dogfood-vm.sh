@@ -416,6 +416,20 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
     else bad "bench — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH //')]"; fi
   done
   echo "  bench cgroup/info: $(grep -a 'SHREK-DOGFOOD BENCH cgroup' "$LOG" | tail -1 | sed 's/.*BENCH //')"
+  # Bench supervisor (ADR-003 Part 2 step 4): score the `gatekeeperd bench` lifecycle if it ran.
+  if grep -qa 'SHREK-DOGFOOD BENCH-SUP ' "$LOG" && ! grep -qa 'BENCH-SUP gatekeeperd=MISSING' "$LOG"; then
+    echo "  bench-sup create: $(grep -a 'SHREK-DOGFOOD BENCH-SUP create=' "$LOG" | tail -1 | sed 's/.*BENCH-SUP //')"
+    for pair in \
+      "create=ok|supervisor creates a Bench with a project quota + durable record" \
+      "run-exit42=ok|gatekeeperd bench run executes the seed via rootless podman (rc 42)" \
+      "state-stopped=ok|the record returns to state=stopped after the run" \
+      "quota-enforce=ok|the supervisor's per-Bench cap is EDQUOT-enforced (non-root writer)" \
+      "destroy=ok|destroy removes the record + the data dir"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-SUP ${tok}" "$LOG"; then ok "bench-sup — ${desc}"
+      else bad "bench-sup — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-SUP ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-SUP //')]"; fi
+    done
+  fi
 elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  (bench proof skipped — shrek-bench sysext not in this store)"
 fi

@@ -706,6 +706,30 @@ if command -v podman >/dev/null 2>&1; then
     { [ "$NRC" -ne 42 ] && [ "$NRC" -ne 0 ]; } && say "BENCH noexec-negctl=ok rc=$NRC" || say "BENCH noexec-negctl=FAIL rc=$NRC"
     # (vi) informational: cgroup manager/version + dev-slice delegation (bench lands under user-1000.slice).
     say "BENCH cgroup mgr=$(bdev podman info --format '{{.Host.CgroupManager}}' 2>/dev/null) ver=$(bdev podman info --format '{{.Host.CgroupVersion}}' 2>/dev/null) delegate=$(systemctl show user@1000.service -p Delegate --value 2>/dev/null)"
+
+    # --- Bench supervisor (ADR-003 Part 2 step 4): drive `gatekeeperd bench` END-TO-END on the real
+    # sealed image — create (project quota) -> run the exit42 seed IN the bench via rootless podman ->
+    # enforce the cap (non-root) -> destroy. Uses the /home defaults (pool + records + /home fs); the
+    # exit42 image is already loaded in dev's store by the Bench-0 stage above (tagged localhost/exit42).
+    GKB=/usr/libexec/shrek/gatekeeperd
+    if [ -x "$GKB" ]; then
+        if "$GKB" bench create probe1 --quota 1024 >/tmp/bs.log 2>&1; then
+            say "BENCH-SUP create=ok proj=$(sed -n 's/^project //p' "$BPOOL/records/probe1" 2>/dev/null) rec=[$(tr '\n' ',' <"$BPOOL/records/probe1" 2>/dev/null)]"
+        else say "BENCH-SUP create=FAIL [$(tr -d '\r' </tmp/bs.log | tail -1)]"; fi
+        # run the seed IN the bench via the supervisor (proves rootless podman run THROUGH bench_plane).
+        SHREK_BENCH_SEED=localhost/exit42 "$GKB" bench run probe1 >/tmp/bs2.log 2>&1; BSRC=$?
+        [ "$BSRC" -eq 42 ] && say "BENCH-SUP run-exit42=ok rc=$BSRC" || say "BENCH-SUP run-exit42=FAIL rc=$BSRC [$(tr -d '\r' </tmp/bs2.log | tail -2 | tr '\n' '|')]"
+        # record state returns to stopped after the run.
+        [ "$(sed -n 's/^state //p' "$BPOOL/records/probe1" 2>/dev/null)" = stopped ] && say "BENCH-SUP state-stopped=ok" || say "BENCH-SUP state-stopped=FAIL"
+        # the supervisor's project cap is EDQUOT-enforced for a non-root writer in the bench data dir.
+        if su dev -s /bin/sh -c "dd if=/dev/zero of=$BPOOL/b/probe1/fill bs=64k count=64 conv=fsync" 2>/tmp/bs3.err; then BSQ=wrote-all; else BSQ=blocked; fi
+        { [ "$BSQ" = blocked ] && grep -qi quota /tmp/bs3.err; } && say "BENCH-SUP quota-enforce=ok" || say "BENCH-SUP quota-enforce=FAIL [$(tr -d '\r' </tmp/bs3.err | tail -1)]"
+        # destroy removes the record + the data dir (identity + quota gone).
+        "$GKB" bench destroy probe1 >/dev/null 2>&1
+        { [ ! -f "$BPOOL/records/probe1" ] && [ ! -d "$BPOOL/b/probe1" ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
+    else
+        say "BENCH-SUP gatekeeperd=MISSING (not at $GKB)"
+    fi
 else
     say "BENCH podman=MISSING (shrek-bench sysext not merged into /usr?)"
 fi
