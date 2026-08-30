@@ -1,7 +1,9 @@
 # ADR-003 — Application delivery & the Bench/Workshop container runtime
 
 **Status:** 🟢 Proposed — **Fable-reviewed GO-WITH-FIXES (2026-08-30, corrections folded);
-Part 2 runtime feasibility (MVP step 2) VERIFIED GREEN on the sealed VM (2026-08-30).**
+Part 2 runtime feasibility (MVP step 2) VERIFIED GREEN on the sealed VM (2026-08-30);
+Part 1 baseline-app + browser Onions BUILT + MERGE-PROVEN + RENDER-PROVEN on the sealed
+boot (2026-08-30, dogfood PASS=81/0).**
 Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
 anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
 (Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
@@ -53,6 +55,21 @@ The everyday apps are **Application**-kind software (ADR-002) shipped as signed 
 the *functional-out-of-the-box* goal (#2905) and immutability: an Onion is a separate
 signed partition, **not** baked into the sealed root image, and is independently
 rebuildable/updatable — which is precisely why the browser gets its own layer.
+
+> **Part 1 proof — BUILT + GREEN on the real sealed boot (dogfood oracle, PASS=81 FAIL=0).**
+> Both Onions are built (`shrek-browser` 377 M, `shrek-apps` 1.2 G) and both halves are proven:
+> (a) **MERGE** — the dogfood probe asserts, on the merged sealed `/usr`, that `firefox-esr` +
+> its `.desktop` landed, the app set (nautilus/loupe/papers/mpv/file-roller+backends/
+> gnome-text-editor) landed with entries, the real font set landed (Noto **emoji** + **CJK** —
+> the thin-font fix), and the everyday CLI utils (`curl`/`git`/`jq`/`rg`/`fd`/…) are now on the
+> installed disk (they existed only in the installer/dev sysexts before). (b) **RENDER** —
+> `scripts/apps-render-proof.sh` launches firefox-esr + a GTK app under headless
+> sway (`WLR_RENDERER=pixman`) + `grim` and asserts a real pixel frame (unique-colour count
+> ≫ a blank frame), because a virtio-vga guest without virgl scanout-captures GTK as bare window
+> *outlines* — a capture artifact, not a render failure (#2923). Artifacts: `layers/shrek-browser/`,
+> `layers/shrek-apps/`, `scripts/build-{browser,apps}-layer.sh`, the `onion-policy` enables, the
+> `build-layers.sh` `INCLUDE_BROWSER`/`INCLUDE_APPS` staging, the APPS stage in the dogfood probe/
+> oracle, and `scripts/apps-render-proof.sh`.
 
 **Two new Onion layers** (same build shape as `shrek-desktop`: `mkosi` `Format=sysext`,
 `--base-tree <sealed-base closure> --overlay`, `enable` line in
@@ -222,9 +239,9 @@ model is proven — not just a container launcher.
 
 ## Consequences
 
-- `onion-policy` gains `enable shrek-browser` and `enable shrek-apps` (Part 1, pending
-  build); `enable shrek-bench` is **already added and proven** (Part 2 step 2 green). All
-  are the same signed-sysext trust gate as `shrek-desktop`.
+- `onion-policy` gains `enable shrek-browser` and `enable shrek-apps` (Part 1 — **added,
+  built, and merge-proven**, dogfood PASS=81/0); `enable shrek-bench` is **already added and
+  proven** (Part 2 step 2 green). All are the same signed-sysext trust gate as `shrek-desktop`.
 - **The sealed-`/etc` footprint (Bench-0 proof finding).** The proof empirically confirmed
   this ADR's core wrinkle: a sysext extends `/usr` only, so the container runtime's **entire
   `/etc` footprint must be baked into the sealed base** (`image/mkosi.postinst`), because
@@ -250,11 +267,11 @@ model is proven — not just a container launcher.
 - The installer sysext's app duplication (firefox-esr, gparted, CLI utils) is *not*
   removed — the installer is a distinct throwaway environment; the point is those apps now
   also exist in the installed OS.
-- **Deliverable-4 provability splits:** browser + a second app (Part 1) are provable this
-  cycle via a bake + the grim-container render check (VM screendump lies about GTK render,
-  #2923). "Install one app via the chosen mechanism" (Part 2) is provable only when the
-  `shrek-bench` runtime lands (MVP step 2+), by design — the owner chose ADR-first over a
-  same-day AppImage demo.
+- **Deliverable-4 provability splits:** browser + a second app (Part 1) are **PROVEN this
+  cycle** — a sealed-boot merge check (dogfood PASS=81/0) plus the grim-container render check
+  (firefox-esr + gnome-text-editor draw real frames; VM screendump lies about GTK render, #2923).
+  "Install one app via the chosen mechanism" (Part 2) is provable only when the `shrek-bench`
+  runtime lands (MVP step 2+), by design — the owner chose ADR-first over a same-day AppImage demo.
 - No system-index bump for Part 1 (packaging/config/manifest, zero Rust). Part 2's
   `bench_plane.rs` + CLI *are* Rust → they bump the graph baseline when they land.
 
