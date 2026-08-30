@@ -73,11 +73,11 @@ bad() { echo "  FAIL $*"; fail=$((fail + 1)); }
 grep -qa "shrek-installer" "$LOG" && ok "installer sysext mentioned on serial" || bad "installer sysext not mentioned on serial"
 grep -qa "graphical.target" "$LOG" && ok "graphical target reached" || bad "graphical target not reached"
 grep -qa 'session_open.*acct="dev".*exe="/usr/bin/login"' "$LOG" && ok "dev autologin opened a session" || bad "dev autologin session not observed"
-# INSTALL-0 now presents the Shrek target-disk picker before Calamares, so a
-# headless (un-clicked) boot reaches the picker but not Calamares itself. Assert
-# the installer flow reached target enumeration (and, ideally, found a target).
-grep -qaE "enumerating install targets|eligible target" "$LOG" && ok "Shrek target picker reached on serial" || bad "Shrek target picker not reached on serial"
-grep -qaE "[1-9][0-9]* eligible target" "$LOG" && ok "at least one eligible target enumerated" || bad "no eligible target enumerated (picker would be empty)"
+# The live medium is now USER-DRIVEN: it boots to shrek-live-welcome (a chooser: GParted /
+# terminal / Install), NOT straight into the erase picker. Assert the welcome session was reached;
+# the screenshot below shows the chooser actually rendering. (Disk enumeration is exercised inside
+# the install flow by install0-diskpick-proof.sh + install0-writer-proof.sh.)
+grep -qa "shrek-live: live session ready" "$LOG" && ok "live welcome/chooser reached on serial" || bad "live welcome/chooser not reached on serial"
 if grep -qaE "traps: xdg-desktop-por|comm=\"xdg-desktop-por\".*sig=5" "$LOG"; then
   bad "xdg-desktop-portal crashed with SIGTRAP"
 else
