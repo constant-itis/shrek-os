@@ -56,6 +56,17 @@ fn seed_image() -> String {
     std::env::var("SHREK_BENCH_SEED").unwrap_or_else(|_| "localhost/scratch".to_string())
 }
 
+/// The offline seed's OCI-archive, baked into the shrek-bench sysext and `podman load`ed into `dev`'s
+/// rootless store on demand ([`ensure_seed`]). `podman load` is the step-6 de-risk winner: it reads a
+/// plain file + writes layers to the /home graphroot (a depth-1 ext4 mount), whereas an
+/// `additionalimagestores` on the already-overlayed merged /usr risks the kernel's overlay
+/// stacking-depth-2 limit. Overridable for the oracle (which stages its own tar).
+fn seed_tar() -> PathBuf {
+    std::env::var("SHREK_BENCH_SEED_TAR")
+        .unwrap_or_else(|_| "/usr/share/shrek/bench/seeds/scratch.tar".to_string())
+        .into()
+}
+
 /// The trusted anchor grants are resolved strictly beneath (rule 3 / mount_plane TOCTOU model). A Bench
 /// is USER-authority, so the anchor is the desktop user's home: every grant is a real dir under it,
 /// hence `dev`-owned by construction (so `dev`'s rootless podman reads/writes it and writes round-trip
@@ -305,6 +316,42 @@ fn podman_as_dev_stdout(args: &[String]) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Pure freshness test for the loaded seed vs the sysext archive (testable — [`ensure_seed`] shells out).
+/// `want` = the sidecar `<tar>.digest` (the built image Id) or `None` if no sidecar shipped; `have` = the
+/// Id of the currently-loaded seed image (empty ⇒ absent). With a sidecar, an EXACT Id match is required
+/// (so an OS-shipped seed update — new archive, new Id — forces a reload); without one, load-if-absent.
+fn seed_is_fresh(want: Option<&str>, have: &str) -> bool {
+    match want {
+        Some(w) => !w.is_empty() && have == w,
+        None => !have.is_empty(),
+    }
+}
+
+/// Make sure the seed image is in `dev`'s rootless store before a `run`, `podman load`ing the sysext
+/// OCI-archive iff the image is absent OR stale (digest-keyed, per the seed-staleness flag: a mutable
+/// `localhost/scratch` tag would otherwise pin a user to the old image after an OS update). Best-effort +
+/// fail-OPEN: no baked tar (the oracle supplies the image another way) ⇒ no-op; a load error is logged but
+/// `run` proceeds so podman surfaces a clear "image not found" rather than this masking it.
+fn ensure_seed() {
+    let tar = seed_tar();
+    if !tar.exists() {
+        return; // no baked seed on this host — the image is provided by other means (oracle/test).
+    }
+    let want = std::fs::read_to_string(format!("{}.digest", tar.display()))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let have = podman_as_dev_stdout(&[
+        "image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), seed_image(),
+    ]).map(|s| s.trim().to_string()).unwrap_or_default();
+    if seed_is_fresh(want.as_deref(), &have) {
+        return;
+    }
+    if let Err(e) = podman_as_dev(&["load".into(), "-i".into(), tar.display().to_string()]) {
+        eprintln!("bench run: seed load from {} failed (continuing): {e}", tar.display());
+    }
+}
+
 /// The container's netns-leader pid (its init process). Valid only for a RUNNING container; `0`/unparseable
 /// (created/stopped) ⇒ `None`.
 fn podman_pid(name: &str) -> Option<u32> {
@@ -540,6 +587,8 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
         eprintln!("bench: no such bench {name}");
         return 4;
     };
+    // Ensure the offline seed is loaded into dev's store (load-if-absent-or-stale from the sysext archive).
+    ensure_seed();
     // Materialize FS grants in the host ns (idempotent — no-op if already mounted). Fail-closed.
     if let Err(e) = ensure_grants_materialized(&rec) {
         eprintln!("bench run: FS grant materialization failed (fail-closed): {e}");
@@ -1013,6 +1062,28 @@ mod tests {
         assert!(s.contains("-w /work"));
         assert!(s.ends_with("localhost/scratch ffmpeg -i"));
         assert!(!a.contains(&"-it".to_string()), "non-interactive run has no -it");
+    }
+
+    #[test]
+    fn seed_freshness_digest_keyed() {
+        // sidecar present: only an EXACT id match is fresh (a stale/absent load must re-pull).
+        assert!(seed_is_fresh(Some("abc123"), "abc123"), "matching id is fresh");
+        assert!(!seed_is_fresh(Some("abc123"), "def456"), "mismatched id (OS-shipped update) is stale");
+        assert!(!seed_is_fresh(Some("abc123"), ""), "absent image is not fresh");
+        assert!(!seed_is_fresh(Some(""), "abc123"), "empty sidecar never certifies freshness");
+        // no sidecar shipped: fall back to load-if-absent.
+        assert!(seed_is_fresh(None, "anything"), "no sidecar → any loaded image counts as present");
+        assert!(!seed_is_fresh(None, ""), "no sidecar + absent → must load");
+    }
+
+    #[test]
+    fn seed_tar_default_and_override() {
+        // default lives in the sysext seeds dir; SHREK_BENCH_SEED_TAR steers the oracle's staged archive.
+        std::env::remove_var("SHREK_BENCH_SEED_TAR");
+        assert_eq!(seed_tar(), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
+        std::env::set_var("SHREK_BENCH_SEED_TAR", "/tmp/x/scratch.tar");
+        assert_eq!(seed_tar(), PathBuf::from("/tmp/x/scratch.tar"));
+        std::env::remove_var("SHREK_BENCH_SEED_TAR");
     }
 
     #[test]

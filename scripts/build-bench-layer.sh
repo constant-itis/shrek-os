@@ -15,6 +15,12 @@ HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
 
+# The offline Bench seed (ADR-003 step 6) is a gitignored build product; build it if absent so a clean
+# checkout bakes a real Scratch/Media image into the sysext (ExtraTrees=overlay picks it up below). Rebuild
+# it explicitly (scripts/build-bench-seed.sh) to bump the pinned base/packages.
+SEED=layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/scratch.tar
+[ -s "$SEED" ] || { echo "=== seed $SEED absent — building it first ==="; scripts/build-bench-seed.sh; }
+
 echo "=== building shrek-bench sysext (rootless podman runtime) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 # overlayfs-on-docker-overlay2 mounts EINVAL; bind a host ext4 dir over /var/tmp so mkosi's overlay
