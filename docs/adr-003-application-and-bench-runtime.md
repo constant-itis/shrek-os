@@ -1,0 +1,287 @@
+# ADR-003 — Application delivery & the Bench/Workshop container runtime
+
+**Status:** 🟢 Proposed — **Fable-reviewed GO-WITH-FIXES (2026-08-30, corrections folded);
+Part 2 runtime feasibility (MVP step 2) VERIFIED GREEN on the sealed VM (2026-08-30).**
+Decides *how a daily-driver Shrek OS gets its everyday apps* and *how a user installs
+anything beyond the baked baseline*, on a sealed immutable image. Builds on ADR-001
+(Deployment / A-B) and ADR-002 (environment vocabulary — this ADR uses those nouns verbatim:
+**Application**, **Onion**, **Bench**, **Workshop**, **Job**, **User Tool**).
+
+> **Bench-0 runtime proof — GREEN on the real sealed boot (dogfood oracle, PASS=74 FAIL=0).**
+> Rootless Podman/crun runs on the sealed dm-verity image with all six assertions passing as
+> `dev`: (i) sealed unprivileged userns (`unshare -U` — the AppArmor risk Fable flagged is
+> clear on this base), (ii) **native** rootless `overlay` (not vfs/fuse), (iii) subuid maps
+> the full 65536 range (setuid `newuidmap` survives the sysext merge), (iv) a real compiled
+> ELF execs off the `noexec` `/home` pool → rc 42 (rule-2 confirmed — fresh-superblock exec
+> works), (v) negative control: direct exec from the `noexec` pool is blocked, (vi) the
+> container lands under `dev`'s delegated systemd `user-1000.slice`. Artifacts:
+> `layers/shrek-bench/`, `scripts/build-bench-layer.sh`, the `image/mkosi.postinst` bakes, and
+> the Bench-0 stage in the dogfood probe/oracle. **Integration findings the proof surfaced
+> (all fixed) — see "Consequences → the sealed-`/etc` footprint" below.**
+
+**Owner decisions locked (2026-08-30):**
+1. Baseline apps are **baked** (immutable ⇒ no post-install apt escape hatch; the
+   Silverblue/SteamOS/Bazzite rule, philosophy #2905).
+2. The **web browser is its own signed Onion** (Firefox ESR), *separate* from the rest
+   of the baseline app set, so it updates independently of everything else.
+3. The "everything-else" install plane is **Podman/crun-based** and is **ADR-first** — no
+   AppImage. This ADR is that first step; the runtime is proven *before* any user-facing
+   `shrek bench` code lands. (Deliberately rejects AppImage-in-`~/Apps`: unconfined,
+   no portal/secret/grant story — a personal daily-driver deserves the real plane.)
+
+## Context
+
+Today's *installed* Shrek system (as opposed to the installer USB, which is app-rich but
+throwaway) has a complete shell — Sway + DMS + Quickshell, foot, PipeWire, grim/slurp,
+udisks2/NetworkManager/BlueZ/UPower backends — and **almost no applications**: no
+browser, file manager, image/PDF/media viewer, archive manager, or GUI editor; a thin
+font set (DejaVu-core + Material Symbols only); and even the everyday CLI utilities
+(`curl`/`wget`/`git`/`unzip`/`openssh`/`jq`/`rg`) live only in the installer/dev sysexts,
+never on the disk you boot. On a normal distro these are a `apt install` away. On a
+sealed dm-verity `/usr` they are not — a missing app requires a full image rebuild the
+end user cannot perform. So the inclusion rule flips: **bundle broadly.**
+
+Two things must be decided together, because "what apps exist" (the package manifest) and
+"how you add more" (the mutable plane) are the two halves of a usable OS.
+
+## Decision
+
+### Part 1 — Baseline Applications are delivered as Onions
+
+The everyday apps are **Application**-kind software (ADR-002) shipped as signed dm-verity
+**Onion** sysexts, merged by `oniond` under the sealed `onion-policy`. This satisfies both
+the *functional-out-of-the-box* goal (#2905) and immutability: an Onion is a separate
+signed partition, **not** baked into the sealed root image, and is independently
+rebuildable/updatable — which is precisely why the browser gets its own layer.
+
+**Two new Onion layers** (same build shape as `shrek-desktop`: `mkosi` `Format=sysext`,
+`--base-tree <sealed-base closure> --overlay`, `enable` line in
+`image/overlay/usr/lib/shrek/onion-policy`, staged by `scripts/build-layers.sh`):
+
+| Layer | Kind | Contents |
+|---|---|---|
+| **`shrek-browser`** | Onion | `firefox-esr` (own layer, updates independently — owner decision 2) |
+| **`shrek-apps`** | Onion | file manager, image viewer, PDF viewer, media player, archive manager, GUI text editor, a real font set, and the everyday CLI utilities |
+
+Concrete `shrek-apps` candidate manifest (all Debian `main`, Wayland-native where it
+matters; final closure resolved + logged at build per the `# VERIFY` discipline):
+
+- **File manager:** `nautilus` *(GTK4, Wayland-clean, GVfs/udisks2-native trash+mount)* —
+  alternative `nemo` or `pcmanfm-qt` if closure is too heavy.
+- **Image viewer:** `loupe` *(GNOME's GTK4 viewer)* — alt `eog`.
+- **PDF/document viewer:** `papers` *(GNOME's GTK4 Evince successor)* — alt `evince`.
+- **Media/video player:** `mpv` *(minimal deps, Wayland/GPU-accelerated, no DE pull-in)*.
+- **Archive manager:** `file-roller` + backends `unzip zip p7zip-full xz-utils`.
+- **GUI text editor:** `gnome-text-editor` *(GTK4)* — alt `gedit`.
+- **Fonts (the thin-font fix):** `fonts-noto-core fonts-noto-color-emoji
+  fonts-noto-cjk fonts-liberation2 fonts-dejavu` — a UI face, emoji (kills tofu boxes),
+  and CJK coverage.
+- **Everyday CLI utils (promoted from the installer sysext into the installed OS):**
+  `curl wget git openssh-client jq ripgrep fd-find unzip zip ca-certificates less
+  htop rsync` + document/format helpers.
+
+`.desktop` entries land in `/usr/share/applications`; the DMS launcher + `shrek-menu`
+apps provider already surface host `DesktopEntries` (#2827), so no launcher wiring is
+needed beyond the entries themselves.
+
+**Size posture:** these are the fat sysext plane, *not* the fixed 2 G A/B root slot, so
+they do not pressure root geometry (same separation that let the ~400 MB firmware batch
+fit, #2909). Firefox is the single largest closure and its own layer, so its size is
+isolated and its updates are decoupled.
+
+### Part 2 — The Bench/Workshop plane runs on Podman/crun inside an Onion
+
+Everything a user installs beyond the baked baseline runs in the **Bench** plane
+(ADR-002: the mutable "mess-with-a-door" — `apt`/`pip`/experiments without touching sealed
+`/usr`; promotes to a reproducible **Workshop**). Its runtime substrate is **rootless
+Podman + crun**, delivered as its own Onion:
+
+| Layer | Kind | Contents |
+|---|---|---|
+| **`shrek-bench`** | Onion | `podman crun conmon fuse-overlayfs uidmap catatonit` + baked configs at `/usr/share/containers/{storage,containers}.conf` (graphroot/runroot→`/home`, `image_copy_tmp_dir`→`/home`) |
+
+**What is deliberately NOT in the layer** (Fable corrections):
+- **`subuid`/`subgid` do not go in a sysext** — a sysext extends `/usr` only, and runtime
+  `/etc` is sealed read-only (dm-verity); this is the same constraint that forces `dev`/
+  `swamp`/`polkitd` to be created in `image/mkosi.postinst`. Bake `dev:100000:65536` into
+  `/etc/subuid`+`/etc/subgid` in `mkosi.postinst` (or ship via the `shrek-conf` **confext**,
+  the only layer kind that may touch `/etc`).
+- **`passt`/`slirp4netns` are dropped from the granted path** — their egress emerges from
+  the user's host stack as `dev`'s own traffic, so there is no per-bench source address for
+  `net_plane`'s nft rules to key on (they'd make `shrek bench network` unenforceable). Bench
+  egress uses `net_plane`'s late-attach path instead (rule 3). `--network=none` by default.
+- **`conmon` is mandatory** (podman won't run without it); the baked `containers.conf`/
+  `storage.conf` at `/usr/share/containers/` is podman's native config path — reading there
+  sidesteps the read-only-`/etc` problem for everything except subuid.
+
+**Four load-bearing design rules (the parts #2829 said must be nailed):**
+
+1. **Storage lives on the persistent `/home` plane, not `/var`, not swamp-state.**
+   *(Fable-verified: `/var` is volatile tmpfs via `systemd.volatile=state`; `/home` is the
+   only durable plane — ext4 label `shrek-data`, `home.mount`.)* `/var` is volatile and
+   swamp-state is the 128 M control-plane; container storage is neither. Benches get a
+   dedicated pool under `/home` — e.g. `/home/.shrek/benches/` — with explicit quotas
+   (needs `prjquota` on the `shrek-data` fs → a `dogfood-data-disk.sh` + installer-format +
+   `home.mount` options change) + GC. Podman's `graphroot`/`runroot` **and**
+   `image_copy_tmp_dir` all point there via the baked `/usr/share/containers/*.conf` —
+   *both* redirects matter: podman's default `image_copy_tmp_dir=/var/tmp` is tmpfs here, so
+   pulling a large image would OOM. `loginctl enable-linger` state also lives in volatile
+   `/var/lib/systemd/linger`; MVP posture = **benches die on logout** (defensible; stated
+   explicitly rather than papered over).
+2. **`noexec` on the host pool — exec works in-container by fresh-superblock, not "the
+   container's internal view."** *(Fable correction — the original mechanism was wrong.)*
+   `noexec` is a **vfsmount** property. The overlay/fuse-overlayfs merged rootfs podman runs
+   is a **fresh superblock** mounted without `MS_NOEXEC`, so it does not inherit `noexec`
+   from the pool's backing mount — that is *why* exec works in the container even on a
+   `noexec` pool. Three consequences the rule must carry: **(a)** the `vfs` fallback driver
+   is **forbidden** — it binds a plain dir as rootfs, and a bind *inherits* `noexec`, so
+   container init can't exec; **(b)** proof requires a **real compiled ELF**, never a shell
+   script (the repo has already watched a script-based test false-pass where a real ELF
+   failed — `mount_plane.rs:171-177`, the same class that killed gVisor-on-noexec); **(c)**
+   `noexec` on the pool buys host-side safety only (`dev`'s shell can't exec a binary dropped
+   into the graphroot), not container containment. **Pre-approved fallback if the proof
+   fails:** exec on the graphroot, `noexec` only on *granted data* mounts (which
+   `relocate_rw` already enforces) — so a failed proof re-scopes instead of stalling.
+   (Note: `home.mount` is `nosuid,nodev` but **not** `noexec` today — the noexec pool is a
+   new sub-mount to build, it does not exist yet.)
+3. **Grants route through the existing Gatekeeper — no parallel security system, no
+   loosening of T2.** *(Fable-verified structurally honest: `t2_plane.rs:28-31` only
+   *imports* `mount_plane`/`net_plane` as libraries; a sibling can too.)* The Bench is a
+   **new user-compute plane** that *reuses* the grant primitives in `gatekeeperd`
+   (`mount_plane.rs` `pin_beneath`/`relocate_rw` — ns-agnostic, reusable; `net_plane.rs`
+   egress) — **not** an extension of the T2/`runsc` constructor. T2 = narrowly-constructed,
+   *agent*-authority, ephemeral; Bench = persistent, *user*-authority. **Egress uses the
+   late-attach shape only:** benches run `--network=none`, and on grant, root `gatekeeperd`
+   drives `net_plane.rs:149` `inject()` against the container's netns leader (root holds
+   caps in every userns). The pre-spawn `create_and_inject()` path is **structurally
+   unavailable** to rootless podman (joining a root-created netns needs `CAP_SYS_ADMIN` in
+   the netns's owning userns). Because a rootless netns dies on every container stop, grants
+   are **re-issued per container start and at boot** — so bench starts must be brokered
+   through the `shrek bench` CLI (or a `podman events` watcher).
+4. **MVP grants no secrets.** A Bench starts with access to *nothing* — no `~/.ssh`
+   mount, no inherited host env, no token copy. Git etc. come later via device-code / a
+   host-brokered one-shot credential helper (#2829). A malicious `npm postinstall` finds
+   only the files explicitly granted to that Bench.
+
+**`bench_plane.rs` is a lifecycle supervisor, not a thin CLI shim** *(Fable blocker 4)*.
+Unlike T2's grant mounts — which live in a per-request private ns of a `gatekeeperd` child
+and die with the process — a persistent Bench needs its grant mounts visible where `dev`'s
+podman can see them (host ns, under `/run/shrek/bench/<id>/grants/`). That forces a named
+**persistent-grant state model**, budgeted as the real work of Part 2: durable grant records
+on `/home` (template = `net_binding.rs`'s record pattern), boot-time re-issuance (`/run` is
+volatile), survival across `gatekeeperd` restarts, uid-mapping so root-relocated mounts are
+traversable by `dev`'s subuid range (`--userns=keep-id` vs idmapped mounts), and teardown on
+`destroy`.
+
+**`shrek bench` verbs** (ADR-002 already reserves the `shrek bench …` namespace):
+`create <name>` · `enter <name>` · `run <name> -- <cmd>` · `grant <name> <path> --rw` ·
+`network <name> <policy>` · `reset <name>` · `quota <name>` · `destroy <name>` · and the
+ADR-002 promote path `promote <name> → Workshop`.
+
+### MVP sequence (build order, #2829 — each gated, don't skip ahead)
+
+1. **This ADR** (defines Host / Onion / T2 / Bench authority + the four rules above).
+2. **The one-script feasibility proof — ✅ DONE & GREEN (2026-08-30, sealed VM, PASS=74/0).**
+   The smallest experiment that retires five unknowns at once (Fable's "smallest next proof").
+   Built the real `shrek-bench` sysext (not a throwaway) + baked `subuid`/`subgid` via
+   `mkosi.postinst`, mounted an ext4 pool at `/home/.shrek/benches` with `noexec,nosuid,nodev`,
+   hand-stage a throwaway podman sysext, mount an ext4 pool at `/home/.shrek/benches` with
+   `noexec,nosuid,nodev`, then as `dev` on the **sealed boot** assert, in order:
+   (i) `unshare -U true` → rc 0 (kernel + AppArmor userns posture — don't trust the Debian
+   default); (ii) `podman unshare cat /proc/self/uid_map` → full 65536 range (subuid bake +
+   setuid `newuidmap` surviving the sysext merge); (iii) `podman load` a seeded image and
+   `podman run` a **compiled static ELF that exits 42** (not `true`, not a script) → rc 42
+   and `podman info` shows native `overlay`; (iv) negative control: exec that same ELF
+   *directly from the graphroot path on the host* → must fail `EACCES` (proves `noexec` is
+   real); (v) `systemd-cgls /user.slice/user-1000.slice` shows the container under `dev`'s
+   delegated slice. Pass → rules 1+2 and open-Qs 1/2/4 retired. Fail at (iii) → the
+   pre-approved fallback posture (rule 2) activates, no redesign. **Must not alter
+   `t2_plane.rs`.**
+3. **Dedicated growable Bench storage pool** on `/home` with `prjquota` quotas (rule 1) —
+   productionize the throwaway pool from step 2 (installer-format + `home.mount` + `dogfood-
+   data-disk.sh`).
+4. **`bench_plane.rs` (lifecycle supervisor) + `shrek bench` CLI** (create/enter/run/reset/
+   quota/destroy) + the persistent-grant state model above.
+5. **Route FS + egress grants through the existing Gatekeeper** (rule 3 — FS via
+   `relocate_rw` into `/run/shrek/bench/<id>/grants/`; egress via late-attach `inject()`).
+6. **Ship one offline Scratch seed** — a base image loaded via `podman load` from a tarball
+   in the sysext (safer than `additionalimagestores` under merged `/usr`, which risks the
+   kernel's overlay stacking-depth-2 limit — VERIFY before choosing).
+7. **Constrained `.desktop` export** from a Bench via a `shrek-bench-run` wrapper
+   (steal distrobox's export UX + the fixed-baked-key discipline from `shrek-menu`, never
+   a path/command — same rule as the menu provider).
+8. **Prove a Media workflow E2E** (the north-star acceptance below).
+
+### North-star acceptance
+
+On a vanilla **offline** Shrek install, a user (or a dispatched agent) converts a video
+inside a bundled Scratch/Media Bench after granting access to **only** the input +
+destination dirs; the host stays sealed; execution is attributable to that Bench;
+`destroy` removes all its tooling + mutable state. If that works, the Shrek interaction
+model is proven — not just a container launcher.
+
+## Consequences
+
+- `onion-policy` gains `enable shrek-browser` and `enable shrek-apps` (Part 1, pending
+  build); `enable shrek-bench` is **already added and proven** (Part 2 step 2 green). All
+  are the same signed-sysext trust gate as `shrek-desktop`.
+- **The sealed-`/etc` footprint (Bench-0 proof finding).** The proof empirically confirmed
+  this ADR's core wrinkle: a sysext extends `/usr` only, so the container runtime's **entire
+  `/etc` footprint must be baked into the sealed base** (`image/mkosi.postinst`), because
+  runtime `/etc` is read-only and the sysext strips it. Baking, in order of what the proof
+  hit: (1) `/etc/subuid` + `/etc/subgid` (rootless uid range); (2) `/etc/containers/policy.json`
+  — **mandatory**, podman refuses every image op without a signature policy (MVP =
+  `insecureAcceptAnything` for offline seeds; real pull-signature enforcement is a later
+  egress/trust decision); (3) `/etc/containers/registries.conf` with
+  `unqualified-search-registries = []` (offline seeds use fully-qualified `localhost/` names;
+  matches default-deny egress). The runtime's `storage.conf`/`containers.conf` ride the sysext
+  at `/usr/share/containers/` (podman reads there natively — no `/etc` needed for those).
+- **Podman vs Shrek's `/etc/hosts` symlink (Bench-0 proof finding).** Shrek's `/etc/hosts` is
+  a baked symlink → `/home/.shrek-system/hosts` (the `shrek-connect` design, #2816), which
+  podman cannot read/rewrite when synthesizing a container hosts file → it aborts. Offline
+  benches run `--network=none --no-hosts` (a hosts file is meaningless with no network). A
+  **networked** bench (later, via `net_plane` late-attach) will need an explicit hosts answer
+  (`--add-host` / a bench-owned hosts file) rather than Shrek's `/home`-symlinked one —
+  flagged for the egress-grant slice.
+- **cgroup manager:** the container lands under `dev`'s delegated systemd `user-1000.slice`
+  (`Delegate=yes`) when a user session bus is present — proven. The Bench runtime keeps the
+  default systemd manager; the graphical bench session always has the bus. (The proof's
+  headless probe had to start `dbus.socket` explicitly; a real `shrek bench` launch won't.)
+- The installer sysext's app duplication (firefox-esr, gparted, CLI utils) is *not*
+  removed — the installer is a distinct throwaway environment; the point is those apps now
+  also exist in the installed OS.
+- **Deliverable-4 provability splits:** browser + a second app (Part 1) are provable this
+  cycle via a bake + the grim-container render check (VM screendump lies about GTK render,
+  #2923). "Install one app via the chosen mechanism" (Part 2) is provable only when the
+  `shrek-bench` runtime lands (MVP step 2+), by design — the owner chose ADR-first over a
+  same-day AppImage demo.
+- No system-index bump for Part 1 (packaging/config/manifest, zero Rust). Part 2's
+  `bench_plane.rs` + CLI *are* Rust → they bump the graph baseline when they land.
+
+## Open questions — resolved by Fable review (2026-08-30)
+
+1. **Rootless Podman on a sealed image:** ~~subuid/subgid location~~ **resolved** — bake into
+   `/etc/subuid`+`/etc/subgid` via `mkosi.postinst` (sysext can't touch `/etc`); add `uidmap`
+   (setuid `newuidmap`/`newgidmap`) to the layer. Kernel/cgroup posture *probably* fine
+   (trixie defaults `unprivileged_userns_clone=1`; `libpam-systemd` + `dbus-user-session`
+   give cgroup delegation) but **must be asserted** on the sealed boot (step 2.i), because
+   `apparmor_restrict_unprivileged_userns` is one distro decision from breaking it.
+2. **Storage driver:** **resolved → native rootless `overlay`** (trixie's 6.12 kernel does
+   unprivileged overlay in userns); keep `fuse-overlayfs` in the layer strictly as fallback;
+   `vfs` **forbidden** (inherits `noexec`, rule 2a). Assert `podman info` shows `overlay`
+   (step 2.iii).
+3. **The `bench_plane.rs` seam:** **resolved as feasible without touching T2**, but re-scoped
+   from "sibling issuer" to "lifecycle supervisor" (see the paragraph after the four rules) —
+   the real Part-2 work is the persistent-grant state model, not a CLI shim.
+4. **`noexec` feasibility:** **resolved** — works *iff* the rootfs is a fresh overlay/
+   fuse-overlayfs superblock (rule 2), proven with a real ELF + a host-side negative control
+   (step 2.iii–iv). If it fails, the pre-approved fallback (`noexec` on granted data mounts
+   only) activates — this does **not** concede a *global* host exec mount (#2829), only the
+   graphroot.
+
+### Still genuinely open (not blockers, flagged for their step)
+- Offline seed delivery: `podman load` tarball vs `additionalimagestores` (overlay
+  stacking-depth-2 risk) — VERIFY at step 6.
+- Linger/logout: benches-die-on-logout is the MVP posture; durable linger needs another
+  `/home` redirect — revisit only if it bites.
+- `prjquota` on `shrek-data`: touches the installer format path — plan at step 3.
