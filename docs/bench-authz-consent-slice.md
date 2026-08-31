@@ -228,6 +228,26 @@ not *this object can never contain sensitive data later*.
 - kernel has `CONFIG_VT` + fbcon so a text VT actually scans out when the compositor's DRM master is paused;
   the compositor is a proper logind session client so the DRM/input handoff on VT switch happens.
 
+### Verified on the sealed image (2026-08-31 — DOGFOOD base off `f53f7d4`, read-only inspection of root + ESP)
+
+All three gates PASS; the RealConsole VT/SAK ceremony is clear to implement (harness design still pending a
+Fable pass).
+
+- **systemd ≥ 257 + SAK — CONFIRMED.** `systemd 257.13-1~deb13u1`; `systemd-logind` carries the
+  `SecureAttentionKey` path (`HandleSecureAttentionKey`, `Login.HandleSecureAttentionKey`). **Caveat +
+  impl note:** the image ships logind's *compiled default* — `/etc/systemd/logind.conf` has
+  `#HandleSecureAttentionKey=secure-attention-key` (commented). Bake an *explicit*
+  `HandleSecureAttentionKey=secure-attention-key` drop-in (like the other sealed logind settings) so the
+  trust trigger can't silently regress if the upstream default ever changes.
+- **Compositor-independent detection — CONFIRMED (static).** SAK is handled by `systemd-logind` (a system
+  service reading seat evdev), not the compositor, so detection survives a compositor holding DRM master.
+  Runtime signal *delivery* remains the dogfood's own assertion (the faked-boundary note above).
+- **kernel `CONFIG_VT` + fbcon — CONFIRMED.** kernel `6.12.107+deb13-amd64` (config read from the matching
+  `linux-image` package — the UKI carries no IKCONFIG): `CONFIG_VT=y`, `CONFIG_VT_CONSOLE=y`,
+  `CONFIG_FRAMEBUFFER_CONSOLE=y`, `CONFIG_FRAMEBUFFER_CONSOLE_DETECT_PRIMARY=y`, and crucially
+  `CONFIG_DRM_FBDEV_EMULATION=y` — the fbdev-emulation path that lets a text VT scan out under KMS when the
+  compositor's DRM master is paused.
+
 ## Review outcomes (resolved)
 
 The six pre-build doubts, decided:
