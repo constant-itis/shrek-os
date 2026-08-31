@@ -7,18 +7,33 @@
 # localhost via nss `files` (the image ships no libnss-myhostname). Run by shrek-hosts-seed.service,
 # ordered after /home is mounted and before the rest of userspace resolves names.
 #
-# Idempotent and first-boot-safe: if the store already exists it is left EXACTLY as-is (user bindings
-# are never touched). A plain helper — not an inline ExecStart — so there is no systemd-escape ambiguity.
+# Idempotent and first-boot-safe: the store CONTENT is left EXACTLY as-is if it already exists (user
+# bindings are never touched). A plain helper — not an inline ExecStart — so there is no systemd-escape
+# ambiguity.
+#
+# OWNERSHIP (bench authz slice step 4): the store is owned by the box owner (uid 1000 = `dev` today; the
+# provisioned owner once the first-boot wizard lands, #2939), NOT root. `shrek-connect` runs as the owner
+# and edits it in place (tmp+rename), so wiring a model provider needs NO sudo — which the installed system
+# no longer grants. Ownership is (re)applied on EVERY boot so a box imaged before step 4 (root:root store)
+# is retrofitted to owner-writable without a reinstall. Content stays 0644 so root's getaddrinfo (nss
+# `files` via the /etc/hosts symlink) still reads it. The owner writing name→addr bindings that feed system
+# resolution is the intended authority (the same class of edit `shrek-connect` always performed); no other
+# unprivileged user exists, and sandboxed agents never reach /home.
 set -eu
 
 d=/home/.shrek-system
 f="$d/hosts"
+owner=1000
 
-[ -f "$f" ] && exit 0
+if [ ! -f "$f" ]; then
+    mkdir -p "$d"
+    {
+        echo "127.0.0.1 localhost"
+        echo "::1 localhost"
+    } > "$f"
+    chmod 0644 "$f"
+fi
 
-mkdir -p "$d"
-{
-    echo "127.0.0.1 localhost"
-    echo "::1 localhost"
-} > "$f"
-chmod 0644 "$f"
+# Retrofit ownership every boot (idempotent; touches metadata only, never the bindings).
+chown "$owner:$owner" "$d" "$f" 2>/dev/null || true
+chmod 0644 "$f" 2>/dev/null || true

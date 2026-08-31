@@ -1,0 +1,16 @@
+# LIVE INSTALLER ONLY — never shipped on the installed system.
+#
+# The live USB (LIVE_INSTALLER=1 base) runs Calamares + GParted from the `dev` autologin Wayland session,
+# which has NO polkit agent and NO owner account yet, so passwordless sudo is its only escalation path
+# (shrek-install-calamares / shrek-live-welcome do `sudo -n`). The live medium is an ephemeral,
+# single-purpose whole-disk-erase tool with no persistent state, so broad NOPASSWD here is acceptable and
+# unavoidable pre-owner-account.
+#
+# `scripts/build-in-container.sh` installs this file into the sealed base /etc ONLY for LIVE_INSTALLER
+# builds; every other variant (INSTALLABLE = the product, DOGFOOD = the proof, plain CI) removes it, so the
+# installed system ships a `dev` account with NO passwordless root (bench authz slice step 4). The generated
+# copy at image/overlay/etc/sudoers.d/dev-nopasswd is gitignored. sudoers.d files must be mode 0440.
+#
+# Full retirement of the placeholder identity (the baked `dev` account itself + a real owner-authority
+# subject) awaits the owner-account provisioning wizard — see docs/installer-0.md and docs/bench-authz-step4-nopasswd-retire.md.
+dev ALL=(ALL) NOPASSWD:ALL

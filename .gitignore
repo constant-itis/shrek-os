@@ -73,6 +73,11 @@
 # ADR-003 Part 2 step 5: boot re-issuance of Bench quotas + FS grants — same DOGFOOD/INSTALLABLE gating.
 /image/overlay/usr/lib/systemd/system/local-fs.target.wants/shrek-bench-reissue.service
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-dogfood-persist.service
+# Bench authz slice step 4: the dev NOPASSWD placeholder is a build input staged ONLY for LIVE_INSTALLER
+# (source of truth: image/live-installer/sudoers.d/dev-nopasswd); every other variant removes it. The
+# DOGFOOD-only root debug-shell enable is staged the same way. Both gitignored so the tree stays byte-clean.
+/image/overlay/etc/sudoers.d/dev-nopasswd
+/image/overlay/usr/lib/systemd/system/multi-user.target.wants/debug-shell.service
 # Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;
 # the daily persistent /home disk out/shrek-data.raw is also under out/ and never committed).
 /out/dogfood-shrek.xml

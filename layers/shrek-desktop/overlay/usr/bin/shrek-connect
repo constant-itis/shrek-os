@@ -61,7 +61,10 @@ seed() {
 
 require_writable() {
     [ -w "$HOSTS" ] && return 0
-    echo "shrek-connect: $HOSTS is not writable — re-run as the owner (or: sudo shrek-connect $*)" >&2
+    # The binding store is owned by the box owner on the writable /home plane (shrek-hosts-seed.service
+    # chowns it to uid 1000). Run shrek-connect AS the owner — the installed system grants no passwordless
+    # root, so there is deliberately no `sudo` path here (bench authz slice step 4).
+    echo "shrek-connect: $HOSTS is not writable — run this as the box owner (the desktop user)." >&2
     exit 1
 }
 

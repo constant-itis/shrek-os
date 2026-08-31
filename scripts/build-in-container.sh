@@ -108,6 +108,20 @@ LOCALFS_WANTS="image/overlay/usr/lib/systemd/system/local-fs.target.wants"
 MU_WANTS="image/overlay/usr/lib/systemd/system/multi-user.target.wants"
 INSTALLABLE="${INSTALLABLE:-0}"
 LIVE_INSTALLER="${LIVE_INSTALLER:-0}"
+# Bench authz slice step 4: the `dev ALL=(ALL) NOPASSWD:ALL` placeholder is baked into the sealed base
+# /etc ONLY for the live installer (its dev autologin session has no polkit/owner account, so calamares +
+# gparted have no other escalation path). The INSTALLABLE product, the DOGFOOD proof, and the plain-CI
+# image ship a `dev` account with NO passwordless root — admin flows through polkit + the gatekeeper socket
+# + the console consent ceremony. Dropping it from DOGFOOD is deliberate: with dev sudo present a caller
+# could `sudo gatekeeperd bench grant …` and bypass the consent ceremony, so the dogfood would not honestly
+# prove that authority cannot be silently expanded. The generated copy is gitignored (like the masks).
+SUDOERS_SRC="image/live-installer/sudoers.d/dev-nopasswd"
+SUDOERS_GEN="image/overlay/etc/sudoers.d/dev-nopasswd"
+# A DOGFOOD image is now adminless from the dev session (no NOPASSWD, no root autologin, dev in no admin
+# group). Enable systemd's root debug-shell on tty9 (Ctrl+Alt+F9 in the graphical dogfood VM) so hands-on
+# debugging keeps a non-sudo root path — an out-of-band console facility, not a dev-session escalation, so
+# it does not weaken the consent model. DOGFOOD-only, gitignored, removed on every other build.
+DEBUG_SHELL_WANT="$MU_WANTS/debug-shell.service"
 if [ "${DOGFOOD:-0}" = "1" ]; then
   echo "!!! DOGFOOD=1: interactive image — masking self-poweroff spike gates (shrek-mount-gate, shrek-desktop-gate) !!!"
   install -d "$DOGFOOD_MASKS"
@@ -123,6 +137,10 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   # ADR-003 Part 2 step 5: boot re-issuance of Bench project quotas + FS grants (after the pool mount).
   ln -sf ../shrek-bench-reissue.service "$LOCALFS_WANTS/shrek-bench-reissue.service"
   ln -sf ../shrek-dogfood-persist.service "$MU_WANTS/shrek-dogfood-persist.service"
+  # step 4: the product ships no dev NOPASSWD, and the dogfood must prove exactly that; give the now
+  # adminless VM a root debug-shell on tty9 instead.
+  rm -f "$SUDOERS_GEN"
+  ln -sf ../debug-shell.service "$DEBUG_SHELL_WANT"
 elif [ "$LIVE_INSTALLER" = "1" ]; then
   echo "!!! LIVE_INSTALLER=1: interactive live media — masking proof gates and installed-state mounts !!!"
   install -d "$DOGFOOD_MASKS"
@@ -131,9 +149,16 @@ elif [ "$LIVE_INSTALLER" = "1" ]; then
   ln -sf /dev/null "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
   rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service" "$LOCALFS_WANTS/shrek-bench-reissue.service"
+  # step 4: the live installer is the ONLY variant that gets dev NOPASSWD; it never gets the debug-shell.
+  install -d "$(dirname "$SUDOERS_GEN")"
+  install -m0440 "$SUDOERS_SRC" "$SUDOERS_GEN"
+  rm -f "$DEBUG_SHELL_WANT"
 else
   rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
+  # step 4: INSTALLABLE (the product) and the plain-CI image ship NO dev passwordless root, and no
+  # debug-shell (that is a dogfood-only affordance).
+  rm -f "$SUDOERS_GEN" "$DEBUG_SHELL_WANT"
   if [ "$INSTALLABLE" = "1" ]; then
     echo "!!! INSTALLABLE=1: deployable image — masking self-poweroff spike gates + enabling persistent /home (no dogfood reboot probe) !!!"
     # A deployable / daily-driver image MUST NOT carry the Phase-5 SPIKE proof gates. shrek-mount-gate has
@@ -154,6 +179,13 @@ else
   else
     rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service" "$LOCALFS_WANTS/shrek-bench-reissue.service"
   fi
+fi
+
+# Test seam (scripts/nopasswd-variant-proof.sh): the variant-gated overlay staging above is complete, so a
+# proof can inspect image/overlay for each build flag without the mkosi/docker build. No effect on real builds.
+if [ "${SHREK_STAGE_ONLY:-0}" = "1" ]; then
+  echo "SHREK_STAGE_ONLY=1: variant overlay staging complete; exiting before the container/mkosi build."
+  exit 0
 fi
 
 mkdir -p out    # must exist before the bind-mount, or docker creates it root-owned

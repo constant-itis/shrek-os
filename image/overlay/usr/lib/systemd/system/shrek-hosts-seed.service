@@ -9,8 +9,9 @@
 # nss `files`. This oneshot guarantees the store exists with localhost on EVERY boot, ordered exactly
 # like var-lib-swamp.mount: after /home is mounted (home.mount is Before=local-fs.target) and before the
 # rest of userspace that resolves names. It only creates the file if absent — user bindings are never
-# touched. It writes as root (root:root 0644); `shrek-connect` edits it as the owner via sudo, since the
-# binding is system-scope name resolution (same trust class as editing /etc/hosts directly).
+# touched — and (re)owns it to the box owner (uid 1000, 0644) on every boot. `shrek-connect` then edits it
+# DIRECTLY as the owner (no sudo — the installed system grants no passwordless root; bench authz slice
+# step 4). root's getaddrinfo still reads the 0644 store through the /etc/hosts symlink.
 [Unit]
 Description=Seed the Shrek writable hosts binding store (/home/.shrek-system/hosts)
 Documentation=file:///usr/share/doc/shrek/agent-launch.md
