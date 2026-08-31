@@ -324,15 +324,14 @@ fn peer_fd_alive(fd: std::os::fd::RawFd) -> bool {
     !linux_uapi::fd_hungup(fd)
 }
 
-/// 128-bit nonce from `/dev/urandom`. `None` (urandom unreadable — a deeply broken box) fails the
-/// ceremony closed; the nonce is never predictable and never logged.
+/// 128-bit nonce from `/dev/urandom`. Reads EXACTLY 16 bytes — `std::fs::read` would loop forever on
+/// the infinite device (it reads to EOF), hanging the daemon. `None` (urandom unreadable — a deeply
+/// broken box) fails the ceremony closed; the nonce is never predictable and never logged.
 fn mint_nonce() -> Option<u128> {
-    let b = std::fs::read("/dev/urandom").ok()?;
-    if b.len() < 16 {
-        return None;
-    }
+    use std::io::Read;
+    let mut f = std::fs::File::open("/dev/urandom").ok()?;
     let mut a = [0u8; 16];
-    a.copy_from_slice(&b[..16]);
+    f.read_exact(&mut a).ok()?;
     Some(u128::from_le_bytes(a))
 }
 
@@ -371,14 +370,15 @@ pub fn run_socket_consent(cred: Ucred, peer_fd: std::os::fd::RawFd, verb: &str, 
         audit("reject-cooldown", cred.uid, verb, &format!("{}s-left", until.saturating_sub(now)));
         return refused(verb, "cooldown");
     }
-    // 3. Precheck — every validator runs here; a failure denies and the human is NEVER asked. A refused
-    //    precheck is a deny for cooldown purposes (an agent probing invalid requests is still flooding).
+    // 3. Precheck — every validator runs here; a failure denies and the human is NEVER asked. A precheck
+    //    failure is cheap + local (no VT, no human, no SAK), so it does NOT arm the cooldown: that defends
+    //    against SAK fatigue, which only begins once a request reaches the ceremony. (A typo'd bench name
+    //    must not lock the user out for escalating minutes.)
     let plan = match bench_plane::precheck_authority(verb, rest) {
         Ok(p) => p,
         Err((rc, msg)) => {
             eprintln!("gatekeeperd/consent: precheck refused verb={verb} uid={}: {msg}", cred.uid);
             audit("reject-precheck", cred.uid, verb, &msg);
-            note_deny(cred.uid, verb, now);
             return (rc, vec![format!("RESULT bench-{verb} - refused precheck")]);
         }
     };
@@ -640,6 +640,14 @@ mod tests {
         assert_eq!(sanitize_value("proje\u{0441}ts"), "proje\\u{0441}ts");
         // DEL.
         assert_eq!(sanitize_value("a\x7fb"), "a\\u{007F}b");
+    }
+
+    // ---- nonce: MUST terminate (read_exact 16 bytes, not read-to-EOF on the infinite device) ----
+    #[test]
+    fn mint_nonce_terminates_and_varies() {
+        let a = mint_nonce().expect("urandom readable in the test env");
+        let b = mint_nonce().expect("urandom readable in the test env");
+        assert_ne!(a, b, "two draws from urandom must differ");
     }
 
     // ---- confirmation code ----

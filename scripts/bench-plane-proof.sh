@@ -277,9 +277,6 @@ $GK bench create sockA --quota 1024 >/dev/null 2>&1; $GK bench create sockB --qu
 sdev "$SHREK" bench destroy sockA >/tmp/sd.log 2>&1 && ok "dev drove 'shrek bench destroy' over the socket (rc0, no sudo)" || bad "socket destroy failed [$(cat /tmp/sd.log)]"
 $GK bench destroy sockB >/dev/null 2>&1
 { [ ! -f /mnt/pool/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/pool/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged"
-# authority-INCREASING verbs are refused fail-closed over the socket (they land behind the ceremony, step 3).
-GX=$(sdev "$SHREK" bench grant sockZ /home/dev 2>&1)
-echo "$GX" | grep -q 'needs-consent-ceremony' && ok "grant is refused fail-closed over the socket (awaits the consent ceremony)" || bad "grant not gated [$GX]"
 # dev must NOT reach the privileged onion verbs (bench-only peer).
 ON=$(printf 'status\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
 echo "$ON" | grep -q 'onion-not-permitted' && ok "dev is gated OUT of the onion verbs (bench-only peer)" || bad "dev reached an onion verb [$(echo "$ON" | tr '\n' '|')]"
@@ -302,6 +299,33 @@ runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" "$SBR" c3 hi >/dev/nu
 [ "$XRC" -eq 7 ] && ok "shrek-bench-run drives run-export over the socket + propagates the workload rc (7, no sudo)" || bad "launcher run-export wrong rc=$XRC"
 runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" "$SBR" c3 forged >/dev/null 2>&1 && bad "a forged launcher key must be refused" || ok "shrek-bench-run: an unregistered key is refused server-side"
 sdev "$SHREK" bench destroy c1 >/dev/null 2>&1; $GK bench destroy c3 >/dev/null 2>&1
+
+echo "--- step 3 (consent ceremony): authority-increasing verbs gated on a spoof-proof console ---"
+# A headless container has NO console seat/VT and NO logind SecureAttentionKey, so the ceremony MUST fail
+# closed: an authority-increasing socket request from dev returns 'ceremony-<reason>' and applies NOTHING.
+# This is the reachable-headlessly half of the fail-closed matrix; the real VT + a scripted 'y' is the
+# sealed-VM dogfood's BENCH-CONSENT stage. (Order matters: probe precheck BEFORE any ceremony deny arms
+# the per-(uid,verb) cooldown.)
+$GK bench create czt --quota 1024 >/dev/null 2>&1
+mkdir -p /home/dev/czt_grant; chown -R dev:dev /home/dev/czt_grant
+# (i) an INVALID request is refused at PRECHECK — cheap, local, human NEVER asked, no cooldown armed.
+PX=$(sdev "$SHREK" bench grant nosuchbench /home/dev/czt_grant --ro 2>&1)
+echo "$PX" | grep -q 'refused precheck' && ok "an invalid authority request is refused at precheck (human never asked)" || bad "invalid request not precheck-refused [$PX]"
+# (ii) a VALID grant reaches the ceremony, which fails closed with no seat, and applies NOTHING.
+GX=$(sdev "$SHREK" bench grant czt /home/dev/czt_grant --ro 2>&1)
+echo "$GX" | grep -q 'refused ceremony-' && ok "a valid grant fails closed at the ceremony with no seat (ceremony-*, headless)" || bad "grant not ceremony-gated [$GX]"
+grep -q '^grant fs-' /mnt/pool/records/czt && bad "a denied ceremony still recorded a grant (NOT fail-closed!)" || ok "the denied grant applied NOTHING (no fs grant in the record)"
+# (iii) a repeated authority request is rate-limited by the post-deny cooldown (anti SAK-fatigue).
+CX=$(sdev "$SHREK" bench grant czt /home/dev/czt_grant --ro 2>&1)
+echo "$CX" | grep -q 'refused cooldown' && ok "a repeated authority request is cooldown-limited after the deny" || bad "repeat request not cooldown-limited [$CX]"
+# (iv) network to a PROFILE is authority-increasing (ceremony-gated); network none REVOKES (ceremony-free).
+NX=$(sdev "$SHREK" bench network czt github-https 2>&1)
+{ echo "$NX" | grep -q 'refused ceremony-' && ! grep -q '^grant net ' /mnt/pool/records/czt; } && ok "network <profile> is ceremony-gated and records nothing on deny" || bad "network profile not gated [$NX]"
+sdev "$SHREK" bench network czt none >/tmp/nn.log 2>&1 && ok "network none (revoke, reducing authority) is allowed ceremony-free over the socket" || bad "network none should be ceremony-free [$(cat /tmp/nn.log)]"
+# (v) root is refused on the socket ceremony path (root drives cli() in-process, never the socket).
+RX=$(printf 'BENCH grant 2\nczt\n%s\n' "$(printf /home/dev/czt_grant | sed 's/\//%2F/g')" | timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
+echo "$RX" | grep -q 'root-uses-cli' && ok "root is refused on the socket ceremony (must use cli() in-process)" || bad "root not refused on the socket ceremony [$(echo "$RX" | tr '\n' '|')]"
+$GK bench destroy czt >/dev/null 2>&1
 
 kill "$GKD" 2>/dev/null; wait "$GKD" 2>/dev/null
 
