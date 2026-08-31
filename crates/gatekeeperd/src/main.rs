@@ -398,7 +398,7 @@ fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>, onio
             argv.push(gatekeeperd::bench_plane::pct_decode(l));
         }
         eprintln!("gatekeeperd: req uid={} pid={} BENCH verb={} argc={argc}", cred.uid, cred.pid, argv[0]);
-        let (rc, lines) = gatekeeperd::bench_plane::dispatch_socket(&argv);
+        let (rc, lines) = gatekeeperd::bench_plane::dispatch_socket(cred, w.as_raw_fd(), &argv);
         for l in &lines {
             let _ = writeln!(w, "{l}");
         }

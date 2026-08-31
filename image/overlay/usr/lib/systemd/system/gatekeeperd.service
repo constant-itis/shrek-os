@@ -17,11 +17,12 @@ Type=simple
 ExecStart=/usr/libexec/shrek/gatekeeperd
 Restart=always
 RestartSec=1
-# Scoped privilege: runs as root but bounded to CAP_SYS_ADMIN only — exactly what mount / overlayfs /
-# dm-verity / loop need for the merge, and nothing else root can normally do. This is the "no arbitrary
-# root" property: a compromised broker cannot load modules, change net config, override DAC, etc.
+# Scoped privilege: runs as root but bounded to CAP_SYS_ADMIN (the merge: mount / overlayfs / dm-verity /
+# loop) plus CAP_SYS_TTY_CONFIG (the consent ceremony's VT_ACTIVATE/VT_DISALLOCATE on the reserved
+# console VT — docs/bench-authz-consent-slice.md). Nothing else root can normally do: a compromised broker
+# still cannot load modules, change net config, override DAC, etc. This is the "no arbitrary root" property.
 User=root
-CapabilityBoundingSet=CAP_SYS_ADMIN
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG
 NoNewPrivileges=no
 # IMPORTANT: do NOT add ProtectHome/ProtectSystem/PrivateMounts/ReadOnlyPaths or any sandbox directive
 # that creates a private MOUNT NAMESPACE — the sysext overlay must overmount the HOST /usr and

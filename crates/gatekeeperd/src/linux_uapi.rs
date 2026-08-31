@@ -121,6 +121,26 @@ pub const KVM_GET_API_VERSION: u64 = 0xAE00;
 pub const KVM_CREATE_VM: u64 = 0xAE01;
 pub const KVM_API_VERSION: i64 = 12; // the kernel contract: applications must refuse any other value
 
+// ---- VT / KD ioctls (linux/vt.h, linux/kd.h) — the console consent ceremony (docs/bench-authz-
+// consent-slice.md) owns a DEDICATED reserved VT with raw kernel ioctls. NOT logind TakeControl/
+// SwitchTo (session-controller theft can wedge the desktop — a non-clean deny). Request codes are
+// stable ABI `_IO`s: VT_GETSTATE=0x5603 (arg: struct vt_stat*), VT_ACTIVATE=0x5606 / VT_WAITACTIVE=
+// 0x5607 / VT_DISALLOCATE=0x5608 (arg: the VT number, by value). KDSETMODE=0x4B3A (arg: KD_TEXT|
+// KD_GRAPHICS) puts the VT back into a known text state before we render. ----
+pub const VT_OPENQRY: u64 = 0x5600;
+pub const VT_GETSTATE: u64 = 0x5603;
+pub const VT_ACTIVATE: u64 = 0x5606;
+pub const VT_WAITACTIVE: u64 = 0x5607;
+pub const VT_DISALLOCATE: u64 = 0x5608;
+pub const KDSETMODE: u64 = 0x4B3A;
+pub const KD_TEXT: u64 = 0x00;
+pub const KD_GRAPHICS: u64 = 0x01;
+
+// ---- termios flush (linux/termios.h) — drop anything typed before the consent screen existed, so a
+// keystroke the human was mid-typing when the VT flipped can never be read as the answer. ----
+pub const TCFLSH: u64 = 0x540B;
+pub const TCIFLUSH: u64 = 0;
+
 // ---- *at() dirfd + flags ----
 pub const AT_FDCWD: i64 = -100;
 pub const AT_EMPTY_PATH: i32 = 0x1000;
@@ -142,6 +162,13 @@ pub const MS_REC: u64 = 16384;
 // ---- getsockopt (SO_PEERCRED) ----
 pub const SOL_SOCKET: i32 = 1;
 pub const SO_PEERCRED: i32 = 17;
+
+// ---- poll (disconnect detection on the consent path) ----
+pub const SYS_POLL: i64 = 7;
+pub const POLLIN: i16 = 0x001;
+pub const POLLERR: i16 = 0x008;
+pub const POLLHUP: i16 = 0x010;
+pub const POLLNVAL: i16 = 0x020;
 
 // -------------------------------------------------------------------------------------------------
 // ABI structs — exact kernel layout. Sizes are asserted in the test module below.
@@ -358,6 +385,49 @@ pub fn ioctl(fd: RawFd, request: u64, arg: u64) -> io::Result<i64> {
     res(unsafe { sc3(SYS_IOCTL, fd as i64, request as i64, arg as i64) })
 }
 
+/// `struct vt_stat` (linux/vt.h) — the active VT, the signal-forwarding VT, and a bitmap of open
+/// VTs. Three `unsigned short` = 6 bytes, no padding. Only `v_active` is read (the VT that was
+/// foreground before the ceremony switched, so we can switch back on the way out).
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct VtStat {
+    pub v_active: u16,
+    pub v_signal: u16,
+    pub v_state: u16,
+}
+
+/// `ioctl(fd, VT_GETSTATE, &vt_stat)` — read the currently-active VT so the ceremony can restore it.
+pub fn vt_getstate(fd: RawFd) -> io::Result<VtStat> {
+    let mut st = VtStat::default();
+    ioctl(fd, VT_GETSTATE, &mut st as *mut VtStat as u64)?;
+    Ok(st)
+}
+
+/// `ioctl(fd, VT_ACTIVATE, n)` — request a switch to VT `n` (the arg is the VT number by value, not a
+/// pointer). Returns immediately; the switch itself completes asynchronously (poll `vt_getstate` with
+/// a deadline rather than the UNBOUNDED `VT_WAITACTIVE`, which would wedge the serial broker forever if
+/// a compositor in VT_PROCESS mode never releases — consent-slice invariant 1).
+pub fn vt_activate(fd: RawFd, n: u32) -> io::Result<()> {
+    ioctl(fd, VT_ACTIVATE, n as u64).map(|_| ())
+}
+
+/// `ioctl(fd, VT_WAITACTIVE, n)` — block until VT `n` is foreground. Present for completeness; the
+/// ceremony does NOT use it (it polls `vt_getstate` against a deadline instead — see `vt_activate`).
+pub fn vt_waitactive(fd: RawFd, n: u32) -> io::Result<()> {
+    ioctl(fd, VT_WAITACTIVE, n as u64).map(|_| ())
+}
+
+/// `ioctl(fd, VT_DISALLOCATE, n)` — release VT `n` after the ceremony (best-effort teardown).
+pub fn vt_disallocate(fd: RawFd, n: u32) -> io::Result<()> {
+    ioctl(fd, VT_DISALLOCATE, n as u64).map(|_| ())
+}
+
+/// `ioctl(fd, KDSETMODE, mode)` — put the VT into KD_TEXT (or KD_GRAPHICS) so the console is in a known
+/// text state before the authority diff is rendered.
+pub fn kd_setmode(fd: RawFd, mode: u64) -> io::Result<()> {
+    ioctl(fd, KDSETMODE, mode).map(|_| ())
+}
+
 /// `ST_NOEXEC` mount flag as reported in `statfs.f_flags` (linux/statfs.h). Set when the mount the
 /// path resolves to was mounted `MS_NOEXEC` — the flag that blocks `execve` AND file-backed
 /// `mmap(PROT_EXEC)` on that mount (finding F2's executable-mapping boundary).
@@ -526,6 +596,43 @@ pub fn peer_cred(fd: RawFd) -> io::Result<Ucred> {
     Ok(cred)
 }
 
+/// `struct pollfd` (poll.h) — 8 bytes (i32 fd, i16 events, i16 revents).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct PollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+/// `poll(&pollfd, 1, timeout_ms)` on one fd for the given events. Returns the `revents` bitmask (0 =
+/// timed out with nothing ready). Errors on a syscall failure. Used by the consent VT read (bounded
+/// answer wait) and the disconnect check.
+pub fn poll_one(fd: RawFd, events: i16, timeout_ms: i32) -> io::Result<i16> {
+    let mut p = PollFd { fd, events, revents: 0 };
+    let ret = unsafe { sc3(SYS_POLL, &mut p as *mut PollFd as i64, 1, timeout_ms as i64) };
+    res(ret)?;
+    Ok(p.revents)
+}
+
+/// `ioctl(fd, TCFLSH, TCIFLUSH)` — discard un-read input queued on the tty.
+pub fn tcflush_in(fd: RawFd) -> io::Result<()> {
+    ioctl(fd, TCFLSH, TCIFLUSH).map(|_| ())
+}
+
+/// Non-destructive disconnect check for the consent path: `poll(fd, POLLIN, 0)` and report whether the
+/// peer has hung up. `true` = the socket peer closed/errored (POLLHUP/POLLERR/POLLNVAL) — the ceremony
+/// must fail closed (disconnect is in the deny matrix). `false` = still connected (timeout, or data
+/// buffered). A poll syscall error is treated as hung up (fail closed).
+pub fn fd_hungup(fd: RawFd) -> bool {
+    let mut p = PollFd { fd, events: POLLIN, revents: 0 };
+    let ret = unsafe { sc3(SYS_POLL, &mut p as *mut PollFd as i64, 1, 0) };
+    if ret < 0 {
+        return true; // cannot tell → fail closed
+    }
+    p.revents & (POLLHUP | POLLERR | POLLNVAL) != 0
+}
+
 /// `fork()`. Returns the child pid in the parent, 0 in the child. SAFETY: the caller MUST be
 /// single-threaded (the whole control plane is synchronous — no tokio/rayon), so the child owns a
 /// faithful copy of the one running thread and may use `std` normally between fork and execve.
@@ -615,6 +722,7 @@ mod tests {
         assert_eq!(size_of::<StatxTimestamp>(), 16, "statx_timestamp is 16 bytes");
         assert_eq!(size_of::<Statx>(), 256, "struct statx is 256 bytes");
         assert_eq!(size_of::<Ucred>(), 12, "struct ucred is 12 bytes, no padding");
+        assert_eq!(size_of::<VtStat>(), 6, "struct vt_stat is 3×u16, no padding");
         assert_eq!(align_of::<Statx>(), 8);
         // Landlock ABI structs. The packed path_beneath is the load-bearing one: 8+4 = 12, and it
         // MUST NOT round up to 16, or parent_fd lands at the wrong offset and every rule mis-scopes.

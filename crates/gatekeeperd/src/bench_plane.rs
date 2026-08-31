@@ -20,12 +20,13 @@
 //! `grant`/`network` verbs are explicit stubs here); the ADR-002 `promote → Workshop` path is later.
 
 use crate::bench_record::{self, BenchRecord};
-use crate::linux_uapi::umount2;
-use crate::mount_plane::{open_anchor, pin_beneath, relocate_ro, relocate_rw};
+use crate::linux_uapi::{umount2, Ucred};
+use crate::mount_plane::{open_anchor, pin_beneath, relocate_ro, relocate_rw, Ident};
 use crate::net_plane;
 use std::ffi::CString;
 use std::io;
 use std::io::Write as _;
+use std::os::fd::RawFd;
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -326,6 +327,12 @@ pub const DEFAULT_QUOTA_KIB: u64 = 4 * 1024 * 1024; // 4 GiB
 /// The desktop user rootless podman runs as. uid resolved from /etc/passwd; the runtime dir is its logind
 /// `XDG_RUNTIME_DIR`. (Bench containers run under `dev`'s delegated `user-<uid>.slice`, proven in Bench-0.)
 const BENCH_USER: &str = "dev";
+
+/// The uid the Bench plane belongs to (`dev`) — the only non-root uid allowed to drive an
+/// authority-increasing bench verb through the consent ceremony (`shrek` is refused; root uses `cli()`).
+pub(crate) fn bench_user_uid() -> u32 {
+    dev_uid()
+}
 
 fn dev_uid() -> u32 {
     std::fs::read_to_string("/etc/passwd")
@@ -1230,6 +1237,339 @@ fn reissue() -> i32 {
     0
 }
 
+// ---- authority-increasing verbs: consent-ceremony precheck + commit (ADR-003 Part 2 step 3) -----
+//
+// The three authority-INCREASING verbs (grant / network-to-a-profile / export) are gated behind the
+// console consent ceremony (docs/bench-authz-consent-slice.md) when driven by a NON-root socket peer.
+// The ceremony (crate::consent) owns the human OK; THIS owns the FS/policy logic, split into:
+//   * precheck_authority — runs EVERY validator and resolves the request to an AuthorityPlan BEFORE any
+//     human is asked (invariant 1: a request that fails validation denies, the human never prompted);
+//   * commit_authority   — applies the plan, RE-VERIFYING the target's object identity at apply time
+//     (invariant 5: the swap defense — an approved dir cannot be swapped for a symlink/rename between
+//     the OK and the apply). The root in-process `cli()` path keeps using grant()/network()/export()
+//     directly (boot / proofs / reissue run as root, no ceremony); this is the second, gated path.
+
+/// A validated, server-resolved plan for one authority-increasing request. `diff_rows` are RAW
+/// (possibly untrusted) label/value pairs — the consent renderer SANITIZES them at the output boundary;
+/// nothing here trusts them for control flow.
+pub(crate) struct AuthorityPlan {
+    pub bench: String,
+    pub diff_rows: Vec<(String, String)>,
+    pub trifecta: bool,
+    kind: CommitKind,
+}
+
+impl AuthorityPlan {
+    /// Higher-authority verbs demand a typed confirmation code (not a bare `y`): a read-WRITE grant or
+    /// an export (which mints a durable, ceremony-free launcher). A read-only grant / egress attach take `y`.
+    pub(crate) fn high_authority(&self) -> bool {
+        matches!(&self.kind, CommitKind::Export { .. } | CommitKind::Grant { rw: true, .. })
+    }
+
+    /// Human-facing one-line action summary for the ceremony header (safe: verb + validated bench name).
+    pub(crate) fn action(&self) -> String {
+        match &self.kind {
+            CommitKind::Grant { rw, .. } => format!("GRANT a host folder ({}) to bench '{}'", if *rw { "read-write" } else { "read-only" }, self.bench),
+            CommitKind::Network { .. } => format!("ATTACH a network egress policy to bench '{}'", self.bench),
+            CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
+        }
+    }
+}
+
+enum CommitKind {
+    Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
+    Network { profile: String },
+    Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
+}
+
+#[cfg(test)]
+impl AuthorityPlan {
+    /// Test-only constructor for the consent-module orchestration/binding tests (which drive a mock
+    /// console and must not touch a live record). Not compiled into any non-test build.
+    pub(crate) fn test_plan(verb: &'static str, bench: &str, rw: bool, trifecta: bool) -> AuthorityPlan {
+        let kind = match verb {
+            "grant" => CommitKind::Grant {
+                canonical: PathBuf::from("/home/dev/x"),
+                leaf: "x".into(),
+                rw,
+                ident: Ident { dev_major: 0, dev_minor: 0, ino: 1 },
+            },
+            "network" => CommitKind::Network { profile: "p".into() },
+            _ => CommitKind::Export {
+                key: "k".into(),
+                file: "shrek-bench-media-k.desktop".into(),
+                icon: "i".into(),
+                label: "l".into(),
+                cmd: vec!["c".into()],
+            },
+        };
+        AuthorityPlan {
+            bench: bench.to_string(),
+            diff_rows: vec![("Grant path".into(), "/home/dev/x".into())],
+            trifecta,
+            kind,
+        }
+    }
+}
+
+/// The lethal-trifecta predicate for bench semantics: warn when the bench, AFTER this change, composes
+/// untrusted filesystem read WITH network egress (either direction). Pure — unit-tested.
+pub(crate) fn trifecta_after(existing_fs: bool, existing_net: bool, adding_fs: bool, adding_net: bool) -> bool {
+    (existing_fs || adding_fs) && (existing_net || adding_net)
+}
+
+fn record_has_fs(rec: &BenchRecord) -> bool {
+    rec.grants.iter().any(|g| matches!(Grant::parse(g), Some(Grant::Fs { .. })))
+}
+
+/// Validate + resolve an authority-increasing request to an [`AuthorityPlan`]. `Err((rc, msg))` on ANY
+/// validation failure — the human is never asked. `rest` is the decoded argv tail (no subverb).
+pub(crate) fn precheck_authority(verb: &str, rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    match verb {
+        "grant" => precheck_grant(rest),
+        "network" => precheck_network(rest),
+        "export" => precheck_export(rest),
+        other => Err((2, format!("not an authority verb: {other}"))),
+    }
+}
+
+fn precheck_grant(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    let (mut name, mut path, mut rw) = (None, None, false);
+    for a in rest {
+        match a.as_str() {
+            "--rw" => rw = true,
+            "--ro" => rw = false,
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
+            other if !other.starts_with('-') && path.is_none() => path = Some(other.to_string()),
+            other => return Err((2, format!("unexpected arg {other}"))),
+        }
+    }
+    let (name, path_str) = match (name, path) {
+        (Some(n), Some(p)) => (n, p),
+        _ => return Err((2, "usage: grant <name> <path> [--rw|--ro]".into())),
+    };
+    let rdir = bench_record::records_dir();
+    let Some(rec) = bench_record::load_record(&rdir, &name) else {
+        return Err((4, format!("no such bench {name}")));
+    };
+    let canonical = std::fs::canonicalize(&path_str).map_err(|e| (2, format!("cannot resolve {path_str:?}: {e}")))?;
+    let anchor = anchor_dir();
+    if canonical == anchor || !canonical.starts_with(&anchor) {
+        return Err((2, format!("{} must be a directory strictly beneath {}", canonical.display(), anchor.display())));
+    }
+    if let Ok(rel) = canonical.strip_prefix(&anchor) {
+        if rel.components().any(|c| matches!(c, std::path::Component::Normal(s) if s.to_string_lossy().starts_with('.'))) {
+            return Err((2, format!("{} has a dot-leading path component — refused (no ~/.config, ~/.ssh, …)", canonical.display())));
+        }
+    }
+    if !std::fs::metadata(&canonical).map(|m| m.is_dir()).unwrap_or(false) {
+        return Err((2, format!("{} is not a directory", canonical.display())));
+    }
+    let Some(leaf) = Grant::fs_leaf(&canonical) else {
+        return Err((2, format!("{} has an unsafe basename", canonical.display())));
+    };
+    for g in &rec.grants {
+        if let Some(Grant::Fs { path, .. }) = Grant::parse(g) {
+            if path == canonical {
+                return Err((1, format!("{} is already granted to {name}", canonical.display())));
+            }
+            if Grant::fs_leaf(&path).as_deref() == Some(leaf.as_str()) {
+                return Err((1, format!("mount leaf {leaf:?} already used by another grant")));
+            }
+        }
+    }
+    // Pin the target beneath the anchor NOW to capture its object identity (TOCTOU-safe openat2 walk);
+    // commit re-pins and requires the SAME identity — the swap defense.
+    let rel = canonical.strip_prefix(&anchor).map_err(|_| (2, "grant not beneath anchor".to_string()))?;
+    let rel_str = rel.to_str().ok_or_else(|| (2, "non-utf8 grant path".to_string()))?;
+    let anchor_fd = open_anchor(&anchor).map_err(|e| (1, format!("anchor open failed: {e}")))?;
+    let pinned = pin_beneath(&anchor_fd, rel_str).map_err(|e| (2, format!("pin failed: {e}")))?;
+    if !pinned.is_dir {
+        return Err((2, "grant target must be a directory".to_string()));
+    }
+    let ident = pinned.ident;
+    let trifecta = trifecta_after(record_has_fs(&rec), egress_profile(&rec).is_some(), true, false);
+    let rows = vec![
+        ("Grant path".to_string(), canonical.display().to_string()),
+        ("Access".to_string(), if rw { "READ-WRITE".into() } else { "read-only".into() }),
+        ("Mounts in bench at".to_string(), grant_mountpoint(&leaf)),
+    ];
+    Ok(AuthorityPlan { bench: name, diff_rows: rows, trifecta, kind: CommitKind::Grant { canonical, leaf, rw, ident } })
+}
+
+fn precheck_network(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    let (name, profile) = match (rest.first(), rest.get(1)) {
+        (Some(n), Some(p)) => (n.clone(), p.clone()),
+        _ => return Err((2, "usage: network <name> <profile>".into())),
+    };
+    if profile == "none" {
+        return Err((2, "network none REVOKES egress (reducing) — ceremony-free, not a consent request".into()));
+    }
+    let rdir = bench_record::records_dir();
+    let Some(rec) = bench_record::load_record(&rdir, &name) else {
+        return Err((4, format!("no such bench {name}")));
+    };
+    let Some(pref) = shrek_policy::egress::resolve(&profile) else {
+        return Err((2, format!("{profile:?} is not a sealed egress profile (policy is default-deny)")));
+    };
+    let mut rows = vec![("Egress profile".to_string(), profile.clone())];
+    if let Ok(r) = net_plane::resolve_profiles_v4(&[pref]) {
+        rows.push(("Allowed endpoints".to_string(), r.endpoints.len().to_string()));
+    }
+    let trifecta = trifecta_after(record_has_fs(&rec), false, false, true);
+    Ok(AuthorityPlan { bench: name, diff_rows: rows, trifecta, kind: CommitKind::Network { profile } })
+}
+
+fn precheck_export(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    let (mut name, mut key, mut label, mut icon) = (None, None, None, None);
+    let mut workload: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--" => { workload = rest[i + 1..].to_vec(); break; }
+            "--label" => { i += 1; label = rest.get(i).cloned(); }
+            "--icon" => { i += 1; icon = rest.get(i).cloned(); }
+            other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
+            other if !other.starts_with('-') && key.is_none() => key = Some(other.to_string()),
+            other => return Err((2, format!("unexpected arg {other}"))),
+        }
+        i += 1;
+    }
+    let (name, key) = match (name, key) {
+        (Some(n), Some(k)) => (n, k),
+        _ => return Err((2, "usage: export <name> <key> [--label L] [--icon I] -- <cmd...>".into())),
+    };
+    let rdir = bench_record::records_dir();
+    let Some(rec) = bench_record::load_record(&rdir, &name) else {
+        return Err((4, format!("no such bench {name}")));
+    };
+    if !bench_record::valid_bench_name(&key) {
+        return Err((2, format!("key {key:?} must be a safe token (alnum ._- , no leading dot, <=64)")));
+    }
+    if workload.is_empty() {
+        return Err((2, "an empty workload is not allowed (give the command after --)".into()));
+    }
+    if workload.iter().any(|a| a.contains('\n')) {
+        return Err((2, "a workload arg contains a newline".into()));
+    }
+    if rec.exports.iter().filter_map(|e| Export::parse(e)).any(|e| e.key == key) {
+        return Err((1, format!("key {key:?} is already exported from {name} (unexport it first)")));
+    }
+    let label = sanitize_label(label.as_deref()).unwrap_or_else(|| format!("{name}: {key}"));
+    let icon = icon.filter(|i| valid_icon(i)).unwrap_or_else(|| "application-x-executable".to_string());
+    let file = format!("shrek-bench-{name}-{key}.desktop");
+    if !valid_desktop_file(&file) {
+        return Err((2, format!("generated .desktop name {file:?} is unsafe")));
+    }
+    let trifecta = trifecta_after(record_has_fs(&rec), egress_profile(&rec).is_some(), false, false);
+    let rows = vec![
+        ("Launcher key".to_string(), key.clone()),
+        ("Runs command".to_string(), workload.join(" ")),
+        ("Shown as".to_string(), label.clone()),
+    ];
+    Ok(AuthorityPlan { bench: name, diff_rows: rows, trifecta, kind: CommitKind::Export { key, file, icon, label, cmd: workload } })
+}
+
+/// Apply a pre-checked plan (called ONLY after the ceremony approves). Re-verifies target identity for
+/// the grant path (the swap defense) and re-checks policy/collisions defensively. Returns the verb rc.
+pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
+    match &plan.kind {
+        CommitKind::Grant { canonical, leaf, rw, ident } => commit_grant(&plan.bench, canonical, leaf, *rw, *ident),
+        CommitKind::Network { profile } => commit_network(&plan.bench, profile),
+        CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
+    }
+}
+
+fn commit_grant(bench: &str, canonical: &Path, leaf: &str, rw: bool, expected: Ident) -> i32 {
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, bench) else {
+        eprintln!("bench grant: no such bench {bench}");
+        return 4;
+    };
+    let anchor = anchor_dir();
+    let Ok(rel) = canonical.strip_prefix(&anchor) else { return 2 };
+    let Some(rel_str) = rel.to_str() else { return 2 };
+    let anchor_fd = match open_anchor(&anchor) {
+        Ok(f) => f,
+        Err(e) => { eprintln!("bench grant: anchor open failed: {e}"); return 1; }
+    };
+    // RE-PIN at apply time and require the SAME object identity approved — the swap defense (invariant
+    // 5). A name→symlink swap fails the NO_SYMLINKS openat2 walk (ELOOP); a rename to a different real
+    // dir yields a different inode → identity mismatch. Either way: refuse, never apply what was not seen.
+    let pinned = match pin_beneath(&anchor_fd, rel_str) {
+        Ok(p) => p,
+        Err(e) => { eprintln!("bench grant: re-pin failed at apply (swap defense): {e}"); return 1; }
+    };
+    if !pinned.is_dir || pinned.ident != expected {
+        eprintln!("bench grant: target object identity changed since approval — refusing (swap defense)");
+        return 1;
+    }
+    if let Err(e) = prepare_grant_dir(&rec.id) {
+        eprintln!("bench grant: could not prepare the grant dir: {e}");
+        return 1;
+    }
+    let target = grants_dir(&rec.id).join(leaf);
+    if !is_mountpoint(&target) {
+        let r = if rw { relocate_rw(&pinned, &target) } else { relocate_ro(&pinned, &target) };
+        if let Err(e) = r {
+            eprintln!("bench grant: materialization failed (fail-closed): {e}");
+            return 1;
+        }
+    }
+    rec.grants.push(Grant::Fs { rw, path: canonical.to_path_buf() }.encode());
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("bench grant: record write failed: {e}");
+        return 1;
+    }
+    println!("bench: granted {} to {bench} at {} ({})", canonical.display(), grant_mountpoint(leaf), if rw { "rw" } else { "ro" });
+    0
+}
+
+fn commit_network(bench: &str, profile: &str) -> i32 {
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, bench) else {
+        eprintln!("bench network: no such bench {bench}");
+        return 4;
+    };
+    if shrek_policy::egress::resolve(profile).is_none() {
+        eprintln!("bench network: {profile:?} not a sealed egress profile (re-check) — refused");
+        return 2;
+    }
+    rec.grants.retain(|g| !matches!(Grant::parse(g), Some(Grant::Net { .. })));
+    rec.grants.push(Grant::Net { profile: profile.to_string() }.encode());
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("bench network: record write failed: {e}");
+        return 1;
+    }
+    println!("bench: {bench} egress policy set to {profile} (injected per run)");
+    0
+}
+
+fn commit_export(bench: &str, key: &str, file: &str, icon: &str, label: &str, cmd: &[String]) -> i32 {
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, bench) else {
+        eprintln!("bench export: no such bench {bench}");
+        return 4;
+    };
+    if rec.exports.iter().filter_map(|e| Export::parse(e)).any(|e| e.key == key) {
+        eprintln!("bench export: key {key:?} is already exported from {bench}");
+        return 1;
+    }
+    if let Err(e) = write_desktop_as_dev(file, &desktop_content(bench, key, label, icon)) {
+        eprintln!("bench export: .desktop write failed: {e}");
+        return 1;
+    }
+    let exp = Export { key: key.to_string(), file: file.to_string(), icon: icon.to_string(), label: label.to_string(), cmd: cmd.to_vec() };
+    rec.exports.push(exp.encode());
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("bench export: record write failed: {e}");
+        remove_desktop_as_dev(file);
+        return 1;
+    }
+    println!("bench: exported {bench}:{key} -> [{}] (launcher app {file})", cmd.join(" "));
+    0
+}
+
 // ---- CLI ----------------------------------------------------------------------------------------
 
 /// `gatekeeperd bench <verb> …` — the privileged Bench supervisor. Run as root (the proofs + the shrek
@@ -1366,11 +1706,14 @@ pub fn cli(args: &[String]) -> i32 {
 /// already-`pct_decode`d `[subverb, arg0, arg1, …]` from the count-framed request. Returns `(rc, RESULT
 /// lines)` for the `RESULT …`/`END <rc>` wire framing — one implementation of every verb, two front ends.
 ///
-/// STEP 2 (full transport): every NEUTRAL / REDUCING / read-only verb is wired over the socket. The three
-/// AUTHORITY-INCREASING verbs (`grant`, `network` to a profile, `export`) are REFUSED fail-closed here —
-/// they land behind the console consent ceremony in step 3, never silently applied for a `dev` peer.
-/// Interactive `enter` (podman `-it`, needs a pty) is a non-goal for this request/response socket.
-pub fn dispatch_socket(argv: &[String]) -> (i32, Vec<String>) {
+/// STEP 3 (consent ceremony): every NEUTRAL / REDUCING / read-only verb runs directly. The three
+/// AUTHORITY-INCREASING verbs (`grant`, `network` to a profile, `export`) route through the console
+/// consent ceremony ([`crate::consent::run_socket_consent`]) — a human OK on a kernel-owned VT the
+/// session cannot spoof, applied only on an exact bound-tuple match. `network <name> none` REVOKES
+/// egress (reducing authority) and stays ceremony-free. `cred`/`peer_fd` are the SO_PEERCRED identity
+/// and the connection fd (for peer binding + disconnect detection). Interactive `enter` (podman `-it`,
+/// needs a pty) is a non-goal for this request/response socket.
+pub fn dispatch_socket(cred: Ucred, peer_fd: RawFd, argv: &[String]) -> (i32, Vec<String>) {
     let verb = argv.first().map(String::as_str).unwrap_or("");
     let rest = &argv[argv.len().min(1)..];
     // One summary RESULT line per mutating verb (state parity is asserted against the record/mount table,
@@ -1453,11 +1796,18 @@ pub fn dispatch_socket(argv: &[String]) -> (i32, Vec<String>) {
             (0, lines)
         }
         "reissue" => { let rc = reissue(); (rc, summ("reissue", "-", rc)) }
-        // Authority-INCREASING verbs are gated behind the console consent ceremony (step 3). Until it lands
-        // they are REFUSED fail-closed over the socket — never silently applied for a non-root peer. (`network
-        // <name> none` REVOKES egress and will be allowed ceremony-free in step 3; refused here for now.)
-        "grant" | "network" | "export" => {
-            (2, vec![format!("RESULT bench-{verb} - refused needs-consent-ceremony")])
+        // Authority-INCREASING verbs go through the console consent ceremony (step 3). `network <name>
+        // none` REVOKES egress (reducing authority) → ceremony-free; a profile is authority-increasing.
+        "grant" | "export" => crate::consent::run_socket_consent(cred, peer_fd, verb, rest),
+        "network" => {
+            if rest.get(1).map(String::as_str) == Some("none") {
+                match rest.first() {
+                    Some(n) => { let rc = network(n, "none"); (rc, summ("network", n, rc)) }
+                    None => (2, vec!["RESULT bench-network - usage".into()]),
+                }
+            } else {
+                crate::consent::run_socket_consent(cred, peer_fd, "network", rest)
+            }
         }
         "promote" => (3, vec!["RESULT bench-promote - deferred".into()]),
         "" => (2, vec!["RESULT bench - usage".into()]),

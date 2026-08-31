@@ -7,6 +7,7 @@
 pub mod authority_record;
 pub mod bench_plane;
 pub mod bench_record;
+pub mod consent;
 pub mod ingest_admit;
 pub mod linux_uapi;
 pub mod mount_plane;
