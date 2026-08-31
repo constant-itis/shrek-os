@@ -33,8 +33,10 @@ QtObject {
         items.push({ label: "Reload shell", action: function () { Sway.dispatch("reload") } })
         items.push({ separator: true })
         items.push({ label: "Log out",   action: function () { Sway.dispatch("exit") } })
-        items.push({ label: "Reboot",    action: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "reboot"]) } })
-        items.push({ label: "Power off", danger: true, action: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "poweroff"]) } })
+        // Plain (non-sudo) systemctl -> logind: reboot/power-off default allow_active=yes for the active
+        // seat, so no polkit agent and no dev-passwordless-root are needed (retired in bench-authz step 4).
+        items.push({ label: "Reboot",    action: function () { Quickshell.execDetached(["systemctl", "reboot"]) } })
+        items.push({ label: "Power off", danger: true, action: function () { Quickshell.execDetached(["systemctl", "poweroff"]) } })
         return items
     }
 }

@@ -265,11 +265,13 @@ PanelWindow {
             MouseArea { id: hover; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: if (parent.act) parent.act() }
         }
 
-        // Reboot/Off need root. The sealed image ships no polkit agent, so logind denies these to the
-        // non-root dev user -- route through the dev user's passwordless sudo (sudo -n = non-interactive).
+        // Reboot/Off go straight to logind: org.freedesktop.login1.reboot/power-off default to
+        // allow_active=yes for the active local seat, so a plain (non-sudo) `systemctl` needs no polkit
+        // agent. This matches the shipped DMS/shrek-menu shell and carries no dev-passwordless-root
+        // dependency (the product retired that in the bench-authz slice, step 4).
         // Log out exits Sway; in this single-user autologin VM (no greeter) the session just relaunches.
         PowerBtn { label: "Log out"; act: function () { ShellState.closeAll(); Sway.dispatch("exit") } }
-        PowerBtn { label: "Reboot";  act: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "reboot"]) } }
-        PowerBtn { label: "Off"; danger: true; act: function () { Quickshell.execDetached(["sudo", "-n", "systemctl", "poweroff"]) } }
+        PowerBtn { label: "Reboot";  act: function () { Quickshell.execDetached(["systemctl", "reboot"]) } }
+        PowerBtn { label: "Off"; danger: true; act: function () { Quickshell.execDetached(["systemctl", "poweroff"]) } }
     }
 }
