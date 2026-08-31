@@ -248,6 +248,25 @@ Fable pass).
   `CONFIG_DRM_FBDEV_EMULATION=y` — the fbdev-emulation path that lets a text VT scan out under KMS when the
   compositor's DRM master is paused.
 
+> **Fable pre-build review (2026-08-31) — SUPERSEDES the faked-boundary contingency above (~"kernel SAK
+> can't be driven in the VM"). Do NOT inject the SecureAttentionKey signal at the D-Bus boundary.** The
+> harness must drive the *real* chord: QEMU monitor `sendkey ctrl-alt-shift-esc` through the already-wired
+> virtio-keyboard → guest evdev → logind emits the genuine signal. Reason: `arm_sak`'s sender-pinned match
+> (`sender='org.freedesktop.login1'`) filters a test-injected signal *by the very defense under test*, so a
+> D-Bus fake only "works" by unpinning the sender = testing a program the product does not ship (theater).
+> systemd-257 SAK is logind reading evdev, not the dead classic `do_SAK()`, so a VM can drive it end-to-end.
+> Full review + concrete build plan saved to mycelium (search "Fable consent dogfood review").
+>
+> **Two pre-build fixes already LANDED** (this session): the `arm_sak` busctl **multi-line-record drain bug**
+> (a genuine chord was denied `NoSak` because the `Member=SecureAttentionKey` line sat unread in the
+> `BufReader` while `poll()` watched the drained fd) + `stdbuf -oL`; and the explicit logind
+> `HandleSecureAttentionKey` drop-in (`image/overlay/usr/lib/systemd/logind.conf.d/50-shrek-sak.conf`).
+>
+> **Code/doc drift the review flagged (this doc is stale, the code is right):** the ceremony reads the VT in
+> **canonical** mode (the "termios raw" phrasing below is wrong); `RealConsole` opens the VT fds **per
+> ceremony**, not "held from daemon start" — the reserved-VT guarantee is `CONSENT_VT=8 > NAutoVTs=6`,
+> asserted by the no-getty check; the "120s overall" deadline is only the `60+5+45` stage sum, no fourth timer.
+
 ## Review outcomes (resolved)
 
 The six pre-build doubts, decided:
