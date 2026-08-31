@@ -109,6 +109,29 @@ INSTALL-0: the welcome page's storage preflight is partition-oriented and blocks
 target, and the partition page's KPMCore device list came up empty in interactive testing. Shrek-owned
 disk selection (`shrek-list-disks` + the `zenity` picker) replaces both.
 
+## Deferred — owner-account provisioning (post-install / first-boot wizard)
+
+Today the sealed base image **ships a baked owner account** (`dev`, per `dogfood-0.md`: password LOCKED,
+admin via the `NOPASSWD` sudoers rule). That is a **dogfood placeholder**, not the product's identity story.
+A real install needs a **first-boot / post-install wizard** (Calamares user page, or a Shrek-owned first-boot
+oneshot) that **creates the owner account and links the box to the human owner**: their username, credential
+(password / passkey / FIDO2), and the fact that *this human* is the machine's owner-authority subject.
+
+This is the **identity foundation the whole authorization model keys to**, not a cosmetic step:
+- The bench authorization slice gates the Bench control plane on an **`SO_PEERCRED`-verified peer uid**
+  (`crates/gatekeeperd/src/main.rs`) and, for authority-increasing verbs, a **console consent ceremony**
+  bound to `(uid, pid, start-time, …)` (`grant-protocol.md`). Both currently resolve the owner as the baked
+  `dev` uid. A provisioned owner account makes that binding **real** — the ceremony authenticates *the
+  owner*, not a fixed placeholder.
+- The `grant-protocol.md` grant tuple's **subject** is an owner-authority identity; a wizard-created account
+  is where that subject is first established (and where the sealed-`/etc` `NOPASSWD` placeholder is retired,
+  the bench authz slice's step 4).
+
+Scope when built: which mechanism (Calamares user module vs a Shrek first-boot oneshot in the sealed image),
+credential type (passphrase now; passkey/FIDO2 as the trusted-path story matures), single-owner vs
+multi-user, and how the owner uid flows into the gatekeeper allowlist + the consent subject binding. Tracked
+as a prerequisite the authz work currently stubs with the baked `dev` account.
+
 ## Proofs
 
 `scripts/install0-diskpick-proof.sh` is the non-GUI proof for the target-disk filter. It drives
