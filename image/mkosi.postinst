@@ -25,10 +25,12 @@ echo "postinst: shrek control-plane user -> $(grep '^shrek:' "$BUILDROOT/etc/pas
 # control-plane user, and NOT an empty password. Sprint S3 (lock+idle) turned dev's password ON: the DMS
 # lock screen authenticates dev via PAM (/etc/pam.d/login → pam_unix → this hash), so the hash must be
 # UNLOCKED (no `!` prefix) or pam_unix refuses it and the screen can never be unlocked. tty1 autologin is
-# unaffected (agetty --autologin execs `login -f`, which skips authentication). This does not widen
-# exposure — dev is already the autologin console user and sudo is NOPASSWD (sudoers.d/dev-nopasswd).
-# Default demo/dogfood credential `shrek` (documented; INSTALL-0 / the user can change it) — a throwaway
-# like keys/, not a real secret. acct_mgmt still returns SUCCESS (valid, non-expired hash).
+# unaffected (agetty --autologin execs `login -f`, which skips authentication). On the INSTALLED product
+# this is the seat credential (dev has NO passwordless root there — bench authz slice step 4 ships
+# sudoers.d/dev-nopasswd ONLY in the live-installer base). Default demo/dogfood credential `shrek`
+# (documented; a throwaway like keys/, not a real secret) — a universal public password that the
+# owner-provisioning wizard (#2939) will replace with a real owner credential. acct_mgmt still returns
+# SUCCESS (valid, non-expired hash).
 DEV_PW='$6$Ylf7qC855/ESKbuC$5K7c15ydx9s3vgGnYOtXg5nfDi0NaUuSBfgIEJdN5ilgPab9h/i3jXUpJbHFPla6Leq9S5ZLrvfM2TnRzrECh.'
 grep -q '^dev:' "$BUILDROOT/etc/group" \
     || echo 'dev:x:1000:' >> "$BUILDROOT/etc/group"

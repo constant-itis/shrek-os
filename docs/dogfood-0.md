@@ -121,8 +121,11 @@ explicitly required** — `/usr` stays sealed dm-verity, `/var` stays a volatile
   `scripts/dogfood-data-disk.sh` (16G, sparse, never wiped = the owner's durable state); `FRESH=1` makes
   the disposable variant the oracle uses. Survives reboot **and** A/B image updates (never part of the
   sealed image).
-- **Non-root `dev` user (uid 1000):** created at build in `image/mkosi.postinst` (bash shell, **locked**
-  password, `NOPASSWD` sudo via `sudoers.d/dev-nopasswd`). Root autologin is **replaced**: dropped
+- **Non-root `dev` user (uid 1000):** created at build in `image/mkosi.postinst` (bash shell; **unlocked**
+  password — the public default `shrek`, needed by the DMS lock screen's `pam_unix` path since Sprint S3).
+  It has **NO passwordless root** on the dogfood/installed image (bench authz slice step 4:
+  `sudoers.d/dev-nopasswd` is baked ONLY into the live-installer base); the dogfood VM instead gets a
+  root `debug-shell` on tty9 for hands-on debugging. Root autologin is **replaced**: dropped
   `Autologin=yes`; a `getty@tty1.service.d/autologin.conf` drop-in runs `agetty --autologin dev` and
   `getty@tty1` is force-enabled (`getty.target.wants`). Sway/Quickshell run non-root; logind **uaccess
   ACLs** grant the active session its DRM/input devices (no `video`/`render`/`input` group membership

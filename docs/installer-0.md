@@ -111,8 +111,10 @@ disk selection (`shrek-list-disks` + the `zenity` picker) replaces both.
 
 ## Deferred — owner-account provisioning (post-install / first-boot wizard)
 
-Today the sealed base image **ships a baked owner account** (`dev`, per `dogfood-0.md`: password LOCKED,
-admin via the `NOPASSWD` sudoers rule). That is a **dogfood placeholder**, not the product's identity story.
+Today the sealed base image **ships a baked owner account** (`dev`, per `dogfood-0.md`: an **unlocked
+public password** `shrek` for the lock screen; **no passwordless root** on the product — the `NOPASSWD`
+rule is now baked ONLY into the live-installer base, bench authz slice step 4). That is a **dogfood
+placeholder**, not the product's identity story.
 A real install needs a **first-boot / post-install wizard** (Calamares user page, or a Shrek-owned first-boot
 oneshot) that **creates the owner account and links the box to the human owner**: their username, credential
 (password / passkey / FIDO2), and the fact that *this human* is the machine's owner-authority subject.
@@ -124,8 +126,10 @@ This is the **identity foundation the whole authorization model keys to**, not a
   `dev` uid. A provisioned owner account makes that binding **real** — the ceremony authenticates *the
   owner*, not a fixed placeholder.
 - The `grant-protocol.md` grant tuple's **subject** is an owner-authority identity; a wizard-created account
-  is where that subject is first established (and where the sealed-`/etc` `NOPASSWD` placeholder is retired,
-  the bench authz slice's step 4).
+  is where that subject is first established. Bench authz slice **step 4 (done)** already removed the
+  passwordless-root *grant* from the product (see `bench-authz-step4-nopasswd-retire.md`); what remains for
+  the wizard is retiring the placeholder *account/identity* itself — binding the seat (still an unlocked
+  public password today) to a real owner credential and subject.
 
 Scope when built: which mechanism (Calamares user module vs a Shrek first-boot oneshot in the sealed image),
 credential type (passphrase now; passkey/FIDO2 as the trusted-path story matures), single-owner vs
