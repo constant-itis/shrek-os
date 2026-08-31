@@ -128,20 +128,25 @@ The product's "no dev passwordless root" property is asserted where it matters �
   a green dogfood **is** the acceptance that the product works with no `dev` passwordless root. (Runs only
   on a booted sealed image — batched with the deferred step-3 BENCH-CONSENT dogfood stage, #2941 item 1.)
 
-## Adjacent latent bug — NOT fixed here (owner said "leave var-lib-swamp")
+## Adjacent latent bugs — now FIXED (owner approved the follow-up)
 
-Fable flagged that the LIVE_INSTALLER-only mask `image/overlay/etc/systemd/system/var-lib-swamp.mount` is
-(a) not in `.gitignore` (it sits untracked in the worktree) and (b) never `rm`'d in the DOGFOOD branch of
-`build-in-container.sh` — so a DOGFOOD build after a LIVE build could bake a masked swamp mount. This is a
-pre-existing bug in the mask mechanism, orthogonal to NOPASSWD, and the standing checkpoint instruction is
-to **LEAVE** that untracked file. Recommended follow-up (needs owner OK to touch the file): gitignore it +
-`rm -f` it in the DOGFOOD/INSTALLABLE branches, exactly like `home.mount`. (`nopasswd-variant-proof.sh`
-snapshots + restores it so the proof never disturbs it.)
+Both were flagged by Fable as out-of-scope for the sudoers change and deferred; the owner approved the
+follow-up in the same session step 4 shipped, so they are now closed:
 
-Also vestigial: `ui/state/Menus.qml` and `ui/surfaces/system/SystemDrawer.qml` still call `sudo -n
-systemctl` for power — but the shipped shell is DMS + shrek-menu (plain `systemctl` → logind), the `ui/`
-tree is no longer staged into any layer, and its `.gitignore` entry is stale. Harmless today; flagged so a
-future `ui/` re-stage does not silently reintroduce a `dev`-sudo dependency the product no longer satisfies.
+1. **`var-lib-swamp.mount` mask leak — FIXED.** The LIVE_INSTALLER-only mask
+   `image/overlay/etc/systemd/system/var-lib-swamp.mount` was (a) not in `.gitignore` (it sat untracked in
+   the worktree) and (b) never `rm`'d in the DOGFOOD branch of `build-in-container.sh` — so a DOGFOOD build
+   after a LIVE build could bake a masked swamp mount. Fixed exactly like `home.mount`: `.gitignore` now
+   ignores the generated mask, and the DOGFOOD branch `rm -f`s any stale copy (LIVE_INSTALLER stages it,
+   every other variant removes it). The untracked worktree artifact itself is left in place (per the
+   standing "leave that file" note) — it is now gitignored, so it no longer shows as untracked, and each
+   build restages it per-variant. `nopasswd-variant-proof.sh` still snapshots + restores it, non-destructive.
+2. **Vestigial `ui/` `sudo -n systemctl` power calls — FIXED.** `ui/state/Menus.qml` and
+   `ui/surfaces/system/SystemDrawer.qml` called `sudo -n systemctl` for reboot/power-off. The `ui/` tree is
+   no longer staged into any layer (the shipped shell is DMS + shrek-menu), so this was harmless today, but
+   a future `ui/` re-stage would have silently reintroduced a `dev`-passwordless-root dependency the product
+   no longer satisfies. Both now call plain `systemctl` → logind (`login1.reboot`/`power-off` default
+   `allow_active=yes` for the active local seat: no polkit agent, no sudo), matching the shipped shell.
 
 ## Doc refinements to fold (owner, from #2941)
 
