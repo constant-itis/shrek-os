@@ -151,7 +151,8 @@ impl Grant {
 
 /// %-escape the bytes that would break the space-delimited one-line record wire form (space, `%`, and any
 /// control char) so a label/argv arg round-trips FAITHFULLY (Fable step-7 fix 3: a space-join is lossy).
-fn pct_encode(s: &str) -> String {
+/// Also the per-arg encoding for the count-framed `BENCH` socket request (one newline-free line per arg).
+pub fn pct_encode(s: &str) -> String {
     let mut o = String::with_capacity(s.len());
     for c in s.chars() {
         if c == '%' || c == ' ' || c.is_control() {
@@ -167,7 +168,7 @@ fn pct_encode(s: &str) -> String {
 }
 
 /// Inverse of [`pct_encode`]. Unknown/short `%` sequences pass through literally (never panics).
-fn pct_decode(s: &str) -> String {
+pub fn pct_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut o = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -1355,6 +1356,31 @@ pub fn cli(args: &[String]) -> i32 {
         }
         "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|reset|quota|destroy|list|reissue> …"); 2 }
         other => { eprintln!("bench: unknown verb {other}"); 2 }
+    }
+}
+
+/// The socket front-end for bench verbs — the authenticated `/run/shrek-gk.sock` path (ADR-003 Part 2
+/// authorization slice). [`cli`] stays the ROOT-ONLY in-process boot path (`shrek-bench-reissue.service`
+/// runs `gatekeeperd bench reissue` directly, as root, with no socket peer); this is the SECOND front end,
+/// driven by the daemon's `handle_conn` AFTER the SO_PEERCRED gate admits an allowlisted peer. `argv` is the
+/// already-`pct_decode`d `[subverb, arg0, arg1, …]` from the count-framed request. Returns `(rc, RESULT
+/// lines)` for the `RESULT …`/`END <rc>` wire framing — one implementation of every verb, two front ends.
+///
+/// STEP 1 (the `destroy` de-risk — Fable's smallest safe proof): only `destroy` (authority-REDUCING) is
+/// wired. Every other verb is REFUSED fail-closed until its transport (step 2) and, for the
+/// authority-increasing verbs, the console consent ceremony (step 3) land. Refusing (not silently running)
+/// keeps the socket surface honest as it grows.
+pub fn dispatch_socket(argv: &[String]) -> (i32, Vec<String>) {
+    let verb = argv.first().map(String::as_str).unwrap_or("");
+    match verb {
+        "destroy" => match argv.get(1) {
+            Some(n) => {
+                let rc = destroy(n);
+                (rc, vec![format!("RESULT bench-destroy {} {}", n, if rc == 0 { "ok" } else { "fail" })])
+            }
+            None => (2, vec!["RESULT bench-destroy - usage".into()]),
+        },
+        other => (2, vec![format!("RESULT bench-{other} - refused not-socket-enabled")]),
     }
 }
 

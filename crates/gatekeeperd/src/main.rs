@@ -344,7 +344,7 @@ fn json_str(s: &str) -> String {
     o
 }
 
-fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>) {
+fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>, onion_allowed: &BTreeSet<u32>) {
     let cred = match peer_cred(&stream) {
         Ok(c) => c,
         Err(e) => {
@@ -367,11 +367,58 @@ fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>) {
         return;
     }
     let mut tok = line.split_whitespace();
-    let verb = tok.next().unwrap_or("");
+    let verb = tok.next().unwrap_or("").to_string();
+
+    // The count-framed BENCH request (ADR-003 Part 2 authz slice): the onion verbs are ONE lossy
+    // whitespace-split line, but bench `run`/`export` carry an arbitrary argv after `--` (spaces, tabs,
+    // even newlines) that split_whitespace would silently corrupt or use to smuggle a second request line.
+    // Frame: header `BENCH <subverb> <argc>`, then <argc> pct-encoded arg lines (one newline-free line
+    // each). Fail-closed on any malformed/short/oversized frame.
+    if verb == "BENCH" {
+        let subverb = tok.next().unwrap_or("").to_string();
+        let argc: usize = tok.next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+        let mut w = stream;
+        if subverb.is_empty() || argc > 64 {
+            eprintln!("gatekeeperd: DENY malformed BENCH frame uid={} (subverb={subverb:?} argc={argc})", cred.uid);
+            let _ = writeln!(w, "END 1 malformed-bench-frame");
+            return;
+        }
+        let mut argv: Vec<String> = Vec::with_capacity(argc + 1);
+        argv.push(subverb);
+        for _ in 0..argc {
+            let mut l = String::new();
+            match reader.read_line(&mut l) {
+                Ok(0) | Err(_) => {
+                    let _ = writeln!(w, "END 1 short-bench-frame");
+                    return;
+                }
+                Ok(_) => {}
+            }
+            let l = l.strip_suffix('\n').unwrap_or(&l);
+            argv.push(gatekeeperd::bench_plane::pct_decode(l));
+        }
+        eprintln!("gatekeeperd: req uid={} pid={} BENCH verb={} argc={argc}", cred.uid, cred.pid, argv[0]);
+        let (rc, lines) = gatekeeperd::bench_plane::dispatch_socket(&argv);
+        for l in &lines {
+            let _ = writeln!(w, "{l}");
+        }
+        let _ = writeln!(w, "END {rc} -");
+        return;
+    }
+
+    // Legacy single-line onion verbs — restricted to root + shrek (a bench-only `dev` peer is refused).
+    if matches!(verb.as_str(), "merge" | "activate" | "deactivate" | "status")
+        && !onion_allowed.contains(&cred.uid)
+    {
+        eprintln!("gatekeeperd: DENY onion verb {verb} for uid={} (bench-only peer)", cred.uid);
+        let mut w = stream;
+        let _ = writeln!(w, "END 1 onion-not-permitted");
+        return;
+    }
     let args: Vec<String> = tok.map(String::from).collect();
     eprintln!("gatekeeperd: req uid={} pid={} verb={verb} args={:?}", cred.uid, cred.pid, args);
 
-    let resp = match verb {
+    let resp = match verb.as_str() {
         "merge" => b.handle_merge(&args),
         "activate" => b.handle_activate(args.first().map(String::as_str).unwrap_or(""), true),
         "deactivate" => b.handle_activate(args.first().map(String::as_str).unwrap_or(""), false),
@@ -444,6 +491,11 @@ fn main() {
     }
 
     // Resolve the unprivileged control-plane user; allow only it + root to connect.
+    // TWO sets: `allowed` gates who may CONNECT; `onion_allowed` gates who may drive the privileged onion
+    // verbs (merge/activate/deactivate/status). The desktop user `dev` is admitted to CONNECT so it can
+    // drive the Bench control plane over this socket (ADR-003 Part 2 authz slice), but is NOT in
+    // `onion_allowed` — it must never merge/activate sysexts. Authority-increasing bench verbs additionally
+    // require the console consent ceremony (later slice); `dev` on the socket is not escalation.
     let mut allowed: BTreeSet<u32> = BTreeSet::from([0]);
     let shrek = resolve_user("shrek");
     if let Some((uid, _)) = shrek {
@@ -451,12 +503,18 @@ fn main() {
     } else {
         eprintln!("gatekeeperd: WARN 'shrek' user not found — only root may connect (oniond will fail-closed)");
     }
+    // Onion verbs stay restricted to root + shrek — snapshot BEFORE admitting `dev`.
+    let mut onion_allowed: BTreeSet<u32> = allowed.clone();
+    if let Some((uid, _)) = resolve_user("dev") {
+        allowed.insert(uid); // bench control plane only; gated out of onion verbs in handle_conn.
+    }
     // Repro-only: allow extra uids to connect (the host/container smoke runs as a normal user, not
-    // root or shrek). Never set in the shipped units.
+    // root or shrek). Grants BOTH planes (repros drive onion + bench). Never set in the shipped units.
     if let Ok(extra) = std::env::var("SHREK_BROKER_ALLOW_UID") {
         for tok in extra.split([',', ' ']) {
             if let Ok(u) = tok.trim().parse::<u32>() {
                 allowed.insert(u);
+                onion_allowed.insert(u);
             }
         }
     }
@@ -492,7 +550,7 @@ fn main() {
 
     for conn in listener.incoming() {
         match conn {
-            Ok(stream) => handle_conn(&mut broker, stream, &allowed),
+            Ok(stream) => handle_conn(&mut broker, stream, &allowed, &onion_allowed),
             Err(e) => eprintln!("gatekeeperd: WARN accept: {e}"),
         }
     }
