@@ -28,7 +28,7 @@ bad(){ echo "  FAIL $*"; fail=$((fail+1)); }
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq >/dev/null 2>&1
 # step 5 adds real rootless-podman + ip/nft so grants + egress are proven live, not just recorded.
-apt-get install -y -qq e2fsprogs quota podman uidmap iproute2 nftables >/dev/null 2>&1
+apt-get install -y -qq e2fsprogs quota podman uidmap iproute2 nftables socat >/dev/null 2>&1
 
 # --- stand up a loop ext4 Bench pool: -O quota,project + mounted prjquota, exactly as shrek-data /home.
 truncate -s 256M /pool.img
@@ -244,6 +244,46 @@ if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
 else
   echo "  SKIP STEP 8: no shipped Scratch seed mounted (build it: scripts/build-bench-seed.sh) — the sealed-VM dogfood proves the media north-star with the baked seed"
 fi
+
+echo "===== AUTHZ SLICE step 1: bench destroy over the authenticated socket (Fable de-risk) ====="
+# The de-risk: move ONE authority-REDUCING verb (destroy) behind gatekeeperd's real /run socket before any
+# ceremony, and prove (i) SO_PEERCRED refuses a non-allowlisted uid, (ii) the socket path and the root
+# binary path leave BYTE-IDENTICAL state, (iii) it works with NO sudo anywhere (the socket replaces it).
+# The broker runs as ROOT (it does the privileged destroy); `dev` is only the authenticated PEER asking.
+GKSOCK=/run/gk-authz.sock
+SHREK_BROKER_NOMOUNT=1 SHREK_BROKER_SOCK="$GKSOCK" \
+  SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/pool/records SHREK_BENCH_FS=/mnt/pool \
+  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED=localhost/scratch \
+  "$GK" >/tmp/gkd.log 2>&1 &
+GKD=$!
+for _ in $(seq 1 50); do [ -S "$GKSOCK" ] && break; sleep 0.1; done
+[ -S "$GKSOCK" ] && ok "broker daemon bound the socket (allowlist: $(grep -o 'allowed uids.*' /tmp/gkd.log | tail -1))" || bad "broker did not bind [$(tail -2 /tmp/gkd.log | tr '\n' '|')]"
+
+# (i) a non-allowlisted uid is refused by SO_PEERCRED (not root/shrek/dev, no SHREK_BROKER_ALLOW_UID here).
+useradd -u 5555 -M -s /usr/sbin/nologin nogk 2>/dev/null || true
+REF=$(printf 'BENCH destroy 1\nzzz\n' | runuser -u nogk -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
+echo "$REF" | grep -q 'END 1' && ok "non-allowlisted uid (5555) refused at the socket by SO_PEERCRED" || bad "unallowlisted uid not refused [$REF]"
+
+# stand up two identically-constructed benches via the ROOT binary path.
+$GK bench create sockA --quota 1024 >/dev/null 2>&1
+$GK bench create sockB --quota 1024 >/dev/null 2>&1
+[ -f /mnt/pool/records/sockA ] && [ -f /mnt/pool/records/sockB ] && ok "two identical benches created (sockA/sockB)" || bad "bench setup failed"
+
+# (ii) destroy sockA over the SOCKET as DEV (allowlisted, no sudo); destroy sockB via the ROOT binary path.
+DR=$(printf 'BENCH destroy 1\nsockA\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
+{ echo "$DR" | grep -q 'END 0' && echo "$DR" | grep -q 'RESULT bench-destroy sockA ok'; } && ok "dev drove bench destroy over the socket (END 0, no sudo)" || bad "socket destroy failed [$(echo "$DR" | tr '\n' '|')]"
+$GK bench destroy sockB >/dev/null 2>&1
+# byte-identical outcome: both records + both data dirs gone, whichever front end removed them.
+{ [ ! -f /mnt/pool/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/pool/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged [sockA rec=$([ -f /mnt/pool/records/sockA ] && echo y||echo n) sockB rec=$([ -f /mnt/pool/records/sockB ] && echo y||echo n)]"
+
+# (iii) a not-yet-wired verb is refused fail-closed over the socket (grant lands in step 2/3, not silently now).
+GX=$(printf 'BENCH grant 2\nsockA\n%%2Fhome%%2Fdev\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
+{ echo "$GX" | grep -q 'refused not-socket-enabled' && echo "$GX" | grep -q 'END 2'; } && ok "an un-wired verb (grant) is refused fail-closed over the socket" || bad "un-wired verb not refused [$(echo "$GX" | tr '\n' '|')]"
+# dev must NOT be able to drive the privileged onion verbs (bench-only peer).
+ON=$(printf 'status\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
+echo "$ON" | grep -q 'onion-not-permitted' && ok "dev is gated OUT of the onion verbs (bench-only peer)" || bad "dev reached an onion verb [$(echo "$ON" | tr '\n' '|')]"
+
+kill "$GKD" 2>/dev/null; wait "$GKD" 2>/dev/null
 
 umount /mnt/pool 2>/dev/null || true
 echo "=== bench-plane oracle: PASS=$pass FAIL=$fail ==="
