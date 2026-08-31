@@ -340,6 +340,9 @@ ADR-002 promote path `promote <name> → Workshop`.
      collision is refused; (5) a grant whose anchor-relative path has a **dot-leading component** (`~/.local`,
      `~/.config`, `~/.ssh`, …) is refused — else a workload could plant an *un*constrained `.desktop`.
 8. **Prove a Media workflow E2E** (the north-star acceptance below).
+   **✅ DONE & GREEN (2026-08-30, host oracle 55/0 + the sealed-boot BENCH-MEDIA stage). No Rust — the
+   `run` verb already forwards an arbitrary workload; step 8 is an integration proof, not new code, so no
+   `system-index` bump.**
 
 ### North-star acceptance
 
@@ -348,6 +351,28 @@ inside a bundled Scratch/Media Bench after granting access to **only** the input
 destination dirs; the host stays sealed; execution is attributable to that Bench;
 `destroy` removes all its tooling + mutable state. If that works, the Shrek interaction
 model is proven — not just a container launcher.
+
+**Proven — the exact flow.** `shrek bench create media` → `grant media <in> --ro` +
+`grant media <out> --rw` → `run media -- ffmpeg -i /grants/<in>/clip.mp4 -c:v libvpx …
+/grants/<out>/out.webm` → `destroy media`. What each proof surface asserts (both use the
+**real shipped Scratch seed's** ffmpeg — no stand-in — and a real rootless-podman transcode,
+the step-6 gotcha being a ROOT podman-in-docker nested-cgroup artifact, not the rootless path):
+- **A real transcode runs *inside* the Bench** (rc 0) reading the **read-only** input grant and
+  writing the **read-write** dest grant; the output **round-trips to the host owned by `dev`**.
+- **It is a real video, not a husk** — the output is probed (`ffprobe`) to a decodable **VP8/webm**
+  video stream.
+- **The seed is loaded on demand** — the run's `ensure_seed` re-loads the offline seed from the
+  sysext archive (the image is dropped first to force the vanilla-boot path).
+- **The host stays sealed** — a write to the **read-only** input grant from inside the Bench is
+  denied; only the explicitly-granted rw dest is mutable.
+- **`destroy` removes the Bench's tooling + mutable state** (record + data dir + `/run` bench dir)
+  **yet the delivered output persists on the host** — the user keeps what they asked for, the Bench
+  keeps nothing.
+
+The endpoint-free sealed VM proves the **pure offline path** on the actual image + baked seed (no
+build, no network); the host oracle proves the same flow fast against the shipped seed tar (skipped
+with a loud notice if the gitignored seed has not been built). With this, the Shrek interaction model
+is proven end-to-end — **the ADR-003 Part 2 MVP is complete.**
 
 ## Consequences
 
