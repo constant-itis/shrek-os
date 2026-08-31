@@ -21,9 +21,9 @@ ok()  { echo "  PASS $*"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL $*"; FAIL=$((FAIL+1)); }
 
 # Both generated artifacts are gitignored build inputs; clear them so each stage starts clean.
-# The plain/INSTALLABLE branches of build-in-container.sh also `rm` the untracked var-lib-swamp.mount mask
-# (a pre-existing, NOPASSWD-orthogonal leak — the owner's standing note is to LEAVE that file), so snapshot
-# and restore it, keeping this proof non-destructive.
+# Every non-LIVE_INSTALLER branch of build-in-container.sh (DOGFOOD, INSTALLABLE, plain) `rm`s the
+# var-lib-swamp.mount mask — now a gitignored build input like the other masks. It can still sit untracked
+# in a worktree from an older build, so snapshot and restore it, keeping this proof non-destructive.
 SWAMP=image/overlay/etc/systemd/system/var-lib-swamp.mount
 SWAMP_WAS_LINK=""; [ -L "$SWAMP" ] && SWAMP_WAS_LINK="$(readlink "$SWAMP")"
 clean() {

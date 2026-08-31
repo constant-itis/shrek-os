@@ -127,6 +127,10 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   install -d "$DOGFOOD_MASKS"
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
+  # A prior LIVE_INSTALLER build stages a var-lib-swamp.mount mask; DOGFOOD has the writable shrek-data disk
+  # and WANTS the real swamp mount, so drop any stale mask (mirrors home.mount's per-variant staging — the
+  # LIVE_INSTALLER branch creates this mask, the plain/INSTALLABLE branch removes it; DOGFOOD must too).
+  rm -f "$DOGFOOD_MASKS/var-lib-swamp.mount"
   echo "!!! DOGFOOD=1: enabling persistent /home (home.mount) + the M1 persistence probe !!!"
   install -d "$LOCALFS_WANTS" "$MU_WANTS"
   ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"

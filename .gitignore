@@ -61,6 +61,9 @@
 # these are build inputs, not tracked units (the real units live under image/overlay/usr/lib).
 /image/overlay/etc/systemd/system/shrek-mount-gate.service
 /image/overlay/etc/systemd/system/shrek-desktop-gate.service
+# LIVE_INSTALLER-only mask (the live medium has no writable shrek-data disk to back /var/lib/swamp); the
+# LIVE_INSTALLER branch stages it, every other variant removes it. Generated build input, not a tracked unit.
+/image/overlay/etc/systemd/system/var-lib-swamp.mount
 # Dogfood-0 (M1): DOGFOOD-only enable symlinks (home.mount + the persistence probe) — staged by
 # DOGFOOD=1, removed on a normal build. The unit FILES under image/overlay/usr/lib are tracked source;
 # only the .wants enablement is a build input (like the masks above). Scoped so the tracked symlinks in
