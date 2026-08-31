@@ -463,6 +463,23 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
       else bad "bench-export — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-EXPORT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-EXPORT //')]"; fi
     done
   fi
+  # Bench MEDIA (ADR-003 Part 2 step 8, the north-star): a real OFFLINE video transcode inside a Bench with
+  # the shipped seed's ffmpeg, host sealed, output round-tripping to a granted dest, destroy keeping it.
+  if grep -qa 'SHREK-DOGFOOD BENCH-MEDIA ' "$LOG"; then
+    echo "  bench-media transcode: $(grep -a 'SHREK-DOGFOOD BENCH-MEDIA transcode=' "$LOG" | tail -1 | sed 's/.*BENCH-MEDIA //')"
+    for pair in \
+      "input-fixture=ok|a real input video is fabricated offline with the shipped seed's ffmpeg" \
+      "transcode=ok|THE north-star: a real offline ffmpeg transcode runs INSIDE the bench (rc 0)" \
+      "output-owned-by-dev=ok|the transcoded output round-trips to the granted dest owned by dev" \
+      "seed-autoload=ok|the media run's ensure_seed re-loaded the offline seed from the sysext archive" \
+      "output-is-video=ok|the output is a real decodable VP8/webm video (ffprobe), not an empty file" \
+      "ro-input-sealed=ok|the bench cannot write the read-only input grant (host stays sealed)" \
+      "destroy-keeps-output=ok|destroy removes the bench (record+data+/run) but the delivered output persists"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-MEDIA ${tok}" "$LOG"; then ok "bench-media — ${desc}"
+      else bad "bench-media — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-MEDIA ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-MEDIA //')]"; fi
+    done
+  fi
 elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  (bench proof skipped — shrek-bench sysext not in this store)"
 fi

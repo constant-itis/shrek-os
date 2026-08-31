@@ -203,13 +203,65 @@ DF2="$APPS/shrek-bench-exp1-hello2.desktop"
 $GK bench destroy exp1 >/dev/null 2>&1
 [ ! -f "$DF2" ] && ok "destroy swept the bench's exported .desktop(s)" || bad "destroy left a .desktop behind"
 
+echo "===== STEP 8: NORTH-STAR — a real offline Media transcode E2E through the Bench ====="
+if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
+  # Use the ACTUAL shipped Scratch seed (alpine+coreutils+ffmpeg+exit42), not a stand-in — this is the real
+  # product ffmpeg doing a real transcode via REAL rootless podman (the run path gatekeeperd drives as dev).
+  # The step-6 gotcha was a ROOT podman-in-docker nested-cgroup artifact; the rootless path is the real one.
+  cp /host-seed/scratch.tar /seed/scratch-media.tar; chown dev:dev /seed/scratch-media.tar
+  bdev podman rmi -f localhost/scratch >/dev/null 2>&1     # drop the busybox stand-in from steps 1-7
+  bdev podman load -i /seed/scratch-media.tar >/dev/null 2>&1   # load the real seed to fabricate the input
+  bdev podman image inspect localhost/scratch --format '{{.Id}}' > /seed/scratch-media.tar.digest 2>/dev/null
+  mkdir -p /home/dev/m_in /home/dev/m_out; chown -R dev:dev /home/dev/m_in /home/dev/m_out
+  # fabricate a real input video OFFLINE (testsrc -> mpeg4, a built-in encoder), owned by dev.
+  bdev podman run --rm --network=none --no-hosts --runtime crun -v /home/dev/m_in:/o localhost/scratch \
+    ffmpeg -hide_banner -y -f lavfi -i testsrc=duration=1:size=128x96:rate=12 -pix_fmt yuv420p -c:v mpeg4 /o/clip.mp4 >/tmp/m0.log 2>&1
+  { [ -s /home/dev/m_in/clip.mp4 ] && [ "$(stat -c %u /home/dev/m_in/clip.mp4)" = 1000 ]; } && ok "offline input video fixture created ($(stat -c %s /home/dev/m_in/clip.mp4) bytes, dev-owned)" || bad "input fixture failed [$(tail -2 /tmp/m0.log|tr '\n' '|')]"
+  # drop the image so the bench run's ensure_seed must RE-LOAD the real seed from the archive (product path).
+  bdev podman rmi -f localhost/scratch >/dev/null 2>&1
+  export SHREK_BENCH_SEED=localhost/scratch
+  export SHREK_BENCH_SEED_TAR=/seed/scratch-media.tar
+  # the interaction model: create a media bench, grant ONLY input (ro) + dest (rw), transcode inside it.
+  $GK bench create media --quota 8192 >/tmp/m1.log 2>&1 && ok "media bench created" || bad "create failed [$(tail -1 /tmp/m1.log)]"
+  $GK bench grant media /home/dev/m_in  --ro >/tmp/m2.log 2>&1 && ok "input dir granted --ro" || bad "grant ro failed [$(tail -1 /tmp/m2.log)]"
+  $GK bench grant media /home/dev/m_out --rw >/tmp/m3.log 2>&1 && ok "dest dir granted --rw" || bad "grant rw failed [$(tail -1 /tmp/m3.log)]"
+  # THE north-star: a real ffmpeg transcode INSIDE the bench, reading the ro input, writing the rw dest.
+  $GK bench run media -- ffmpeg -hide_banner -y -i /grants/m_in/clip.mp4 -c:v libvpx -b:v 200k -an /grants/m_out/out.webm >/tmp/m4.log 2>&1; MRC=$?
+  OUT=/home/dev/m_out/out.webm
+  { [ "$MRC" -eq 0 ] && [ -s "$OUT" ]; } && ok "transcode ran INSIDE the bench + output landed on the host ($(stat -c %s "$OUT" 2>/dev/null) bytes)" || bad "transcode failed [rc=$MRC $(tail -3 /tmp/m4.log|tr '\n' '|')]"
+  [ "$(stat -c %u "$OUT" 2>/dev/null)" = 1000 ] && ok "output round-trips to the host owned by dev (rw grant)" || bad "output not dev-owned [$(stat -c %u "$OUT" 2>/dev/null)]"
+  bdev podman image exists localhost/scratch && ok "the run's ensure_seed re-loaded the real seed from the archive" || bad "ensure_seed did not re-load the media seed"
+  # validate it's a REAL decodable video (probe with the seed's own ffprobe), not an empty/garbage file.
+  VC=$(bdev podman run --rm --network=none --no-hosts --runtime crun -v /home/dev/m_out:/o:ro localhost/scratch ffprobe -v error -select_streams v:0 -show_entries stream=codec_name -of default=nw=1:nk=1 /o/out.webm 2>/dev/null | tr -d '\r')
+  [ "$VC" = vp8 ] && ok "output is a real VP8/webm video stream (ffprobe: $VC)" || bad "output not a valid VP8 video [$VC]"
+  # host stays SEALED: a write to the read-only input grant from inside the bench is denied.
+  $GK bench run media -- sh -c 'echo pwn > /grants/m_in/pwn.txt' >/dev/null 2>&1
+  [ ! -e /home/dev/m_in/pwn.txt ] && ok "the ro input grant is not writable from the bench (host stays sealed)" || bad "ro input grant was writable from the bench"
+  # destroy removes ALL the bench's tooling + mutable state, but the delivered output PERSISTS on the host.
+  $GK bench destroy media >/dev/null 2>&1
+  { [ ! -f /mnt/pool/records/media ] && [ ! -d /mnt/pool/b/media ] && [ ! -d /run/shrek/bench/media ] && [ -s "$OUT" ]; } && ok "destroy removed the bench (record+data+/run) yet kept the transcoded output" || bad "destroy left residue or lost the output"
+  unset SHREK_BENCH_SEED SHREK_BENCH_SEED_TAR
+else
+  echo "  SKIP STEP 8: no shipped Scratch seed mounted (build it: scripts/build-bench-seed.sh) — the sealed-VM dogfood proves the media north-star with the baked seed"
+fi
+
 umount /mnt/pool 2>/dev/null || true
 echo "=== bench-plane oracle: PASS=$pass FAIL=$fail ==="
 [ "$fail" -eq 0 ]
 INNER
 
 echo "=== running bench-plane oracle in privileged debian:trixie ==="
-docker run --rm --privileged \
-  -v "$GK":/gatekeeperd:ro \
-  -v /tmp/bench-proof-inner.sh:/inner.sh:ro \
-  debian:trixie bash /inner.sh
+# Step 8 (the media north-star) uses the ACTUAL shipped Scratch seed (alpine+coreutils+ffmpeg) for a real
+# transcode — no stand-in. It is a gitignored build product (scripts/build-bench-seed.sh); mount it if
+# present and let the inner script run step 8, else the inner script prints a loud SKIP (the sealed-VM
+# dogfood proves the media north-star with the baked seed regardless).
+SEED_TAR="$(pwd)/layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/scratch.tar"
+DOCKER_ARGS=(--rm --privileged -v "$GK":/gatekeeperd:ro -v /tmp/bench-proof-inner.sh:/inner.sh:ro)
+if [ -f "$SEED_TAR" ]; then
+  DOCKER_ARGS+=(-v "$SEED_TAR":/host-seed/scratch.tar:ro -e MEDIA_SEED=1)
+  echo "  (media north-star: mounting the shipped seed $(du -h "$SEED_TAR" | cut -f1))"
+else
+  DOCKER_ARGS+=(-e MEDIA_SEED=0)
+  echo "  (media north-star: no shipped seed built — step 8 will SKIP in the oracle; build with scripts/build-bench-seed.sh)"
+fi
+docker run "${DOCKER_ARGS[@]}" debian:trixie bash /inner.sh
