@@ -98,24 +98,78 @@ fn usage() {
     eprintln!("  (planned) shrek history | related | status; shrek audit --agent");
 }
 
-/// `shrek bench <verb> …` — forward verbatim to `gatekeeperd bench …` and exec it, replacing this
-/// process so the supervisor's exit status IS shrek's (same fidelity as `shrek run`). The supervisor
-/// re-validates the verb + args and owns the privileged lifecycle; this front door adds no logic. Bench
-/// lifecycle needs the privilege the supervisor runs at (pool mounts, ext4 project quota) — run it with
-/// that privilege, exactly as the proofs do.
-fn bench(args: &[String]) -> i32 {
-    if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) {
-        usage();
-        return 0;
+/// %-escape space/`%`/control so each argv arg is exactly one newline-free line on the count-framed BENCH
+/// wire (mirrors `gatekeeperd::bench_plane::pct_encode`; kept inline so this front door stays dep-free).
+fn pct_encode(s: &str) -> String {
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c == '%' || c == ' ' || c.is_control() {
+            let mut buf = [0u8; 4];
+            for b in c.encode_utf8(&mut buf).bytes() {
+                o.push_str(&format!("%{b:02X}"));
+            }
+        } else {
+            o.push(c);
+        }
     }
-    let gk = std::env::var("SHREK_GATEKEEPERD").unwrap_or_else(|_| "gatekeeperd".to_string());
-    let mut a: Vec<String> = vec!["bench".into()];
-    a.extend(args.iter().cloned());
-    let err = Command::new(&gk).args(&a).exec();
-    eprintln!("shrek bench: cannot exec `{gk}`: {err}");
-    eprintln!("             set SHREK_GATEKEEPERD or ensure gatekeeperd is on PATH, and run with the");
-    eprintln!("             privilege the Bench supervisor needs (pool mounts + ext4 project quota).");
-    127
+    o
+}
+
+/// `shrek bench <verb> …` — drive the Bench control plane over gatekeeperd's authenticated socket
+/// (ADR-003 Part 2 authorization slice), NOT by exec'ing the privileged binary. The daemon runs the verb
+/// as root behind the SO_PEERCRED gate and re-validates every argument; for the authority-increasing verbs
+/// (grant/network/export) it runs the console consent ceremony. The verb + its argv go in the count-framed
+/// `BENCH` request so an arbitrary workload after `--` survives spaces/newlines. Exit status mirrors the
+/// supervisor's `END <rc>` (same fidelity as `shrek run`). This front door adds no logic.
+fn bench(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) || args.is_empty() {
+        usage();
+        return if args.is_empty() { 2 } else { 0 };
+    }
+    use std::io::{BufRead, BufReader, Write};
+    let socket = std::env::var("SHREK_BROKER_SOCK").unwrap_or_else(|_| "/run/shrek-gk.sock".to_string());
+    let verb = args[0].as_str();
+    let rest = &args[1..];
+    let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
+        Ok(s) => s,
+        Err(e) => {
+            // Fail-closed: an unreachable supervisor is unavailability, never a grant. Report + exit nonzero.
+            eprintln!("shrek bench: gatekeeper socket unavailable ({socket}): {e}");
+            return 1;
+        }
+    };
+    let mut req = format!("BENCH {verb} {}\n", rest.len());
+    for a in rest {
+        req.push_str(&pct_encode(a));
+        req.push('\n');
+    }
+    if let Err(e) = stream.write_all(req.as_bytes()) {
+        eprintln!("shrek bench: write failed: {e}");
+        return 1;
+    }
+    let _ = stream.flush();
+    let reader = BufReader::new(&stream);
+    let mut rc: i32 = 1;
+    let mut saw_end = false;
+    for line in reader.lines() {
+        let line = match line {
+            Ok(l) => l,
+            Err(e) => { eprintln!("shrek bench: read failed: {e}"); return 1; }
+        };
+        if let Some(tail) = line.strip_prefix("END ") {
+            rc = tail.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(1);
+            saw_end = true;
+            break;
+        }
+        if let Some(tail) = line.strip_prefix("RESULT ") {
+            println!("{tail}");
+        }
+    }
+    if !saw_end {
+        eprintln!("shrek bench: no well-formed response from the supervisor");
+        return 1;
+    }
+    rc
 }
 
 /// Parsed `shrek run` request, resolved to what the engine needs.

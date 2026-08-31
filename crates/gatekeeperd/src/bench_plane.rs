@@ -1366,21 +1366,102 @@ pub fn cli(args: &[String]) -> i32 {
 /// already-`pct_decode`d `[subverb, arg0, arg1, …]` from the count-framed request. Returns `(rc, RESULT
 /// lines)` for the `RESULT …`/`END <rc>` wire framing — one implementation of every verb, two front ends.
 ///
-/// STEP 1 (the `destroy` de-risk — Fable's smallest safe proof): only `destroy` (authority-REDUCING) is
-/// wired. Every other verb is REFUSED fail-closed until its transport (step 2) and, for the
-/// authority-increasing verbs, the console consent ceremony (step 3) land. Refusing (not silently running)
-/// keeps the socket surface honest as it grows.
+/// STEP 2 (full transport): every NEUTRAL / REDUCING / read-only verb is wired over the socket. The three
+/// AUTHORITY-INCREASING verbs (`grant`, `network` to a profile, `export`) are REFUSED fail-closed here —
+/// they land behind the console consent ceremony in step 3, never silently applied for a `dev` peer.
+/// Interactive `enter` (podman `-it`, needs a pty) is a non-goal for this request/response socket.
 pub fn dispatch_socket(argv: &[String]) -> (i32, Vec<String>) {
     let verb = argv.first().map(String::as_str).unwrap_or("");
+    let rest = &argv[argv.len().min(1)..];
+    // One summary RESULT line per mutating verb (state parity is asserted against the record/mount table,
+    // not this text — see the oracle). rc is propagated verbatim to the client via `END <rc>`.
+    let summ = |v: &str, name: &str, rc: i32| {
+        vec![format!("RESULT bench-{v} {name} {}", if rc == 0 { "ok" } else { "fail" })]
+    };
     match verb {
-        "destroy" => match argv.get(1) {
-            Some(n) => {
-                let rc = destroy(n);
-                (rc, vec![format!("RESULT bench-destroy {} {}", n, if rc == 0 { "ok" } else { "fail" })])
+        "create" => {
+            let mut name = None;
+            let mut quota = DEFAULT_QUOTA_KIB;
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--quota" => { i += 1; quota = rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(quota); }
+                    other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
+                    other => return (2, vec![format!("RESULT bench-create - refused bad-arg-{other}")]),
+                }
+                i += 1;
             }
+            match name {
+                Some(n) => { let rc = create(&n, quota); (rc, summ("create", &n, rc)) }
+                None => (2, vec!["RESULT bench-create - usage".into()]),
+            }
+        }
+        "run" => {
+            // NON-INTERACTIVE only over the socket; `enter` (`-it`) needs a pty (deferred).
+            let mut name = None;
+            let mut workload: Vec<String> = Vec::new();
+            let mut i = 0;
+            while i < rest.len() {
+                match rest[i].as_str() {
+                    "--" => { workload = rest[i + 1..].to_vec(); break; }
+                    other if name.is_none() && !other.starts_with('-') => name = Some(other.to_string()),
+                    other => return (2, vec![format!("RESULT bench-run - refused bad-arg-{other}")]),
+                }
+                i += 1;
+            }
+            match name {
+                Some(n) => { let rc = run(&n, false, &workload); (rc, summ("run", &n, rc)) }
+                None => (2, vec!["RESULT bench-run - usage".into()]),
+            }
+        }
+        "enter" => (2, vec!["RESULT bench-enter - refused interactive-not-over-socket".into()]),
+        "run-export" => match (rest.first(), rest.get(1)) {
+            (Some(n), Some(k)) => { let rc = run_export(n, k); (rc, summ("run-export", n, rc)) }
+            _ => (2, vec!["RESULT bench-run-export - usage".into()]),
+        },
+        "unexport" => match (rest.first(), rest.get(1)) {
+            (Some(n), Some(k)) => { let rc = unexport(n, k); (rc, summ("unexport", n, rc)) }
+            _ => (2, vec!["RESULT bench-unexport - usage".into()]),
+        },
+        "reset" => match rest.first() {
+            Some(n) => { let rc = reset(n); (rc, summ("reset", n, rc)) }
+            None => (2, vec!["RESULT bench-reset - usage".into()]),
+        },
+        "destroy" => match rest.first() {
+            Some(n) => { let rc = destroy(n); (rc, summ("destroy", n, rc)) }
             None => (2, vec!["RESULT bench-destroy - usage".into()]),
         },
-        other => (2, vec![format!("RESULT bench-{other} - refused not-socket-enabled")]),
+        "quota" => match rest.first() {
+            Some(n) => {
+                let kib = rest.get(1).and_then(|s| s.parse::<u64>().ok());
+                let rc = quota(n, kib);
+                let val = bench_record::load_record(&bench_record::records_dir(), n)
+                    .map(|r| r.quota_kib.to_string())
+                    .unwrap_or_else(|| "-".into());
+                (rc, vec![format!("RESULT bench-quota {n} quota_kib={val}")])
+            }
+            None => (2, vec!["RESULT bench-quota - usage".into()]),
+        },
+        "list" => {
+            let mut lines: Vec<String> = records()
+                .into_iter()
+                .map(|r| format!("RESULT bench {} state={} project={} quota_kib={}", r.name, r.state, r.project, r.quota_kib))
+                .collect();
+            if lines.is_empty() {
+                lines.push("RESULT bench - none".into());
+            }
+            (0, lines)
+        }
+        "reissue" => { let rc = reissue(); (rc, summ("reissue", "-", rc)) }
+        // Authority-INCREASING verbs are gated behind the console consent ceremony (step 3). Until it lands
+        // they are REFUSED fail-closed over the socket — never silently applied for a non-root peer. (`network
+        // <name> none` REVOKES egress and will be allowed ceremony-free in step 3; refused here for now.)
+        "grant" | "network" | "export" => {
+            (2, vec![format!("RESULT bench-{verb} - refused needs-consent-ceremony")])
+        }
+        "promote" => (3, vec!["RESULT bench-promote - deferred".into()]),
+        "" => (2, vec!["RESULT bench - usage".into()]),
+        other => (2, vec![format!("RESULT bench-{other} - refused unknown-verb")]),
     }
 }
 
