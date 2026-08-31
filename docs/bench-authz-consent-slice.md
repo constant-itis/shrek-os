@@ -1,11 +1,21 @@
-# Bench authorization — the console consent ceremony (REVIEWED, ready to implement)
+# Bench authorization — the console consent ceremony (BUILT + oracle-proven; VM dogfood pending)
 
-> **Status: reviewed design, ready to build.** This is step 3 of the bench authorization slice (steps 1+2 —
-> socket transport — are shipped and green). It is a **build slice of `grant-protocol.md`**, applied to the
-> three authority-increasing bench verbs. The design was reviewed against the code (Fable, 2026-08-30); the
-> review pivoted the VT mechanism, closed an apply-time swap hole, and surfaced a transport gap and several
-> under-specified security requirements — all folded in below. The old "Questions for the reviewer" section is
-> now "Review outcomes (resolved)" at the end.
+> **Status: built, unit-tested, and host-oracle-proven.** `crates/gatekeeperd/src/consent.rs` implements this
+> design; the security core (sanitizer, tuple binding / apply gate, trifecta, cooldown, confirmation code) is
+> proven by 15 dep-free unit tests over a mock console, and the fail-closed-on-no-seat half is proven by the
+> bench-plane host oracle (`scripts/bench-plane-proof.sh` step 3, PASS=73/0). **Still pending: the sealed-VM
+> `BENCH-CONSENT` dogfood stage** (real VT + scripted "y"/"n") and its three image-side verify items (systemd
+> ≥257 / SAK enablement, compositor-independent chord detection, VT scanout) — the RealConsole VT/SAK
+> transport fails closed until those hold. This is step 3 of the bench authorization slice (steps 1+2 — socket
+> transport — are shipped and green), a **build slice of `grant-protocol.md`** applied to the three
+> authority-increasing bench verbs. The design was reviewed against the code (Fable, 2026-08-30): the review
+> pivoted the VT mechanism, closed an apply-time swap hole, and surfaced a transport gap and several
+> under-specified requirements — all folded in below; "Review outcomes (resolved)" is at the end.
+>
+> **Build note (a bug the oracle caught):** minting the nonce with `std::fs::read("/dev/urandom")` reads to
+> EOF, but urandom is infinite — the `panic=abort` daemon hung and died the instant a request reached the
+> ceremony. Fixed to read exactly 16 bytes (`read_exact`). The lesson: I/O-boundary bugs the unit tests can't
+> see are exactly what the host oracle is for.
 
 ## Why this exists
 
