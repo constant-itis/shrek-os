@@ -441,15 +441,49 @@ impl RealConsole {
     }
 }
 
+/// Drain every currently-buffered line from a `busctl monitor` reader and report whether the
+/// SecureAttentionKey signal appeared. `Ok(true)` = matched; `Ok(false)` = buffer drained with no
+/// match (caller should poll for more); `Err(())` = EOF / read error (busctl died) → fail closed.
+///
+/// Factored out of `arm_sak` so the multi-line-record parse is unit-testable. `busctl` prints a
+/// multi-LINE record per message (a `‣ Type=signal …` header, then `… Member=SecureAttentionKey`),
+/// commonly delivered in a single write; the whole block lands in the `BufReader`'s userspace buffer,
+/// so we must scan ALL buffered lines rather than one per poll — otherwise the match line sits unread
+/// where the next `poll()` (which watches the now-drained fd) can never see it, and arm stalls to the
+/// deadline. Stops before any read that would block (buffer empty), keeping the caller's poll-based
+/// deadline authoritative; `stdbuf -oL` on busctl makes buffer boundaries fall on line boundaries so
+/// `read_line` never blocks mid-line here.
+fn drain_sak<R: std::io::Read>(reader: &mut std::io::BufReader<R>) -> Result<bool, ()> {
+    use std::io::BufRead;
+    loop {
+        let mut line = String::new();
+        match reader.read_line(&mut line) {
+            Ok(0) => return Err(()),
+            Ok(_) => {
+                if line.contains("SecureAttentionKey") {
+                    return Ok(true);
+                }
+            }
+            Err(_) => return Err(()),
+        }
+        if reader.buffer().is_empty() {
+            return Ok(false);
+        }
+    }
+}
+
 impl Console for RealConsole {
     fn arm_sak(&mut self) -> Result<(), DenyReason> {
         // VM-PROVEN ONLY (see the module header's verify items). Subscribe to logind's SecureAttentionKey
         // with a SENDER-PINNED match (the bus daemon fills `sender` authoritatively — an unpinned match
         // would let the `dev` agent forge its own SAK and flip the screen). Fail closed on ANY anomaly.
-        use std::io::BufRead;
         use std::process::{Command, Stdio};
-        let mut child = Command::new("busctl")
+        // stdbuf -oL: busctl writes via stdio, which is block-buffered on a pipe — force line buffering so
+        // each record line reaches us promptly instead of stalling in busctl's ~4K buffer past the deadline.
+        let mut child = Command::new("stdbuf")
             .args([
+                "-oL",
+                "busctl",
                 "--system",
                 "--match",
                 "type='signal',sender='org.freedesktop.login1',interface='org.freedesktop.login1.Manager',member='SecureAttentionKey'",
@@ -481,12 +515,13 @@ impl Console for RealConsole {
             if rev & linux_uapi::POLLIN == 0 {
                 continue;
             }
-            let mut line = String::new();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                return Err(DenyReason::NoSak);
-            }
-            if line.contains("SecureAttentionKey") {
-                return Ok(());
+            // Drain EVERY buffered line, not just one (see drain_sak): busctl's multi-line record usually
+            // arrives in one read(), so a one-line-per-poll loop leaves the `Member=SecureAttentionKey`
+            // line unread in the BufReader and denies NoSak on a genuine chord.
+            match drain_sak(&mut reader) {
+                Ok(true) => return Ok(()),
+                Ok(false) => continue,
+                Err(()) => return Err(DenyReason::NoSak),
             }
         }
     }
@@ -563,6 +598,31 @@ impl Console for RealConsole {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- arm_sak busctl parse: the Member=SecureAttentionKey line rides on a CONTINUATION line of a
+    // multi-line record that usually arrives in one read(). Regression: a one-line-per-poll loop left it
+    // unread in the BufReader while poll() watched the drained fd, denying NoSak on a genuine chord. ----
+    #[test]
+    fn drain_sak_finds_member_line_after_header_in_one_chunk() {
+        let rec = "\u{2023} Type=signal  Endian=l  Flags=1  Cookie=42\n  \
+                   Sender=:1.3  Path=/org/freedesktop/login1  \
+                   Interface=org.freedesktop.login1.Manager  Member=SecureAttentionKey\n";
+        let mut r = std::io::BufReader::new(std::io::Cursor::new(rec.as_bytes().to_vec()));
+        assert_eq!(drain_sak(&mut r), Ok(true));
+    }
+
+    #[test]
+    fn drain_sak_reports_false_when_no_match_in_buffer() {
+        let rec = "\u{2023} Type=signal  Cookie=1\n  Member=PrepareForSleep\n";
+        let mut r = std::io::BufReader::new(std::io::Cursor::new(rec.as_bytes().to_vec()));
+        assert_eq!(drain_sak(&mut r), Ok(false));
+    }
+
+    #[test]
+    fn drain_sak_errs_on_eof() {
+        let mut r = std::io::BufReader::new(std::io::Cursor::new(Vec::new()));
+        assert_eq!(drain_sak(&mut r), Err(()));
+    }
 
     // ---- a scripted console: fake ONLY the VT/SAK/keyboard boundary; the decision logic is real ----
     struct MockConsole {
