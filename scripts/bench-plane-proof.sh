@@ -12,12 +12,17 @@
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-echo "=== building gatekeeperd (host, --features oracle-env) ==="
+echo "=== building gatekeeperd (host, --features oracle-env) + the socket clients ==="
 # oracle-env re-enables the SHREK_BENCH_* path overrides this oracle drives (records/pool/fs/anchor/run/
 # seed). The SHIPPED image build compiles them OUT (must-fix 1), so this feature is oracle-only.
 cargo build -p gatekeeperd --features oracle-env >/dev/null 2>&1
 GK="$(pwd)/target/debug/gatekeeperd"
 [ -x "$GK" ] || { echo "no gatekeeperd binary at $GK" >&2; exit 1; }
+# the authz slice routes bench verbs over the socket — build the real clients so the oracle exercises them
+# (shrek bench = the control-plane client; shrek-bench-run = the exported-.desktop launcher client).
+cargo build -p shrek -p shrek-bench-run >/dev/null 2>&1
+SHREK="$(pwd)/target/debug/shrek"; SBR="$(pwd)/target/debug/shrek-bench-run"
+{ [ -x "$SHREK" ] && [ -x "$SBR" ]; } || { echo "no shrek / shrek-bench-run binaries" >&2; exit 1; }
 
 cat > /tmp/bench-proof-inner.sh <<'INNER'
 set -u
@@ -245,43 +250,58 @@ else
   echo "  SKIP STEP 8: no shipped Scratch seed mounted (build it: scripts/build-bench-seed.sh) — the sealed-VM dogfood proves the media north-star with the baked seed"
 fi
 
-echo "===== AUTHZ SLICE step 1: bench destroy over the authenticated socket (Fable de-risk) ====="
-# The de-risk: move ONE authority-REDUCING verb (destroy) behind gatekeeperd's real /run socket before any
-# ceremony, and prove (i) SO_PEERCRED refuses a non-allowlisted uid, (ii) the socket path and the root
-# binary path leave BYTE-IDENTICAL state, (iii) it works with NO sudo anywhere (the socket replaces it).
-# The broker runs as ROOT (it does the privileged destroy); `dev` is only the authenticated PEER asking.
-GKSOCK=/run/gk-authz.sock
-SHREK_BROKER_NOMOUNT=1 SHREK_BROKER_SOCK="$GKSOCK" \
+echo "===== AUTHZ SLICE: bench control plane over the authenticated socket (steps 1+2) ====="
+# The broker runs as ROOT (it does the privileged work); `dev` is only the authenticated PEER asking. It
+# binds the DEFAULT socket so the real clients ($SHREK / $SBR, whose paths are fixed) reach it. A busybox
+# seed (tagged localhost/scratch, tar at /seed/scratch.tar from step 5) lets run/run-export execute.
+bdev podman tag docker.io/library/busybox:latest localhost/scratch >/dev/null 2>&1 || bdev podman load -i /seed/scratch.tar >/dev/null 2>&1
+SHREK=/shrek; SBR=/shrek-bench-run   # the real clients, mounted into the container by the outer harness
+SHREK_BROKER_NOMOUNT=1 \
   SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/pool/records SHREK_BENCH_FS=/mnt/pool \
-  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED=localhost/scratch \
+  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED=localhost/scratch SHREK_BENCH_SEED_TAR=/seed/scratch.tar \
   "$GK" >/tmp/gkd.log 2>&1 &
 GKD=$!
+GKSOCK=/run/shrek-gk.sock
 for _ in $(seq 1 50); do [ -S "$GKSOCK" ] && break; sleep 0.1; done
-[ -S "$GKSOCK" ] && ok "broker daemon bound the socket (allowlist: $(grep -o 'allowed uids.*' /tmp/gkd.log | tail -1))" || bad "broker did not bind [$(tail -2 /tmp/gkd.log | tr '\n' '|')]"
+[ -S "$GKSOCK" ] && ok "broker daemon bound the default socket (allowlist: $(grep -o 'allowed uids.*' /tmp/gkd.log | tail -1))" || bad "broker did not bind [$(tail -2 /tmp/gkd.log | tr '\n' '|')]"
+# the clients connect as dev; shrek reads SHREK_BROKER_SOCK, shrek-bench-run uses its fixed default path.
+sdev() { runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" SHREK_BROKER_SOCK="$GKSOCK" PATH=/usr/bin:/bin "$@"; }
 
+echo "--- step 1 (de-risk): destroy over the socket, refused-uid, onion gate ---"
 # (i) a non-allowlisted uid is refused by SO_PEERCRED (not root/shrek/dev, no SHREK_BROKER_ALLOW_UID here).
 useradd -u 5555 -M -s /usr/sbin/nologin nogk 2>/dev/null || true
 REF=$(printf 'BENCH destroy 1\nzzz\n' | runuser -u nogk -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
 echo "$REF" | grep -q 'END 1' && ok "non-allowlisted uid (5555) refused at the socket by SO_PEERCRED" || bad "unallowlisted uid not refused [$REF]"
-
-# stand up two identically-constructed benches via the ROOT binary path.
-$GK bench create sockA --quota 1024 >/dev/null 2>&1
-$GK bench create sockB --quota 1024 >/dev/null 2>&1
-[ -f /mnt/pool/records/sockA ] && [ -f /mnt/pool/records/sockB ] && ok "two identical benches created (sockA/sockB)" || bad "bench setup failed"
-
-# (ii) destroy sockA over the SOCKET as DEV (allowlisted, no sudo); destroy sockB via the ROOT binary path.
-DR=$(printf 'BENCH destroy 1\nsockA\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
-{ echo "$DR" | grep -q 'END 0' && echo "$DR" | grep -q 'RESULT bench-destroy sockA ok'; } && ok "dev drove bench destroy over the socket (END 0, no sudo)" || bad "socket destroy failed [$(echo "$DR" | tr '\n' '|')]"
+# (ii) destroy sockA over the SOCKET (as dev, via $SHREK); destroy sockB via the ROOT binary path — identical state.
+$GK bench create sockA --quota 1024 >/dev/null 2>&1; $GK bench create sockB --quota 1024 >/dev/null 2>&1
+sdev "$SHREK" bench destroy sockA >/tmp/sd.log 2>&1 && ok "dev drove 'shrek bench destroy' over the socket (rc0, no sudo)" || bad "socket destroy failed [$(cat /tmp/sd.log)]"
 $GK bench destroy sockB >/dev/null 2>&1
-# byte-identical outcome: both records + both data dirs gone, whichever front end removed them.
-{ [ ! -f /mnt/pool/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/pool/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged [sockA rec=$([ -f /mnt/pool/records/sockA ] && echo y||echo n) sockB rec=$([ -f /mnt/pool/records/sockB ] && echo y||echo n)]"
-
-# (iii) a not-yet-wired verb is refused fail-closed over the socket (grant lands in step 2/3, not silently now).
-GX=$(printf 'BENCH grant 2\nsockA\n%%2Fhome%%2Fdev\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
-{ echo "$GX" | grep -q 'refused not-socket-enabled' && echo "$GX" | grep -q 'END 2'; } && ok "an un-wired verb (grant) is refused fail-closed over the socket" || bad "un-wired verb not refused [$(echo "$GX" | tr '\n' '|')]"
-# dev must NOT be able to drive the privileged onion verbs (bench-only peer).
+{ [ ! -f /mnt/pool/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/pool/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged"
+# authority-INCREASING verbs are refused fail-closed over the socket (they land behind the ceremony, step 3).
+GX=$(sdev "$SHREK" bench grant sockZ /home/dev 2>&1)
+echo "$GX" | grep -q 'needs-consent-ceremony' && ok "grant is refused fail-closed over the socket (awaits the consent ceremony)" || bad "grant not gated [$GX]"
+# dev must NOT reach the privileged onion verbs (bench-only peer).
 ON=$(printf 'status\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
 echo "$ON" | grep -q 'onion-not-permitted' && ok "dev is gated OUT of the onion verbs (bench-only peer)" || bad "dev reached an onion verb [$(echo "$ON" | tr '\n' '|')]"
+
+echo "--- step 2 (full transport): every neutral verb over the socket via the real clients ---"
+sdev "$SHREK" bench create c1 --quota 1024 >/tmp/c1.log 2>&1
+{ [ -f /mnt/pool/records/c1 ] && [ "$(sed -n 's/^state //p' /mnt/pool/records/c1)" = created ]; } && ok "'shrek bench create' over the socket (record written, state=created)" || bad "socket create failed [$(cat /tmp/c1.log)]"
+sdev "$SHREK" bench list 2>/dev/null | grep -q 'c1' && ok "'shrek bench list' streams the bench over the socket" || bad "socket list missing c1"
+sdev "$SHREK" bench quota c1 2048 >/dev/null 2>&1
+[ "$(sed -n 's/^quota_kib //p' /mnt/pool/records/c1)" = 2048 ] && ok "'shrek bench quota' re-caps over the socket (record=2048)" || bad "socket quota not applied"
+# ARGV-FRAMING regression: a workload after `--` carrying spaces must round-trip EXACTLY (the count-framed
+# request preserves it; the old whitespace-split wire would corrupt it).
+sdev "$SHREK" bench run c1 -- sh -c 'printf "%s\n" "a b  c" > /work/m.txt' >/tmp/run.log 2>&1
+{ [ -f /mnt/pool/b/c1/m.txt ] && grep -qx 'a b  c' /mnt/pool/b/c1/m.txt; } && ok "workload argv with embedded spaces round-trips exactly over the count-framed socket" || bad "argv framing corrupted the workload [$(cat /mnt/pool/b/c1/m.txt 2>/dev/null | cat -A)]"
+# shrek-bench-run (the exported-.desktop launcher) drives run-export over the socket, NO sudo. Export via the
+# ROOT binary path (export is authority-increasing, ceremony-gated over the socket); the launcher is neutral.
+$GK bench create c3 >/dev/null 2>&1
+$GK bench export c3 hi -- sh -c 'exit 7' >/tmp/ex.log 2>&1
+runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" "$SBR" c3 hi >/dev/null 2>&1; XRC=$?
+[ "$XRC" -eq 7 ] && ok "shrek-bench-run drives run-export over the socket + propagates the workload rc (7, no sudo)" || bad "launcher run-export wrong rc=$XRC"
+runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" "$SBR" c3 forged >/dev/null 2>&1 && bad "a forged launcher key must be refused" || ok "shrek-bench-run: an unregistered key is refused server-side"
+sdev "$SHREK" bench destroy c1 >/dev/null 2>&1; $GK bench destroy c3 >/dev/null 2>&1
 
 kill "$GKD" 2>/dev/null; wait "$GKD" 2>/dev/null
 
@@ -296,7 +316,7 @@ echo "=== running bench-plane oracle in privileged debian:trixie ==="
 # present and let the inner script run step 8, else the inner script prints a loud SKIP (the sealed-VM
 # dogfood proves the media north-star with the baked seed regardless).
 SEED_TAR="$(pwd)/layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/scratch.tar"
-DOCKER_ARGS=(--rm --privileged -v "$GK":/gatekeeperd:ro -v /tmp/bench-proof-inner.sh:/inner.sh:ro)
+DOCKER_ARGS=(--rm --privileged -v "$GK":/gatekeeperd:ro -v "$SHREK":/shrek:ro -v "$SBR":/shrek-bench-run:ro -v /tmp/bench-proof-inner.sh:/inner.sh:ro)
 if [ -f "$SEED_TAR" ]; then
   DOCKER_ARGS+=(-v "$SEED_TAR":/host-seed/scratch.tar:ro -e MEDIA_SEED=1)
   echo "  (media north-star: mounting the shipped seed $(du -h "$SEED_TAR" | cut -f1))"
