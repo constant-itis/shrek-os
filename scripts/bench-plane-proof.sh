@@ -196,52 +196,56 @@ if [ "${WORKSHOP_SEED:-0}" = 1 ] && [ -f /host-seed/debian.tar ]; then
   $GK bench create workshop --seed debian --quota 524288 >/tmp/w1.log 2>&1 && ok "workshop bench created on the debian seed (--seed debian)" || bad "create --seed debian failed [$(tail -1 /tmp/w1.log)]"
   grep -q '^seed debian' /mnt/records/workshop && ok "the record carries seed=debian (per-bench catalog selection)" || bad "seed not recorded [$(grep '^seed' /mnt/records/workshop 2>/dev/null)]"
   $GK bench create badseed --seed gentoo >/tmp/wbad.log 2>&1 && bad "an unknown seed must be refused" || ok "unknown seed name refused (sealed catalog, fail-closed)"
+  # Helpers written into /work (persistent, dev-owned), invoked as `sh /work/<h>.sh` (sh READS the script —
+  # noexec /work blocks execve of a script, not reading one): resolv.sh exits 0 iff <host> RESOLVES from
+  # inside the bench (the no-leakage assertion — the bench has no DNS, only granted hosts are in /etc/hosts);
+  # conn.sh does ONE no-retry socket.create_connection to <host>:443 (the egress-before-workload assertion —
+  # under the OLD late-attach model a first-syscall connect would race the no-egress window and fail).
+  cat > /mnt/pool/b/workshop/resolv.sh <<'RSV'
+#!/bin/sh
+python3 -c "import socket,sys; socket.getaddrinfo(sys.argv[1],443)" "$1"
+RSV
+  cat > /mnt/pool/b/workshop/conn.sh <<'CONN'
+#!/bin/sh
+python3 -c "import socket,sys; socket.create_connection((sys.argv[1],443),timeout=5).close()" "$1"
+CONN
+  chown dev:dev /mnt/pool/b/workshop/resolv.sh /mnt/pool/b/workshop/conn.sh
   # the SHIPPED seed's runtime sources are https deb.debian.org only (plain --network=none run, no egress yet).
   SRC=$($GK bench run workshop -- cat /etc/apt/sources.list.d/debian.sources 2>/tmp/wc.log)
   { echo "$SRC" | grep -q 'https://deb.debian.org/debian' && ! echo "$SRC" | grep -qi 'security.debian.org'; } && ok "seed sources = https deb.debian.org only (one CDN host, all suites)" || bad "seed sources wrong [$(echo "$SRC" | tr '\n' '|')]"
   # grant the sealed debian-apt egress profile, then prove the nft allow-list is deb.debian.org:443.
   $GK bench network workshop debian-apt >/tmp/w2.log 2>&1 && grep -q '^grant net debian-apt' /mnt/records/workshop && ok "debian-apt egress profile recorded" || bad "network debian-apt failed [$(tail -1 /tmp/w2.log)]"
-  # LIVE: apt-get update fetches the index THROUGH the injected veth + sealed nft (deb.debian.org:443 only).
-  # NOTE the late-attach window: run_networked starts the container THEN injects egress, so the workload must
-  # survive the brief no-egress start (a naive one-shot `apt-get update` fails fast and the container exits
-  # before inject, tripping the netns-drift guard). Retry-until-egress keeps PID1 alive across the window —
-  # a real workshop UX fix (holder+exec = egress-before-workload) is a follow-up on the proven step-5 path.
-  # The run is DETACHED, so the workload's stdout is in the container log, not this file — assert on the EXIT
-  # CODE (the retry-until returns 0 ONLY once apt-get update actually succeeds) + a host-visible side effect.
-  UNTIL='i=0; until apt-get update; do i=$((i+1)); [ $i -ge 25 ] && exit 3; sleep 1; done'
-  $GK bench run workshop -- sh -c "$UNTIL" >/tmp/w3.log 2>&1; U=$?
-  [ "$U" -eq 0 ] && ok "apt-get update reached deb.debian.org through the sealed egress (rc0)" || bad "apt-get update failed [rc=$U $(tail -2 /tmp/w3.log | tr '\n' '|')]"
-  # end-to-end install of a tiny package — exits 0 only if sl actually installed (sl lands in /usr/games).
-  $GK bench run workshop -- sh -c "$UNTIL; apt-get install -y --no-install-recommends sl && test -x /usr/games/sl" >/tmp/w4.log 2>&1; I=$?
-  [ "$I" -eq 0 ] && ok "apt-get install sl succeeded inside the bench (the apt workshop works)" || bad "apt install failed [rc=$I $(tail -3 /tmp/w4.log | tr '\n' '|')]"
-  # NEGATIVE: with egress UP, a host NOT in debian-apt (apt changelog -> metadata.ftp-master.debian.org)
-  # still fails closed — the allow-list is exactly deb.debian.org, nothing else.
-  $GK bench run workshop -- sh -c "$UNTIL; apt-get changelog sl" >/tmp/w5.log 2>&1; C=$?
+  echo "----- egress-before-workload (holder+exec, Fable item-2): the workload has egress from its FIRST instruction -----"
+  # HOLDER+EXEC: run_networked starts a sleep-infinity holder, injects egress, THEN execs the workload — so a
+  # BARE workload (no retry-until-egress wrapper) reaches the network from its first syscall. conn.sh does ONE
+  # connect, no retry — under the OLD 'workload as PID1' model it would race the no-egress window and fail.
+  $GK bench run workshop -- sh /work/conn.sh deb.debian.org >/tmp/wc1.log 2>&1; F=$?
+  [ "$F" -eq 0 ] && ok "a no-retry first-syscall connect to a granted host succeeds (egress is up before the workload)" || bad "first-syscall connect failed [rc=$F $(tail -1 /tmp/wc1.log)]"
+  # REGRESSION GUARD (replaces the retry-until-egress wrapper): a workload that EXITS INSTANTLY now returns its
+  # OWN rc via `podman exec`, not the -1 drift-fail sentinel the OLD 'workload-as-PID1 exits before inject' gave.
+  $GK bench run workshop -- sh -c 'exit 42' >/tmp/wc2.log 2>&1; G=$?
+  [ "$G" -eq 42 ] && ok "a fast-exiting workload returns its real rc 42 (not a drift-fail sentinel)" || bad "fast-exit rc wrong [rc=$G expected 42 $(tail -1 /tmp/wc2.log)]"
+  # STDOUT STREAMING + cwd parity: `podman exec` (no -d/-t) streams the workload's stdout to us; cwd = /work.
+  # gatekeeperd suppresses podman's own control output (run -d container-ID, rm name), so stdout is CLEAN —
+  # assert /work appears as its own line (grep -qx), robust to any teardown noise on the shared stream.
+  $GK bench run workshop -- pwd >/tmp/wc3.log 2>/tmp/wc3.err
+  { tr -d '\r' </tmp/wc3.log | grep -qx /work; } && ok "workload stdout streams to the caller + cwd is /work (exec --workdir parity)" || bad "pwd/stdout wrong [$(tr '\n' '|' </tmp/wc3.log)]"
+
+  echo "----- APT workshop (bare, egress-before-workload): apt-get install over the sealed debian-apt profile -----"
+  # No retry wrapper: apt-get update reaches deb.debian.org from its first request (holder+exec).
+  $GK bench run workshop -- apt-get update >/tmp/w3.log 2>&1; U=$?
+  [ "$U" -eq 0 ] && ok "apt-get update reached deb.debian.org through the sealed egress (bare, no retry wrapper)" || bad "apt-get update failed [rc=$U $(tail -2 /tmp/w3.log | tr '\n' '|')]"
+  # end-to-end install of a tiny package — update+install in ONE run (each `run` is --rm, so apt lists do
+  # NOT persist across separate runs; they must share a container). Exits 0 only if sl actually installed.
+  $GK bench run workshop -- sh -c 'apt-get update && apt-get install -y --no-install-recommends sl && test -x /usr/games/sl' >/tmp/w4.log 2>&1; I=$?
+  [ "$I" -eq 0 ] && ok "apt-get install sl succeeded inside the bench (bare workload, update+install one run)" || bad "apt install failed [rc=$I $(tail -3 /tmp/w4.log | tr '\n' '|')]"
+  # NEGATIVE: a host NOT in debian-apt (apt changelog -> metadata host) still fails closed — allow-list is exactly deb.debian.org.
+  $GK bench run workshop -- apt-get changelog sl >/tmp/w5.log 2>&1; C=$?
   [ "$C" -ne 0 ] && ok "a host outside debian-apt (apt changelog) is refused (deny-by-default holds)" || bad "changelog reached an unlisted host — egress too broad"
   # host stays SEALED: the package landed in the bench's ephemeral layer, never on the host.
   [ ! -e /usr/games/sl ] && ok "the host stayed sealed (sl installed in the bench, not on the host)" || bad "sl leaked onto the host"
 
   echo "----- PIP fast-follow: the REPEATABLE network verb composes debian-apt + pypi-https on ONE bench -----"
-  # A small egress-up barrier written into /work (persistent, dev-owned): block until a GRANTED host:443 is
-  # TCP-reachable through the injected veth, so a workload started before the late-attach window doesn't race
-  # it. Written as a FILE + run via `sh /work/egwait.sh <host>` (sh READS the script — noexec /work blocks
-  # execve of a script, not reading one) so there are NO nested quotes in the `bench run` command lines.
-  cat > /mnt/pool/b/workshop/egwait.sh <<'EGW'
-#!/bin/sh
-h="$1"; i=0
-until python3 -c "import socket,sys; socket.create_connection((sys.argv[1],443),timeout=3)" "$h" 2>/dev/null; do
-  i=$((i+1)); [ "$i" -ge 25 ] && exit 9; sleep 1
-done
-EGW
-  chown dev:dev /mnt/pool/b/workshop/egwait.sh
-  # resolv.sh: exit 0 iff <host> RESOLVES from inside the bench. The bench has NO DNS resolver (--no-hosts +
-  # a bench-owned /etc/hosts holding ONLY the granted profiles' pinned hosts), so an UNgranted host is
-  # unresolvable — the crisp no-leakage assertion (a leak would make an ungranted host resolvable+reachable).
-  cat > /mnt/pool/b/workshop/resolv.sh <<'RSV'
-#!/bin/sh
-python3 -c "import socket,sys; socket.getaddrinfo(sys.argv[1],443)" "$1"
-RSV
-  chown dev:dev /mnt/pool/b/workshop/resolv.sh
   # DECLARATIVE SET: `network <name> debian-apt pypi-https` records BOTH profiles (the deferred-until-now
   # Fable step-5 fix 5 — one bench, a set of egress profiles, resolved as their union at run time).
   { $GK bench network workshop debian-apt pypi-https >/tmp/wp1.log 2>&1 \
@@ -252,22 +256,23 @@ RSV
   [ "$(grep -c '^grant net ' /mnt/records/workshop)" = 2 ] \
     && ok "record holds EXACTLY the 2-profile set (declarative, no stale/dup net lines)" \
     || bad "net grant count wrong [$(grep '^grant net ' /mnt/records/workshop | tr '\n' '|')]"
-  # LIVE pip install over the UNION: a venv in /work, then `/work/venv/bin/python3 -m pip` (six is pure-python
-  # so it lives happily on the persistent /work pool; native wheels would need PROT_EXEC → an in-overlay venv).
+  # LIVE pip install over the UNION — BARE (egress-before-workload): a venv in /work, then `python3 -m pip`
+  # (six is pure-python so it lives on the persistent /work; native wheels need PROT_EXEC → an in-overlay venv).
   # Invoke pip as `python3 -m pip` — python3 is a symlink to the on-exec /usr/bin/python3; the /work entry-point
   # script cannot execve off noexec /work (proven right below).
-  PIPRUN='sh /work/egwait.sh files.pythonhosted.org; python3 -m venv /work/venv && /work/venv/bin/python3 -m pip install --no-input --disable-pip-version-check --retries 2 --timeout 20 six==1.17.0 && /work/venv/bin/python3 -c "import six; print(six.__version__)"'
+  PIPRUN='python3 -m venv /work/venv && /work/venv/bin/python3 -m pip install --no-input --disable-pip-version-check --retries 2 --timeout 20 six==1.17.0 && /work/venv/bin/python3 -c "import six; print(six.__version__)"'
   $GK bench run workshop -- sh -c "$PIPRUN" >/tmp/wp2.log 2>&1; P=$?
   [ "$P" -eq 0 ] \
     && ok "pip install six reached PyPI through the composed egress (apt + pip on ONE bench)" \
     || bad "pip install failed [rc=$P $(tail -3 /tmp/wp2.log | tr '\n' '|')]"
-  # must-fix 1 as a TESTED INVARIANT: the /work/venv/bin/pip entry-point SCRIPT cannot exec (noexec /work);
-  # if this ever PASSES, /work silently lost noexec — a real regression this guards against.
-  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; /work/venv/bin/pip --version' >/tmp/wp3.log 2>&1; E=$?
+  # TESTED INVARIANT: the /work/venv/bin/pip entry-point SCRIPT cannot exec (noexec /work); if this ever
+  # PASSES, /work silently lost noexec — a real regression this guards against. (`--version` is a command arg
+  # AFTER the ctr name — podman_exec_argv puts flags before the ctr, so it is not parsed as an exec flag.)
+  $GK bench run workshop -- /work/venv/bin/pip --version >/tmp/wp3.log 2>&1; E=$?
   [ "$E" -ne 0 ] \
     && ok "the /work/venv/bin/pip script cannot exec off noexec /work (blessed path is python3 -m pip)" \
     || bad "a script executed off /work — the pool lost noexec (regression)"
-  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; /work/venv/bin/python3 -m pip --version' >/tmp/wp4.log 2>&1; M=$?
+  $GK bench run workshop -- /work/venv/bin/python3 -m pip --version >/tmp/wp4.log 2>&1; M=$?
   [ "$M" -eq 0 ] \
     && ok "python3 -m pip runs (resolves the on-exec /usr/bin/python3, not a /work script)" \
     || bad "python3 -m pip failed [rc=$M $(tail -2 /tmp/wp4.log | tr '\n' '|')]"
@@ -281,10 +286,9 @@ RSV
       && grep -q '^grant net pypi-https' /mnt/records/workshop; } \
     && ok "network REPLACED the set down to just pypi-https (declarative, drops debian-apt)" \
     || bad "replace-to-pypi failed [$(tail -1 /tmp/wr1.log)]"
-  # egress is UP for pypi (barrier waits on files.pythonhosted.org) yet deb.debian.org is UNRESOLVABLE: it is
-  # not in this bench's hosts. (apt-get update itself exits 0 even when a source is unreachable — it treats a
-  # fetch failure as a warning — so the crisp assertion is resolvability, which is what enforces isolation.)
-  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; sh /work/resolv.sh deb.debian.org' >/tmp/wr2.log 2>&1; A=$?
+  # deb.debian.org is UNRESOLVABLE with only pypi-https: it is not in this bench's hosts. (Bare workload —
+  # egress-before-workload — so no barrier needed; the crisp assertion is resolvability, which enforces isolation.)
+  $GK bench run workshop -- sh /work/resolv.sh deb.debian.org >/tmp/wr2.log 2>&1; A=$?
   [ "$A" -ne 0 ] \
     && ok "with only pypi-https, deb.debian.org is unresolvable (fails closed — no cross-reach)" \
     || bad "deb.debian.org resolved without the debian-apt profile — leakage"
@@ -293,9 +297,9 @@ RSV
       && grep -q '^grant net debian-apt' /mnt/records/workshop; } \
     && ok "network REPLACED the set down to just debian-apt (declarative, drops pypi-https)" \
     || bad "replace-to-debian failed [$(tail -1 /tmp/wr3.log)]"
-  # egress UP for debian yet files.pythonhosted.org (pip's download CDN) is UNRESOLVABLE: not in this bench's
-  # hosts. Symmetric to the pypi-only case — the crisp assertion is resolvability, which is what pip needs.
-  $GK bench run workshop -- sh -c 'sh /work/egwait.sh deb.debian.org; sh /work/resolv.sh files.pythonhosted.org' >/tmp/wr4.log 2>&1; B=$?
+  # files.pythonhosted.org (pip's download CDN) is UNRESOLVABLE with only debian-apt: not in this bench's
+  # hosts. Symmetric to the pypi-only case — bare workload, resolvability is the crisp assertion.
+  $GK bench run workshop -- sh /work/resolv.sh files.pythonhosted.org >/tmp/wr4.log 2>&1; B=$?
   [ "$B" -ne 0 ] \
     && ok "with only debian-apt, files.pythonhosted.org is unresolvable (fails closed — no cross-reach)" \
     || bad "files.pythonhosted.org resolved without the pypi-https profile — leakage"
