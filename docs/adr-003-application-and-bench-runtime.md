@@ -217,6 +217,51 @@ traversable by `dev`'s subuid range (`--userns=keep-id` vs idmapped mounts), and
 `unexport <name> <key>` · `reset <name>` · `quota <name>` · `destroy <name>` · and the
 ADR-002 promote path `promote <name> → Workshop`.
 
+### Workshop seeds & the `debian-apt` egress profile — ✅ apt workshop GREEN (2026-09-01)
+
+A Bench runs from a SEALED **seed catalog** (bench_plane `SEED_CATALOG`), not a user-chosen
+image — the same fail-closed discipline as an egress profile name. Two seeds ship:
+
+- **`scratch`** — the tiny Alpine/media proof seed (musl; ffmpeg north-star).
+- **`debian`** — the **apt workshop** seed (glibc): `debian:trixie` + `ca-certificates`, with
+  deb822 runtime sources pointing EVERY suite (`trixie`, `-updates`, `-security`) at
+  **`https://deb.debian.org`** and `/var/lib/apt/lists` purged. Built by
+  `scripts/build-workshop-seed.sh` (~56M archive baked beside `scratch.tar` in the shrek-bench
+  sysext), loaded on demand by `ensure_seed`, selected per-bench at
+  `shrek bench create <name> --seed debian` (recorded as a `seed` line in the durable record;
+  a pre-seed record defaults to `scratch`).
+
+This realizes ADR-002's "mess-with-a-door": `apt-get install` real tooling in a bench without
+touching the sealed `/usr`. Egress is the sealed **`debian-apt`** profile — **ONE host**,
+`deb.debian.org:tcp:443`. deb.debian.org is a direct Fastly-CDN service fronting the security
+archive too, so one pin covers every suite; `security.debian.org` (a separately-rotating
+round-robin) is deliberately NOT reachable. HTTPS/443 only: on a shared-CDN IP allow-list a
+plaintext `:80` `Host:` header would reach any Fastly customer. apt validates the cert against
+the SNI name, never the spawn-time-pinned IP (identical to `github-https`). Proven LIVE in the
+host oracle (`bench-plane-proof.sh`): a `debian` bench granted only `debian-apt` runs
+`apt-get update` + `apt-get install sl` reaching deb.debian.org through the injected veth+nft,
+while `apt-get changelog` (an unlisted host) fails closed and the host stays sealed. The sealed
+VM proves the shipped seed bakes + loads + selects, offline.
+
+> **SEALED-EGRESS INVARIANT (Fable):** a Bench holding `debian-apt` — or ANY internet egress
+> profile — must **never receive a secret** via grant, env, or export. The shared-CDN aperture
+> (any Fastly site is reachable to a workload crafting its own TLS) is contained ONLY by this
+> no-secrets rule, not by the network layer. Already enforced: the dot-path grant denylist
+> blocks `~/.ssh`/`~/.config`; secrets stay host-side via the broker pattern. The real hardening
+> — a host-side apt broker (same shape as `model-proxy`/`swamp-broker`, enforcing `Host`/SNI =
+> deb.debian.org) — is post-MVP.
+
+**Two follow-ups this exposed (both on the proven step-5 path — do NOT bolt on blind):**
+1. **Egress-before-workload.** `run_networked` late-attaches egress AFTER the container starts
+   (the rootless constraint), so a naive `apt-get update` fails during the no-egress window and
+   the container exits before inject (netns-drift guard, fail-closed). A workload that survives
+   the window (retry-until-egress) works today; the product fix is a **holder+exec** model
+   (start a `sleep`-holder → inject → `exec` the workload), mirroring interactive `enter`.
+2. **Persistence.** `run` is `--rm`, so an `apt install` lands in the EPHEMERAL container layer,
+   not the persistent `/work` — durable installs are the ADR-002 **`promote`** path (bench →
+   signed Workshop layer), still a stub. PyPI (`pypi-https`) is a sibling egress profile + a
+   repeatable `network` verb (net_plane already unions), queued as the immediate fast-follow.
+
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
 
 1. **This ADR** (defines Host / Onion / T2 / Bench authority + the four rules above).
