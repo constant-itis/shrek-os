@@ -1,4 +1,12 @@
-# Bench authorization — the console consent ceremony (BUILT + oracle-proven; VM dogfood pending)
+# Bench authorization — the console consent ceremony (BUILT + oracle-proven; VM dogfood harness BUILT)
+
+> **Harness update (2026-08-31):** the sealed-VM `BENCH-CONSENT` dogfood is now BUILT —
+> `image/overlay/usr/lib/shrek/dogfood-consent-probe` (the in-guest oracle + cue emitter) driven by
+> `scripts/bench-consent-vm-proof.sh` (the host executor: real SAK chord + scripted answers via QEMU
+> `sendkey`, scanout `screendump` + `tesseract` OCR). Marker-gated on `/home/.shrek-consent-dogfood` so a
+> plain `dogfood-vm.sh` run skips it clean. See the updated "Sealed VM dogfood" bullet below for the full
+> design. Runtime SAK *delivery* in the VM is the one thing static checks can't settle — the probe reports
+> `sak-delivery=FAIL` and short-circuits if the chord never reaches logind, so a red run is fast + legible.
 
 > **Status: built, unit-tested, and host-oracle-proven.** `crates/gatekeeperd/src/consent.rs` implements this
 > design; the security core (sanitizer, tuple binding / apply gate, trifecta, cooldown, confirmation code) is
@@ -210,14 +218,24 @@ not *this object can never contain sensitive data later*.
   decision/binding/apply logic is real.
 - **Host oracle** (`scripts/bench-plane-proof.sh`): fail-closed-on-no-VT — a container has no seat, so an
   authority-increasing socket request must return `END 1 ceremony-*` (the reachable path headlessly).
-- **Sealed VM dogfood** (`dogfood-persist-probe` + `dogfood-vm.sh` scoring, real console seat + logind):
-  `SHREK-DOGFOOD BENCH-CONSENT` lines mirroring the `BENCH-SUP`/`BENCH-GRANT` pattern — real VT take/switch
-  (kernel-enforced), scripted "y"+code APPLIES, scripted "n"/timeout DENIES with no record change. Assert
-  additionally: the **previously-active VT is restored** after approve AND after every deny path, **no getty**
-  is present on the ceremony VT, and the **compositor is alive** afterward (the VT-restore leg is in the
-  fail-closed matrix but only the sealed VM can exercise it — mocked-VT unit tests and the host oracle cannot).
-  Real: VT surface + logind subscription + apply gate. Faked: only the human keystroke (scripted) and, if
-  kernel SAK can't be driven in the VM, the SecureAttentionKey signal at the logind D-Bus boundary.
+- **Sealed VM dogfood** (BUILT — `image/overlay/usr/lib/shrek/dogfood-consent-probe`, driven by
+  `scripts/bench-consent-vm-proof.sh`; a real console seat + live logind + a live compositor): the guest
+  probe launches each ceremony AS DEV over the real gatekeeperd socket (`run_socket_consent`, not the root
+  in-process `cli()`), and emits `SHREK-DOGFOOD BENCH-CONSENT`/`CONSENT-CUE` serial lines mirroring the
+  `BENCH-SUP`/`BENCH-GRANT` pattern. The host is a dumb executor: it drives the **REAL** SAK chord
+  (`sendkey ctrl-alt-shift-esc` through the virtio-keyboard → guest evdev → logind — NEVER a D-Bus-injected
+  signal, which `arm_sak`'s sender-pinned match filters by the very defense under test) and the scripted
+  answers, and `screendump`s the live scanout mid-ceremony. **Two evidence channels** for the display
+  property (never `/dev/vcs8` alone — a failed DRM handoff renders into the tty8 buffer while the display
+  still scans out the compositor = consent theater): the guest asserts the request text in the `/dev/vcs8`
+  buffer (render barrier), and the host OCRs (`tesseract`) the cued screendump to prove the text VT actually
+  **scanned out** while the compositor's DRM master was paused. Legs: real VT take/switch (kernel-enforced),
+  scripted `y`+typed code APPLIES, `n`/timeout/apply-time object-swap/dropped-peer DENIES with no record
+  change, a forged (non-login1) SAK is filtered, plus the assertions only the sealed VM can exercise — the
+  **previously-active VT is restored** after approve AND after every deny path, **no getty** squats the
+  ceremony VT (tty8 > `NAutoVTs`), the **compositor is alive** afterward, and a **dev-uid agent cannot read**
+  `/dev/vcs8`. Real: VT surface + logind SAK subscription + apply gate + the render scanout. Faked: only the
+  human keystroke (scripted via `sendkey`).
 
 ### Pre-implementation verify items (confirm on the sealed image before coding)
 
