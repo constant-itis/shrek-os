@@ -129,8 +129,15 @@ $GK bench grant gamma /home/dev/media_in  --ro >/tmp/g1.log 2>&1 && ok "grant --
 $GK bench grant gamma /home/dev/media_out --rw >/tmp/g2.log 2>&1 && ok "grant --rw accepted" || bad "grant rw failed [$(tail -1 /tmp/g2.log)]"
 { grep -q '^grant fs-ro /home/dev/media_in' /mnt/records/gamma && grep -q '^grant fs-rw /home/dev/media_out' /mnt/records/gamma; } && ok "grants recorded durably (fs-ro / fs-rw lines)" || bad "grants not in the record"
 findmnt -no OPTIONS /run/shrek/bench/gamma/grants/media_in 2>/dev/null | grep -q noexec && ok "grant materialized as a host-ns noexec bind" || bad "grant not materialized noexec"
-# ProtectHome fix (Fable 1): the per-bench grants dir is dev-owned 0700 (no side-door into /home for others).
-{ [ "$(stat -c '%u %a' /run/shrek/bench/gamma/grants 2>/dev/null)" = "1000 700" ]; } && ok "grants dir is dev-owned 0700" || bad "grants dir perms wrong [$(stat -c '%u %a' /run/shrek/bench/gamma/grants 2>/dev/null)]"
+# #2982 hole 3: the per-bench grants dir is root:dev 0710 — dev traverses for its -v but cannot write it
+# (nor its root-owned parent <id>), so it can plant no symlink leaf and rename no dir to redirect the root
+# bind onto a system target. Fable fix-1 (no side-door into /home for others) preserved via other ---.
+GDIR=/run/shrek/bench/gamma/grants
+{ [ "$(stat -c '%u %g %a' "$GDIR" 2>/dev/null)" = "0 $(id -g dev) 710" ]; } && ok "grants dir is root:dev 0710 (redirect-safe)" || bad "grants dir perms wrong [$(stat -c '%u %g %a' "$GDIR" 2>/dev/null)]"
+# the attack itself, proven blocked: as dev, plant-a-symlink-leaf OR rename-the-grants-dir must both fail.
+if runuser -u dev -- sh -c "ln -s /etc '$GDIR/evil' 2>/dev/null || mv '$GDIR' '$GDIR.x' 2>/dev/null"; then
+  bad "dev could write the grants dir (redirect NOT blocked)"; rm -f "$GDIR/evil" 2>/dev/null; [ -d "$GDIR.x" ] && mv "$GDIR.x" "$GDIR" 2>/dev/null
+else ok "dev cannot plant a symlink leaf nor rename the grants dir (redirect blocked)"; fi
 # run THROUGH the supervisor: read the ro grant, write the rw grant; the write must round-trip to dev on the host.
 $GK bench run gamma -- sh -c 'cat /grants/media_in/clip.txt > /grants/media_out/copy.txt' >/tmp/g3.log 2>&1
 { [ -f /home/dev/media_out/copy.txt ] && [ "$(stat -c %u /home/dev/media_out/copy.txt)" = 1000 ]; } && ok "rw grant write round-trips to dev on the host" || bad "rw write did not round-trip [$(tail -2 /tmp/g3.log|tr '\n' '|')]"

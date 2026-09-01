@@ -758,13 +758,26 @@ if command -v podman >/dev/null 2>&1; then
         # sealed mount ns + the real prjquota /home + the real /home/dev anchor. The live CONTAINER
         # round-trip (grant readable/writable inside podman) + LIVE egress inject are proven in the host
         # oracle (which has a writable seed + DNS); this endpoint-free sealed VM proves what only it can:
-        # the grant materializes as a host-ns NOEXEC bind on the sealed image, is ProtectHome-safe
-        # (dev-owned 0700), survives boot re-issuance, and the network verb honors sealed egress policy.
+        # the grant materializes as a host-ns NOEXEC bind on the sealed image, the grants dir is
+        # root:dev 0710 (redirect-safe, #2982 hole 3), it survives boot re-issuance, and the network verb
+        # honors sealed egress policy.
         install -d -o dev -g dev /home/dev/g_out 2>/dev/null
         if "$GKB" bench grant probe1 /home/dev/g_out --rw >/tmp/bg.log 2>&1; then
             GD=/run/shrek/bench/probe1/grants/g_out
+            GDIR=/run/shrek/bench/probe1/grants
             { findmnt -no OPTIONS "$GD" 2>/dev/null | grep -q noexec; } && say "BENCH-GRANT materialized-noexec=ok" || say "BENCH-GRANT materialized-noexec=FAIL [$(findmnt -no OPTIONS "$GD" 2>/dev/null)]"
-            { [ "$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)" = "1000 700" ]; } && say "BENCH-GRANT protecthome-0700=ok" || say "BENCH-GRANT protecthome-0700=FAIL [$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)]"
+            # (SEC, #2982 hole 3) the grants dir is root-owned (owner 0), dev GROUP for traverse, mode 0710
+            # — dev owns neither it nor its parent <id>, so it cannot plant a symlink leaf nor rename the
+            # dir to redirect the root bind onto a system target (e.g. /etc). Fable fix-1 kept via other ---.
+            { [ "$(stat -c '%u %g %a' "$GDIR" 2>/dev/null)" = "0 $(id -g dev) 710" ]; } && say "BENCH-GRANT grantdir-root0710=ok" || say "BENCH-GRANT grantdir-root0710=FAIL [$(stat -c '%u %g %a' "$GDIR" 2>/dev/null)]"
+            # the ACTUAL attack, proven blocked: as dev, planting a symlink leaf OR renaming the grants dir
+            # must both fail (no write on grants nor on its root-owned parent <id>).
+            if runuser -u dev -- sh -c "ln -s /etc '$GDIR/evil' 2>/dev/null || mv '$GDIR' '$GDIR.x' 2>/dev/null"; then
+                say "BENCH-GRANT redirect-blocked=FAIL dev-wrote-grantdir"
+                rm -f "$GDIR/evil" 2>/dev/null; [ -d "$GDIR.x" ] && mv "$GDIR.x" "$GDIR" 2>/dev/null
+            else
+                say "BENCH-GRANT redirect-blocked=ok"
+            fi
             grep -q '^grant fs-rw /home/dev/g_out' "$BRECS/probe1" && say "BENCH-GRANT recorded=ok" || say "BENCH-GRANT recorded=FAIL"
             # boot re-issuance: drop the /run bind (as a reboot would) then `reissue` must re-materialize it.
             umount "$GD" 2>/dev/null; rm -rf /run/shrek/bench/probe1

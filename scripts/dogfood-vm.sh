@@ -448,7 +448,8 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
   if grep -qa 'SHREK-DOGFOOD BENCH-GRANT ' "$LOG"; then
     for pair in \
       "materialized-noexec=ok|an FS grant relocates into the host ns as a noexec bind on the sealed /home" \
-      "protecthome-0700=ok|the per-Bench grants dir is dev-owned 0700 (no ProtectHome side-door)" \
+      "grantdir-root0710=ok|the per-Bench grants dir is root:dev 0710 — dev traverses but cannot write it (redirect-safe, #2982 hole 3)" \
+      "redirect-blocked=ok|dev cannot plant a symlink leaf nor rename the grants dir to redirect the root bind onto a system target" \
       "recorded=ok|the FS grant is recorded durably (survives reboot)" \
       "reissue-rematerialize=ok|boot reissue re-pins + re-materializes the FS grant after /run is wiped" \
       "egress-recorded=ok|the network verb records a sealed egress profile" \
