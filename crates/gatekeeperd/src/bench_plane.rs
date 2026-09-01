@@ -467,8 +467,8 @@ struct RunSpec<'a> {
     interactive: bool,
     /// `-d`: start detached (the networked path — inject egress before the workload egresses).
     detached: bool,
-    /// `--rm`: auto-remove on exit (the plain foreground path; the detached path removes explicitly
-    /// AFTER `podman wait` reads the exit code).
+    /// `--rm`: auto-remove on exit (the plain foreground path; the detached holder+exec path removes
+    /// explicitly AFTER the workload exec returns).
     remove: bool,
     /// Bind a bench-owned `/etc/hosts` (networked benches). Coexists with `--no-hosts` (step-5 de-risk (C)).
     hosts_bind: Option<&'a Path>,
@@ -526,6 +526,23 @@ fn podman_run_argv(spec: &RunSpec) -> Vec<String> {
     a
 }
 
+/// Build the `podman exec` argv for the holder+exec networked path (Fable item-2). Every flag comes
+/// STRICTLY BEFORE the container name: podman stops parsing options at the first positional (the ctr), so a
+/// workload arg like `-c` survives as the command, not as an exec flag. `--workdir /work` pins the cwd to
+/// the run's `-w /work` (podman exec already INHERITS the container's configured workdir, so this is a
+/// drift-pin, not a fix); `-it` is added for the interactive shell only.
+fn podman_exec_argv(ctr: &str, interactive: bool, workload: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = vec!["exec".into()];
+    if interactive {
+        a.push("-it".into());
+    }
+    a.push("--workdir".into());
+    a.push("/work".into());
+    a.push(ctr.to_string());
+    a.extend(workload.iter().cloned());
+    a
+}
+
 /// Build the `setquota` argv that caps a project id's block usage at `kib` KiB (hard), no soft/inode
 /// limit. Enforced against non-root writers only (root is CAP_SYS_RESOURCE-exempt), which a Bench is.
 fn setquota_argv(project: u32, kib: u64, fs: &str) -> Vec<String> {
@@ -553,7 +570,7 @@ fn run_ok(bin: &str, args: &[String]) -> io::Result<()> {
 
 /// Run `podman …` AS `dev` (rootless), with the env rootless podman needs: HOME, the logind runtime dir,
 /// and a minimal PATH. Returns the child exit code (propagated verbatim for `run`/`enter` fidelity).
-fn podman_as_dev(args: &[String]) -> io::Result<i32> {
+fn podman_cmd_as_dev(args: &[String]) -> Command {
     let uid = dev_uid();
     let mut cmd = Command::new("runuser");
     cmd.arg("-u").arg(BENCH_USER).arg("--").arg("env")
@@ -566,16 +583,31 @@ fn podman_as_dev(args: &[String]) -> io::Result<i32> {
         .arg("PATH=/usr/bin:/bin")
         .arg("podman")
         .args(args);
-    Ok(cmd.status()?.code().unwrap_or(-1))
+    cmd
 }
 
-/// Best-effort `podman rm -f` of a Bench's container (as `dev`). Idempotent — a missing container is fine.
+fn podman_as_dev(args: &[String]) -> io::Result<i32> {
+    Ok(podman_cmd_as_dev(args).status()?.code().unwrap_or(-1))
+}
+
+/// Like [`podman_as_dev`] but DISCARDS the child's stdout (stderr still inherits, for diagnostics). Used for
+/// podman sub-commands whose stdout is control NOISE the caller must never see — `run -d` echoes the new
+/// container ID, `rm` echoes the container name — so that on the holder+exec networked path the ONLY thing
+/// on the caller's stdout is the workload exec's own output (clean stdout streaming, Fable item-2).
+fn podman_as_dev_quiet(args: &[String]) -> io::Result<i32> {
+    Ok(podman_cmd_as_dev(args).stdout(std::process::Stdio::null()).status()?.code().unwrap_or(-1))
+}
+
+/// Best-effort force-remove of a Bench's container (as `dev`). `-t 0` = SIGKILL IMMEDIATELY: the networked
+/// path's PID1 is a `sleep infinity` holder that IGNORES SIGTERM from an ancestor pidns, so the default
+/// `rm -f` (SIGTERM → wait the 10s StopSignal timeout → SIGKILL) would stall every teardown 10s. Quiet so
+/// the removed-container name never lands on the caller's stdout. Idempotent — a missing container is fine.
 fn podman_rm(name: &str) {
-    let _ = podman_as_dev(&["rm".into(), "-f".into(), format!("shrek-bench-{name}")]);
+    let _ = podman_as_dev_quiet(&["rm".into(), "-f".into(), "-t".into(), "0".into(), format!("shrek-bench-{name}")]);
 }
 
-/// Like [`podman_as_dev`] but CAPTURES stdout (for `podman inspect`/`podman wait`, which print the value
-/// to stdout and return 0 themselves). Trimmed on the caller side.
+/// Like [`podman_as_dev`] but CAPTURES stdout (for `podman inspect`, which prints the value
+/// to stdout and returns 0 itself). Trimmed on the caller side.
 fn podman_as_dev_stdout(args: &[String]) -> io::Result<String> {
     let uid = dev_uid();
     let out = Command::new("runuser")
@@ -900,6 +932,16 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
 
     let profiles = egress_profiles(&rec);
     if !profiles.is_empty() {
+        // The networked path is holder+exec (egress-before-workload): it starts a `sleep infinity` holder,
+        // injects egress, then EXECs the workload into the now-networked container. `podman exec` with NO
+        // command is a usage error (125) AFTER the netns/veth/nft are built, so refuse an empty
+        // non-interactive workload up front (Fable item-2 fix 1). Interactive `wl` already defaulted to
+        // /bin/sh above, so only the non-interactive path can be empty here. (The PLAIN path below still
+        // runs the image default for an empty workload — unchanged.)
+        if !interactive && wl.is_empty() {
+            eprintln!("bench run: a networked run requires a workload after `--`");
+            return 2;
+        }
         return run_networked(&mut rec, interactive, &data, &profiles, &fs_binds, &wl);
     }
 
@@ -930,9 +972,17 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
 /// nft allow-list into that netns and re-verifies identity. Only THEN does the workload's egress become
 /// possible — and only to the allow-list. The start→inject window is fail-SAFE (the container has ZERO
 /// egress until injection; it never has MORE than granted), so no rendezvous barrier is needed for a
-/// user-authority Bench (Fable step-5 ruling 3). Interactive `enter` holds the container with `sleep
-/// infinity` so the shell has egress from its first command; non-interactive `run` starts the workload
-/// and blocks on `podman wait`.
+/// user-authority Bench (Fable step-5 ruling 3).
+///
+/// HOLDER+EXEC (Fable item-2, egress-before-workload): BOTH interactive and non-interactive start a `sleep
+/// infinity` HOLDER as PID1, then — only after egress is up and re-verified — `podman exec` the workload
+/// (or a shell) INTO the networked container. So the workload has egress from its FIRST instruction (no
+/// late-attach race, no retry-until-egress wrapper). Because the holder is a stable PID1 that never exits
+/// on its own, the leader/netns identity stays fixed across discover→inject→re-verify→exec — the
+/// drift/pid-recycle guards are STRENGTHENED (the untrusted workload is never in that window). The
+/// non-interactive rc is the workload's own exec status (126/127/128+n pass through; a podman-INFRA failure
+/// maps to the -1 sentinel; 125 is ambiguous — podman-error vs a workload exiting 125 — identical to the
+/// plain foreground path, so the contract is uniform across both run paths).
 fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles: &[String], fs_binds: &[FsBind], workload: &[String]) -> i32 {
     let rdir = bench_record::records_dir();
     let name = rec.name.clone();
@@ -972,7 +1022,9 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles
     net.teardown(); // clear any crash residue
 
     let holder = vec!["sleep".to_string(), "infinity".to_string()];
-    let start_wl = if interactive { &holder } else { workload };
+    // ALWAYS start the holder as PID1 (Fable item-2): the untrusted workload is exec'd AFTER egress is up,
+    // never run as PID1 during the no-egress window.
+    let start_wl: &[String] = &holder;
     let spec = RunSpec {
         name: &name,
         data,
@@ -994,7 +1046,9 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles
         -1
     };
 
-    if podman_as_dev(&podman_run_argv(&spec)).map(|c| c != 0).unwrap_or(true) {
+    // Quiet: `podman run -d` echoes the new container ID to stdout, which we DON'T use (the leader is found
+    // via `podman_pid` inspect) — discard it so it never pollutes the workload exec's stdout on the caller.
+    if podman_as_dev_quiet(&podman_run_argv(&spec)).map(|c| c != 0).unwrap_or(true) {
         let rc = fail(&net, "bench run: detached container start failed".into());
         rec.state = "stopped".into();
         let _ = bench_record::write_record(&rdir, rec);
@@ -1029,17 +1083,29 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles
         rec.id, profiles.join(","), net.ns, net.cont_ip, resolved.endpoints.len()
     );
 
+    // Egress is UP and the container alive: exec the workload (or a shell) into the networked container.
     let code = if interactive {
-        let _ = podman_as_dev(&["exec".into(), "-it".into(), ctr.clone(), "/bin/sh".into()]);
+        // The shell's rc is not meaningful; success = the session ran (parity with the proven `enter`,
+        // now with an explicit --workdir /work). `stop -t 2` stays here — the interactive path is proven,
+        // and Fable ruled touching it is not required (the shared teardown SIGKILLs the holder either way).
+        let _ = podman_as_dev(&podman_exec_argv(&ctr, true, &["/bin/sh".to_string()]));
         let _ = podman_as_dev(&["stop".into(), "-t".into(), "2".into(), ctr.clone()]);
         0
     } else {
-        podman_as_dev_stdout(&["wait".into(), ctr.clone()])
-            .ok()
-            .and_then(|s| s.trim().parse::<i32>().ok())
-            .unwrap_or(-1)
+        // `podman exec` propagates the WORKLOAD's exit status directly (vs the old `podman wait` on PID1):
+        // 126/127/128+n pass through verbatim; a podman-INFRA failure (Err, or a signal-killed podman whose
+        // .code() is None → -1 via podman_as_dev) maps to the -1 sentinel, never a fabricated 0/125.
+        match podman_as_dev(&podman_exec_argv(&ctr, false, workload)) {
+            Ok(c) => c,
+            Err(_) => -1,
+        }
     };
 
+    // No `podman stop` on the non-interactive path (Fable item-2 fix 3): a `sleep infinity` PID1 IGNORES
+    // SIGTERM from an ancestor pid-namespace (the kernel discards default-disposition signals to a pidns
+    // init), so `stop -t N` would stall the full N seconds then SIGKILL anyway. Tearing the veth down FIRST
+    // severs egress instantly for any straggler the workload backgrounded (they reparent to the holder),
+    // then `podman rm -f` SIGKILLs the holder. teardown+rm run unconditionally, regardless of `code`.
     net.teardown();
     podman_rm(&name);
     rec.state = "stopped".into();
@@ -2151,9 +2217,25 @@ mod tests {
         let a = podman_run_argv(&rs);
         let s = a.join(" ");
         assert!(a.contains(&"-d".to_string()), "networked run is detached (inject before egress): {s}");
-        assert!(!a.contains(&"--rm".to_string()), "detached run keeps the container until `podman wait` reads rc");
+        assert!(!a.contains(&"--rm".to_string()), "detached holder+exec run keeps the container until the workload exec returns");
         assert!(s.contains("--network=none"), "still --network=none — egress is INJECTED into this netns");
         assert!(s.contains("-v /run/shrek/bench/media/hosts:/etc/hosts:ro"), "bench-owned hosts bind: {s}");
+    }
+
+    #[test]
+    fn podman_exec_argv_workdir_flags_before_ctr_name() {
+        // Non-interactive: `exec --workdir /work <ctr> <workload...>` — flags STRICTLY before the ctr name so
+        // a workload arg like `-c` is the command, not an exec flag. No -it.
+        let wl = vec!["sh".to_string(), "-c".to_string(), "apt-get update".to_string()];
+        let a = podman_exec_argv("shrek-bench-web", false, &wl);
+        assert_eq!(a, vec!["exec", "--workdir", "/work", "shrek-bench-web", "sh", "-c", "apt-get update"]);
+        // The container name precedes every workload token (podman stops option-parsing at the first positional).
+        let ctr_i = a.iter().position(|x| x == "shrek-bench-web").unwrap();
+        assert!(a.iter().position(|x| x == "--workdir").unwrap() < ctr_i, "flags precede the ctr name");
+        assert!(a.iter().position(|x| x == "-c").unwrap() > ctr_i, "the workload's -c is AFTER the ctr (a command arg)");
+        // Interactive adds -it (also before the ctr name).
+        let ai = podman_exec_argv("shrek-bench-web", true, &["/bin/sh".to_string()]);
+        assert_eq!(ai, vec!["exec", "-it", "--workdir", "/work", "shrek-bench-web", "/bin/sh"]);
     }
 
     #[test]
