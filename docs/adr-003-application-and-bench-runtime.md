@@ -371,12 +371,12 @@ carried as opaque bytes.
   from the bench, the `==` pin preserved, list/show, the fail-closed refusals, atomic re-promote,
   standalone-survives-destroy) + the socket path (promote is ceremony-gated & writes nothing on a
   headless deny; list is read-only). Oracle **PASS=116/0**.
-- **`workshop launch` is now ✅ done** (re-derivation, no cache — see the Launch subsection below).
-- **NOT yet built** (the last commit): the **Tool Shed** — a content-addressed, root-index-trusted
-  derivation cache keyed on `SHA-256(schema ‖ seed image-Id ‖ apt tokens ‖ pip tokens ‖ egress set)` —
-  a DISPOSABLE optimization that NEVER becomes an independent source of authority (a miss/invalidation
-  always re-derives from the recipe through the approved seed+egress). Commit 3 retains+indexes the
-  transient derivation the launch path already produces, instead of deleting it after the run.
+- **`workshop launch` is now ✅ done** (re-derivation — see the Launch subsection below).
+- **The Tool Shed cache is now ✅ done** (see the Tool Shed subsection below): a content-addressed,
+  root-index-trusted derivation cache keyed on `SHA-256(schema ‖ seed image-Id ‖ apt tokens ‖ pip tokens
+  ‖ egress set)` — a DISPOSABLE optimization that NEVER becomes an independent source of authority (a
+  miss/invalidation always re-derives from the recipe through the approved seed+egress). Commit 3
+  retains+indexes the derivation the launch path already produces, instead of deleting it after the run.
 
 ### Workshop launch → re-derivation (two-container, no cache) — ✅ GREEN (2026-09-01)
 
@@ -404,10 +404,12 @@ retains, never splits a contaminated container):
 2. **Phase B — workload.** A FRESH ephemeral bench materialized from the recipe runs the workload
    FROM the derived image, with the recipe's grants + egress + a clean `/work` task-state (the proven
    `run`/`run_networked` path, parameterized by an image override). Bench + `/work` are torn down after.
-3. **Phase C.** The transient derived image is **deleted** — Commit 2 has no cache, so the next launch
-   re-derives ("installs stick by re-derivation"). The recipe stays the sole durable state; ADR-002 is
-   unchanged (a transient derivation is not Workshop persistence). A package-free recipe skips Phase A
-   entirely and runs straight from the seed.
+3. **Phase C.** The derived image is **retained + indexed in the Tool Shed cache** (Commit 3, subsection
+   below) so the next launch reuses it instead of re-deriving; only a derivation whose key could not be
+   computed is committed to a `localhost/shrek-derive-*` transient and deleted after the run. Either way
+   the recipe stays the sole durable state ("installs stick by re-derivation"); ADR-002 is unchanged (a
+   cached derivation is a disposable optimization, not Workshop persistence). A package-free recipe skips
+   Phase A entirely and runs straight from the seed.
 
 **Proven** — 4 unit tests ride in `bench_plane.rs` (launch HIGH-authority + action, usage refusal,
 `egress_profiles_from`, the pristine-derivation argv has no `/work`/grants). The host oracle
@@ -418,6 +420,58 @@ asserts the transient image is deleted, the ephemeral launch bench is torn down,
 a package-free recipe launches with no derivation, and the fail-closed refusals (missing recipe; an
 apt recipe with no `debian-apt` egress refused at precheck, building no derivation). Oracle
 **PASS=127/0**.
+
+### Tool Shed cache → content-addressed derivation reuse + offline launch — ✅ GREEN (2026-09-01)
+
+The **Tool Shed** (`crates/gatekeeperd/src/workshop_cache.rs`) makes a repeat `workshop launch` reuse a
+previously derived+verified image instead of reinstalling over egress — and, with `--offline`, launch a
+cached environment with **no network at all**. The cache is a **disposable optimization that is never an
+authority** (the invariant that gates the whole feature): a miss, a tamper, or an invalidation always
+falls back to re-deriving from the recipe through the approved seed+egress.
+
+**Two facts make a cached image safe to reuse** (mirroring the seed posture):
+- The **key** is `SHA-256` of the derivation INPUTS the recipe already approved — the canonical serialize
+  of `schema-version ‖ seed IMAGE-Id ‖ sorted apt tokens ‖ sorted pip tokens ‖ sorted egress-profile set`.
+  Inputs, not outputs: it answers "is this the same derivation the recipe describes?", never "are these
+  bytes good?". The seed's **image Id** (not its catalog name) is in the key, so an OS-shipped seed update
+  invalidates every entry; a version pin is part of a token's identity (`pkg` ≠ `pkg=1.2.3`); a broader
+  egress set keys differently so it can't satisfy a narrower recipe. FS grants/exports/quota are NOT keyed
+  (they don't change which software the derivation produces).
+- Cache-entry **trust lives in a root-owned index record**, not in the bytes. The index is a line-text,
+  fail-closed record under `/home/.shrek/workshops/cache/<key>` (a subdir of the recipes dir — same
+  forgery anchor, `root:root 0755`, records `0644`). The bytes sit in `dev`'s rootless podman store, tagged
+  `localhost/shrek-cache/<key12>` and only ever *recognized* by tag + Id. A **HIT** requires (a) a
+  well-formed index record at the freshly-computed key AND (b) the live podman image Id equalling the Id
+  that record captured when the privileged supervisor drove+committed the derivation. A missing/malformed
+  record, an absent image, or an Id mismatch is a **MISS** (and an Id mismatch/absence also **evicts** the
+  stale record — self-healing). The cache is consulted only AFTER the recipe is validated against the
+  sealed catalog/policy; a key can't even be computed for an unknown seed/profile.
+
+**No-secrets holds by construction:** the cached bytes are exactly the Phase-A pristine derivation (seed +
+install egress only, no grants, no `/work`, no workload), committed BEFORE any user workload runs — so a
+cache entry is software-only and safe to share across workshops. The SHA-256 is computed by shelling the
+sealed `sha256sum` over **stdin** (no dep-free hash crate in `gatekeeperd`; stdin, never argv, so the
+hashed bytes are never a flag/shell surface). Fail-**open** on the cache infra: if the seed Id or the hash
+can't be produced the launch still runs (uncached), never fails on a cache hiccup.
+
+**Modifiers:** `--refresh` evicts any existing entry (index + bytes) and forces a re-derive; `--offline`
+runs the workload with an **empty net set** (an authority *reduction*, ceremony-consistent) AND refuses to
+derive — an offline launch is valid only on a HIT, since assembly-from-cache needs no egress. `workshop
+show` computes the same key read-only and surfaces the cached entry's resolved versions (`dpkg-query` /
+`pip freeze`, captured at derive time) — reporting a stale entry, never evicting it.
+
+**Proven** — 12 new unit tests in `workshop_cache.rs` (key canonicality/sort-invariance, the input
+distinctions that must MISS — seed-Id/pkg/pin/egress/apt-vs-pip — the fail-closed line-text parser, the
+wrong-key-filename guard) + 3 in `bench_plane.rs` (the `--refresh`/`--offline` flag parse; the
+`dpkg-query`/`pip-freeze` name helpers). The host oracle `bench-plane-proof.sh` adds a **TOOL SHED**
+section proving the full never-authority matrix live over the sealed egress: the first launch stores a
+root-owned `0644` index record + retains the cache image + captures resolved versions (surfaced by
+`workshop show`); an `--offline` re-launch **HITs with no egress**; `--offline` with no entry **refuses
+without deriving**; a corrupted record **MISSes → re-derives → re-stores**; a tampered image-Id **MISSes,
+evicts the stale record, and the online re-derive re-stores a self-consistent one**; a **bumped seed Id
+yields a new key** (MISS, old entry untouched); a different package set keys to its **own** entry; deleting
+the whole cache dir still launches (re-derives + repopulates); and `--refresh` re-derives a warm cache.
+Oracle **PASS=149/0**.
 
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
 
