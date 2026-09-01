@@ -253,8 +253,10 @@ ADR-002 promote path `promote <name> → Workshop`.
    quota/destroy) + the persistent-grant state model above. **✅ DONE & GREEN (2026-08-30, dogfood
    PASS=88/0 + host oracle 14/14).** `crates/gatekeeperd/src/bench_record.rs` is the durable state
    model (the `net_binding.rs` record shape, but on the persistent `/home` not volatile `/run`):
-   `SHREK-BENCH 1` line-text records under `/home/.shrek/benches/records`, atomic temp+rename,
-   fail-closed parse, `next_project_id` allocation from a base. `bench_plane.rs` is the supervisor —
+   `SHREK-BENCH 1` line-text records under `/home/.shrek/records` — the ROOT-owned `/home/.shrek`
+   anchor, deliberately NOT inside the `dev`-owned `0700` pool `/home/.shrek/benches` (a records dir
+   there would have a `dev`-owned parent that `dev` could `rename(2)` aside to substitute forged records;
+   mycelium #2982 hole 2). Atomic temp+rename, fail-closed parse, `next_project_id` allocation from a base. `bench_plane.rs` is the supervisor —
    a SIBLING of `t2_plane` (imports `mount_plane`/`net_plane` as libs like `t2_plane.rs:28-31`,
    **never touches `t2_plane.rs`**): `create` allocates an ext4 project id + caps it (`chattr -p +P`
    + `setquota -P`) + writes the record; `run`/`enter` drop to `dev`'s rootless podman
