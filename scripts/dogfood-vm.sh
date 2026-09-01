@@ -417,6 +417,17 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
     else bad "bench — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH //')]"; fi
   done
   echo "  bench cgroup/info: $(grep -a 'SHREK-DOGFOOD BENCH cgroup' "$LOG" | tail -1 | sed 's/.*BENCH //')"
+  # Bench record-forgery anchor (mycelium #2982 hole 2): the durable records live under the root-owned
+  # /home/.shrek, NOT the dev-owned 0700 pool, so dev cannot swap the records dir to inject forged records.
+  if grep -qa 'SHREK-DOGFOOD BENCH-SEC ' "$LOG"; then
+    for pair in \
+      "anchor-root-owned=ok|the /home/.shrek records anchor is root:root 0755 (dev owns neither it nor its entries)" \
+      "forge-blocked=ok|dev cannot plant or rename the records dir aside — record forgery is structurally blocked"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-SEC ${tok}" "$LOG"; then ok "bench-sec — ${desc}"
+      else bad "bench-sec — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-SEC ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-SEC //')]"; fi
+    done
+  fi
   # Bench supervisor (ADR-003 Part 2 step 4): score the `gatekeeperd bench` lifecycle if it ran.
   if grep -qa 'SHREK-DOGFOOD BENCH-SUP ' "$LOG" && ! grep -qa 'BENCH-SUP gatekeeperd=MISSING' "$LOG"; then
     echo "  bench-sup create: $(grep -a 'SHREK-DOGFOOD BENCH-SUP create=' "$LOG" | tail -1 | sed 's/.*BENCH-SUP //')"

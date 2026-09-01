@@ -68,7 +68,9 @@ bdev podman save --format oci-archive -o /seed/scratch.tar localhost/scratch >/d
 bdev podman image inspect localhost/scratch --format '{{.Id}}' > /seed/scratch.tar.digest 2>/dev/null
 
 export SHREK_BENCH_POOL=/mnt/pool
-export SHREK_BENCH_DIR=/mnt/pool/records
+# records live OUTSIDE the pool (mycelium #2982 hole 2): in production /home/.shrek/records sits under the
+# root-owned anchor, a sibling of the dev-owned pool — never inside it. Model that split here too.
+export SHREK_BENCH_DIR=/mnt/records
 export SHREK_BENCH_FS=/mnt/pool
 export SHREK_BENCH_ANCHOR=/home/dev
 export SHREK_BENCH_SEED=localhost/scratch
@@ -78,7 +80,7 @@ GK=/gatekeeperd
 echo "--- create two benches (distinct auto-allocated project ids) ---"
 $GK bench create alpha --quota 1024 >/dev/null 2>&1
 $GK bench create beta  --quota 2048 >/dev/null 2>&1
-RA=/mnt/pool/records/alpha; RB=/mnt/pool/records/beta
+RA=/mnt/records/alpha; RB=/mnt/records/beta
 [ -f "$RA" ] && [ -f "$RB" ] && ok "records written for both benches" || bad "record(s) missing"
 grep -q '^SHREK-BENCH 1' "$RA" && ok "record has the versioned header" || bad "record header wrong"
 PA=$(sed -n 's/^project //p' "$RA"); PB=$(sed -n 's/^project //p' "$RB")
@@ -115,7 +117,7 @@ $GK bench destroy alpha >/dev/null 2>&1
 [ ! -f "$RA" ] && [ ! -d /mnt/pool/b/alpha ] && ok "destroy removed record + data dir" || bad "destroy left residue"
 # a fresh create now reuses alpha's freed project id (100000), since the record set no longer holds it.
 $GK bench create gamma >/dev/null 2>&1
-[ "$(sed -n 's/^project //p' /mnt/pool/records/gamma)" = 100000 ] && ok "destroyed bench's project id is reused" || bad "project id not reused after destroy"
+[ "$(sed -n 's/^project //p' /mnt/records/gamma)" = 100000 ] && ok "destroyed bench's project id is reused" || bad "project id not reused after destroy"
 
 echo "===== STEP 5: route FS + egress grants through the existing Gatekeeper ====="
 
@@ -125,7 +127,7 @@ echo SOURCE > /home/dev/media_in/clip.txt
 chown -R dev:dev /home/dev/media_in /home/dev/media_out
 $GK bench grant gamma /home/dev/media_in  --ro >/tmp/g1.log 2>&1 && ok "grant --ro accepted" || bad "grant ro failed [$(tail -1 /tmp/g1.log)]"
 $GK bench grant gamma /home/dev/media_out --rw >/tmp/g2.log 2>&1 && ok "grant --rw accepted" || bad "grant rw failed [$(tail -1 /tmp/g2.log)]"
-{ grep -q '^grant fs-ro /home/dev/media_in' /mnt/pool/records/gamma && grep -q '^grant fs-rw /home/dev/media_out' /mnt/pool/records/gamma; } && ok "grants recorded durably (fs-ro / fs-rw lines)" || bad "grants not in the record"
+{ grep -q '^grant fs-ro /home/dev/media_in' /mnt/records/gamma && grep -q '^grant fs-rw /home/dev/media_out' /mnt/records/gamma; } && ok "grants recorded durably (fs-ro / fs-rw lines)" || bad "grants not in the record"
 findmnt -no OPTIONS /run/shrek/bench/gamma/grants/media_in 2>/dev/null | grep -q noexec && ok "grant materialized as a host-ns noexec bind" || bad "grant not materialized noexec"
 # ProtectHome fix (Fable 1): the per-bench grants dir is dev-owned 0700 (no side-door into /home for others).
 { [ "$(stat -c '%u %a' /run/shrek/bench/gamma/grants 2>/dev/null)" = "1000 700" ]; } && ok "grants dir is dev-owned 0700" || bad "grants dir perms wrong [$(stat -c '%u %a' /run/shrek/bench/gamma/grants 2>/dev/null)]"
@@ -147,7 +149,7 @@ findmnt -no OPTIONS /run/shrek/bench/gamma/grants/media_out 2>/dev/null | grep -
 
 echo "--- egress grant: the network verb is default-deny (only sealed profiles) ---"
 $GK bench network gamma allow-all >/dev/null 2>&1; [ $? -ne 0 ] && ok "unknown egress profile refused" || bad "allow-all should refuse"
-{ $GK bench network gamma github-https >/tmp/n1.log 2>&1 && grep -q '^grant net github-https' /mnt/pool/records/gamma; } && ok "sealed egress profile recorded" || bad "network verb failed [$(tail -1 /tmp/n1.log)]"
+{ $GK bench network gamma github-https >/tmp/n1.log 2>&1 && grep -q '^grant net github-https' /mnt/records/gamma; } && ok "sealed egress profile recorded" || bad "network verb failed [$(tail -1 /tmp/n1.log)]"
 
 echo "--- egress LIVE: a networked run late-attaches a veth + the sealed nft allow-list into the bench netns ---"
 $GK bench run gamma -- sleep 6 >/tmp/n2.log 2>&1 &
@@ -167,7 +169,7 @@ ip netns list 2>/dev/null | grep -q bench_gamma && bad "egress plumbing not torn
 
 echo "--- destroy tears down grants + the /run bench dir ---"
 $GK bench destroy gamma >/dev/null 2>&1
-{ [ ! -d /run/shrek/bench/gamma ] && [ ! -f /mnt/pool/records/gamma ]; } && ok "destroy removed grant mounts + /run dir + record" || bad "destroy left residue"
+{ [ ! -d /run/shrek/bench/gamma ] && [ ! -f /mnt/records/gamma ]; } && ok "destroy removed grant mounts + /run dir + record" || bad "destroy left residue"
 
 echo "===== STEP 6: the offline-seed product loader (ensure_seed, digest-keyed) ====="
 echo "--- ensure_seed re-loads the seed from the sysext archive when the image is absent ---"
@@ -196,13 +198,13 @@ DF="$APPS/shrek-bench-exp1-hello.desktop"
 [ "$(stat -c %U "$DF" 2>/dev/null)" = dev ] && ok ".desktop is dev-owned (written AS DEV, not root — fix 2)" || bad ".desktop not dev-owned [$(stat -c %U "$DF" 2>/dev/null)]"
 grep -qx 'Exec=/usr/bin/shrek-bench-run exp1 hello' "$DF" && ok ".desktop Exec is the fixed wrapper + exactly 2 tokens" || bad ".desktop Exec wrong [$(grep '^Exec=' "$DF")]"
 { grep -qiE '^(DBusActivatable|Actions|MimeType)=' "$DF" || grep '^Exec=' "$DF" | grep -qE '%[fFuUick]'; } && bad ".desktop has a field code / risky directive [$(grep -iE '^(DBusActivatable|Actions|MimeType|Exec)=' "$DF"|tr '\n' '|')]" || ok ".desktop carries NO command + NO field codes + no risky directives (key discipline holds)"
-grep -q '^export hello ' /mnt/pool/records/exp1 && ok "export recorded in the root-owned record" || bad "export not recorded [$(grep export /mnt/pool/records/exp1|tr '\n' '|')]"
+grep -q '^export hello ' /mnt/records/exp1 && ok "export recorded in the root-owned record" || bad "export not recorded [$(grep export /mnt/records/exp1|tr '\n' '|')]"
 echo "--- run-export resolves the key SERVER-SIDE and runs the workload; a forged key is refused ---"
 $GK bench run-export exp1 hello >/tmp/e2.log 2>&1 && ok "run-export resolves the registered key + runs (rc0)" || bad "run-export failed [$(tail -2 /tmp/e2.log|tr '\n' '|')]"
 $GK bench run-export exp1 bogus >/dev/null 2>&1 && bad "an unregistered key must be refused" || ok "unregistered launcher key refused (a forged .desktop can inject nothing)"
 echo "--- unexport + destroy sweep the .desktop ---"
 $GK bench unexport exp1 hello >/dev/null 2>&1 && ok "unexport accepted" || bad "unexport failed"
-{ [ ! -f "$DF" ] && ! grep -q '^export hello ' /mnt/pool/records/exp1; } && ok "unexport removed the .desktop + the record entry" || bad "unexport left residue"
+{ [ ! -f "$DF" ] && ! grep -q '^export hello ' /mnt/records/exp1; } && ok "unexport removed the .desktop + the record entry" || bad "unexport left residue"
 $GK bench export exp1 hello2 -- true >/dev/null 2>&1
 DF2="$APPS/shrek-bench-exp1-hello2.desktop"
 $GK bench destroy exp1 >/dev/null 2>&1
@@ -244,7 +246,7 @@ if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
   [ ! -e /home/dev/m_in/pwn.txt ] && ok "the ro input grant is not writable from the bench (host stays sealed)" || bad "ro input grant was writable from the bench"
   # destroy removes ALL the bench's tooling + mutable state, but the delivered output PERSISTS on the host.
   $GK bench destroy media >/dev/null 2>&1
-  { [ ! -f /mnt/pool/records/media ] && [ ! -d /mnt/pool/b/media ] && [ ! -d /run/shrek/bench/media ] && [ -s "$OUT" ]; } && ok "destroy removed the bench (record+data+/run) yet kept the transcoded output" || bad "destroy left residue or lost the output"
+  { [ ! -f /mnt/records/media ] && [ ! -d /mnt/pool/b/media ] && [ ! -d /run/shrek/bench/media ] && [ -s "$OUT" ]; } && ok "destroy removed the bench (record+data+/run) yet kept the transcoded output" || bad "destroy left residue or lost the output"
   unset SHREK_BENCH_SEED SHREK_BENCH_SEED_TAR
 else
   echo "  SKIP STEP 8: no shipped Scratch seed mounted (build it: scripts/build-bench-seed.sh) — the sealed-VM dogfood proves the media north-star with the baked seed"
@@ -257,7 +259,7 @@ echo "===== AUTHZ SLICE: bench control plane over the authenticated socket (step
 bdev podman tag docker.io/library/busybox:latest localhost/scratch >/dev/null 2>&1 || bdev podman load -i /seed/scratch.tar >/dev/null 2>&1
 SHREK=/shrek; SBR=/shrek-bench-run   # the real clients, mounted into the container by the outer harness
 SHREK_BROKER_NOMOUNT=1 \
-  SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/pool/records SHREK_BENCH_FS=/mnt/pool \
+  SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/records SHREK_BENCH_FS=/mnt/pool \
   SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED=localhost/scratch SHREK_BENCH_SEED_TAR=/seed/scratch.tar \
   "$GK" >/tmp/gkd.log 2>&1 &
 GKD=$!
@@ -276,17 +278,17 @@ echo "$REF" | grep -q 'END 1' && ok "non-allowlisted uid (5555) refused at the s
 $GK bench create sockA --quota 1024 >/dev/null 2>&1; $GK bench create sockB --quota 1024 >/dev/null 2>&1
 sdev "$SHREK" bench destroy sockA >/tmp/sd.log 2>&1 && ok "dev drove 'shrek bench destroy' over the socket (rc0, no sudo)" || bad "socket destroy failed [$(cat /tmp/sd.log)]"
 $GK bench destroy sockB >/dev/null 2>&1
-{ [ ! -f /mnt/pool/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/pool/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged"
+{ [ ! -f /mnt/records/sockA ] && [ ! -d /mnt/pool/b/sockA ] && [ ! -f /mnt/records/sockB ] && [ ! -d /mnt/pool/b/sockB ]; } && ok "socket-destroy and binary-destroy leave byte-identical state (record + data gone both ways)" || bad "socket vs binary destroy diverged"
 # dev must NOT reach the privileged onion verbs (bench-only peer).
 ON=$(printf 'status\n' | runuser -u dev -- timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
 echo "$ON" | grep -q 'onion-not-permitted' && ok "dev is gated OUT of the onion verbs (bench-only peer)" || bad "dev reached an onion verb [$(echo "$ON" | tr '\n' '|')]"
 
 echo "--- step 2 (full transport): every neutral verb over the socket via the real clients ---"
 sdev "$SHREK" bench create c1 --quota 1024 >/tmp/c1.log 2>&1
-{ [ -f /mnt/pool/records/c1 ] && [ "$(sed -n 's/^state //p' /mnt/pool/records/c1)" = created ]; } && ok "'shrek bench create' over the socket (record written, state=created)" || bad "socket create failed [$(cat /tmp/c1.log)]"
+{ [ -f /mnt/records/c1 ] && [ "$(sed -n 's/^state //p' /mnt/records/c1)" = created ]; } && ok "'shrek bench create' over the socket (record written, state=created)" || bad "socket create failed [$(cat /tmp/c1.log)]"
 sdev "$SHREK" bench list 2>/dev/null | grep -q 'c1' && ok "'shrek bench list' streams the bench over the socket" || bad "socket list missing c1"
 sdev "$SHREK" bench quota c1 2048 >/dev/null 2>&1
-[ "$(sed -n 's/^quota_kib //p' /mnt/pool/records/c1)" = 2048 ] && ok "'shrek bench quota' re-caps over the socket (record=2048)" || bad "socket quota not applied"
+[ "$(sed -n 's/^quota_kib //p' /mnt/records/c1)" = 2048 ] && ok "'shrek bench quota' re-caps over the socket (record=2048)" || bad "socket quota not applied"
 # ARGV-FRAMING regression: a workload after `--` carrying spaces must round-trip EXACTLY (the count-framed
 # request preserves it; the old whitespace-split wire would corrupt it).
 sdev "$SHREK" bench run c1 -- sh -c 'printf "%s\n" "a b  c" > /work/m.txt' >/tmp/run.log 2>&1
@@ -314,13 +316,13 @@ echo "$PX" | grep -q 'refused precheck' && ok "an invalid authority request is r
 # (ii) a VALID grant reaches the ceremony, which fails closed with no seat, and applies NOTHING.
 GX=$(sdev "$SHREK" bench grant czt /home/dev/czt_grant --ro 2>&1)
 echo "$GX" | grep -q 'refused ceremony-' && ok "a valid grant fails closed at the ceremony with no seat (ceremony-*, headless)" || bad "grant not ceremony-gated [$GX]"
-grep -q '^grant fs-' /mnt/pool/records/czt && bad "a denied ceremony still recorded a grant (NOT fail-closed!)" || ok "the denied grant applied NOTHING (no fs grant in the record)"
+grep -q '^grant fs-' /mnt/records/czt && bad "a denied ceremony still recorded a grant (NOT fail-closed!)" || ok "the denied grant applied NOTHING (no fs grant in the record)"
 # (iii) a repeated authority request is rate-limited by the post-deny cooldown (anti SAK-fatigue).
 CX=$(sdev "$SHREK" bench grant czt /home/dev/czt_grant --ro 2>&1)
 echo "$CX" | grep -q 'refused cooldown' && ok "a repeated authority request is cooldown-limited after the deny" || bad "repeat request not cooldown-limited [$CX]"
 # (iv) network to a PROFILE is authority-increasing (ceremony-gated); network none REVOKES (ceremony-free).
 NX=$(sdev "$SHREK" bench network czt github-https 2>&1)
-{ echo "$NX" | grep -q 'refused ceremony-' && ! grep -q '^grant net ' /mnt/pool/records/czt; } && ok "network <profile> is ceremony-gated and records nothing on deny" || bad "network profile not gated [$NX]"
+{ echo "$NX" | grep -q 'refused ceremony-' && ! grep -q '^grant net ' /mnt/records/czt; } && ok "network <profile> is ceremony-gated and records nothing on deny" || bad "network profile not gated [$NX]"
 sdev "$SHREK" bench network czt none >/tmp/nn.log 2>&1 && ok "network none (revoke, reducing authority) is allowed ceremony-free over the socket" || bad "network none should be ceremony-free [$(cat /tmp/nn.log)]"
 # (v) root is refused on the socket ceremony path (root drives cli() in-process, never the socket).
 RX=$(printf 'BENCH grant 2\nczt\n%s\n' "$(printf /home/dev/czt_grant | sed 's/\//%2F/g')" | timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)

@@ -637,6 +637,9 @@ set -e
 set +e
 BSEED=/usr/share/shrek/bench/seeds
 BPOOL=/home/.shrek/benches
+# Durable Bench records now live under the ROOT-owned /home/.shrek anchor, NOT inside the dev-owned 0700
+# pool (mycelium #2982 hole 2). The BENCH-SEC block below proves dev cannot swap this dir.
+BRECS=/home/.shrek/records
 bdev() { runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" PATH=/usr/bin:/bin "$@"; }
 if command -v podman >/dev/null 2>&1; then
     # (i) sealed-boot unprivileged-userns posture (Fable assertion i; apparmor_restrict_unprivileged_userns
@@ -655,6 +658,20 @@ if command -v podman >/dev/null 2>&1; then
         mkdir -p "$BPOOL/storage" "$BPOOL/tmp"; chown -R dev:dev "$BPOOL"
     fi
     say "BENCH pool=[$(findmnt -no OPTIONS "$BPOOL" 2>/dev/null || echo unmounted)]"
+    # (SEC, mycelium #2982 hole 2) record-forgery is now STRUCTURALLY blocked: the durable records live at
+    # $BRECS under the ROOT-owned /home/.shrek anchor, not inside the dev-owned 0700 $POOL. Prove dev owns
+    # NEITHER the anchor nor its entries, so it can neither plant a forged records dir nor rename the real
+    # one aside — the exact swap that would let a neutral `bench run` materialize ungranted grants/exports.
+    SECPAR=/home/.shrek
+    SECOWN=$(stat -c '%U:%G:%a' "$SECPAR" 2>/dev/null)
+    [ "$SECOWN" = "root:root:755" ] && say "BENCH-SEC anchor-root-owned=ok [$SECOWN]" || say "BENCH-SEC anchor-root-owned=FAIL [$SECOWN]"
+    # dev must NOT be able to create an entry in the anchor (plant a dir) nor rename the records dir aside.
+    if runuser -u dev -- sh -c "mkdir '$SECPAR/evil' 2>/dev/null || mv '$BRECS' '$BRECS.evil' 2>/dev/null"; then
+        say "BENCH-SEC forge-blocked=FAIL dev-mutated-anchor"
+        rmdir "$SECPAR/evil" 2>/dev/null; [ -d "$BRECS.evil" ] && mv "$BRECS.evil" "$BRECS" 2>/dev/null
+    else
+        say "BENCH-SEC forge-blocked=ok"
+    fi
     # (prjquota) rule 1 — prove a Bench can be DISK-CAPPED by project quota on the GROWABLE /home. Assign a
     # project id to a pool subdir, cap it at 1 MiB, and show a 4 MiB write is refused (EDQUOT). This is the
     # substrate bench_plane (step 4) caps each Bench with. Needs shrek-data mkfs -O quota,project +
@@ -721,7 +738,7 @@ if command -v podman >/dev/null 2>&1; then
     GKB=/usr/libexec/shrek/gatekeeperd
     if [ -x "$GKB" ]; then
         if "$GKB" bench create probe1 --quota 1024 >/tmp/bs.log 2>&1; then
-            say "BENCH-SUP create=ok proj=$(sed -n 's/^project //p' "$BPOOL/records/probe1" 2>/dev/null) rec=[$(tr '\n' ',' <"$BPOOL/records/probe1" 2>/dev/null)]"
+            say "BENCH-SUP create=ok proj=$(sed -n 's/^project //p' "$BRECS/probe1" 2>/dev/null) rec=[$(tr '\n' ',' <"$BRECS/probe1" 2>/dev/null)]"
         else say "BENCH-SUP create=FAIL [$(tr -d '\r' </tmp/bs.log | tail -1)]"; fi
         # PROVE the product seed loader (bench_plane ensure_seed, step 6): drop the Bench-0 pre-loaded image
         # so the supervisor MUST re-load the offline seed from the sysext archive (/usr/.../scratch.tar,
@@ -732,7 +749,7 @@ if command -v podman >/dev/null 2>&1; then
         [ "$BSRC" -eq 42 ] && say "BENCH-SUP run-exit42=ok rc=$BSRC" || say "BENCH-SUP run-exit42=FAIL rc=$BSRC [$(tr -d '\r' </tmp/bs2.log | tail -2 | tr '\n' '|')]"
         bdev podman image exists localhost/scratch && say "BENCH-SUP seed-autoload=ok" || say "BENCH-SUP seed-autoload=FAIL (ensure_seed did not re-load the sysext archive)"
         # record state returns to stopped after the run.
-        [ "$(sed -n 's/^state //p' "$BPOOL/records/probe1" 2>/dev/null)" = stopped ] && say "BENCH-SUP state-stopped=ok" || say "BENCH-SUP state-stopped=FAIL"
+        [ "$(sed -n 's/^state //p' "$BRECS/probe1" 2>/dev/null)" = stopped ] && say "BENCH-SUP state-stopped=ok" || say "BENCH-SUP state-stopped=FAIL"
         # the supervisor's project cap is EDQUOT-enforced for a non-root writer in the bench data dir.
         if su dev -s /bin/sh -c "dd if=/dev/zero of=$BPOOL/b/probe1/fill bs=64k count=64 conv=fsync" 2>/tmp/bs3.err; then BSQ=wrote-all; else BSQ=blocked; fi
         { [ "$BSQ" = blocked ] && grep -qi quota /tmp/bs3.err; } && say "BENCH-SUP quota-enforce=ok" || say "BENCH-SUP quota-enforce=FAIL [$(tr -d '\r' </tmp/bs3.err | tail -1)]"
@@ -748,7 +765,7 @@ if command -v podman >/dev/null 2>&1; then
             GD=/run/shrek/bench/probe1/grants/g_out
             { findmnt -no OPTIONS "$GD" 2>/dev/null | grep -q noexec; } && say "BENCH-GRANT materialized-noexec=ok" || say "BENCH-GRANT materialized-noexec=FAIL [$(findmnt -no OPTIONS "$GD" 2>/dev/null)]"
             { [ "$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)" = "1000 700" ]; } && say "BENCH-GRANT protecthome-0700=ok" || say "BENCH-GRANT protecthome-0700=FAIL [$(stat -c '%u %a' /run/shrek/bench/probe1/grants 2>/dev/null)]"
-            grep -q '^grant fs-rw /home/dev/g_out' "$BPOOL/records/probe1" && say "BENCH-GRANT recorded=ok" || say "BENCH-GRANT recorded=FAIL"
+            grep -q '^grant fs-rw /home/dev/g_out' "$BRECS/probe1" && say "BENCH-GRANT recorded=ok" || say "BENCH-GRANT recorded=FAIL"
             # boot re-issuance: drop the /run bind (as a reboot would) then `reissue` must re-materialize it.
             umount "$GD" 2>/dev/null; rm -rf /run/shrek/bench/probe1
             "$GKB" bench reissue >/tmp/bgr.log 2>&1
@@ -758,12 +775,12 @@ if command -v podman >/dev/null 2>&1; then
         fi
         # network verb is default-deny: a sealed profile records, an unknown one is refused.
         "$GKB" bench network probe1 github-https >/dev/null 2>&1
-        grep -q '^grant net github-https' "$BPOOL/records/probe1" && say "BENCH-GRANT egress-recorded=ok" || say "BENCH-GRANT egress-recorded=FAIL"
+        grep -q '^grant net github-https' "$BRECS/probe1" && say "BENCH-GRANT egress-recorded=ok" || say "BENCH-GRANT egress-recorded=FAIL"
         if "$GKB" bench network probe1 allow-all >/dev/null 2>&1; then say "BENCH-GRANT egress-deny-unknown=FAIL accepted"; else say "BENCH-GRANT egress-deny-unknown=ok"; fi
 
         # destroy removes the record + the data dir + the /run bench dir (identity + quota + grants gone).
         "$GKB" bench destroy probe1 >/dev/null 2>&1
-        { [ ! -f "$BPOOL/records/probe1" ] && [ ! -d "$BPOOL/b/probe1" ] && [ ! -d /run/shrek/bench/probe1 ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
+        { [ ! -f "$BRECS/probe1" ] && [ ! -d "$BPOOL/b/probe1" ] && [ ! -d /run/shrek/bench/probe1 ]; } && say "BENCH-SUP destroy=ok" || say "BENCH-SUP destroy=FAIL"
 
         # --- Bench EXPORT (ADR-003 Part 2 step 7): the constrained .desktop launcher plane on the SEALED
         # image (env overrides compiled OUT here — the shipped build uses /home defaults). A FRESH bench
@@ -781,7 +798,7 @@ if command -v podman >/dev/null 2>&1; then
             { [ -f "$DFILE" ] && [ "$(stat -c %U "$DFILE" 2>/dev/null)" = dev ]; } && say "BENCH-EXPORT desktop-as-dev=ok" || say "BENCH-EXPORT desktop-as-dev=FAIL [$(stat -c '%U %a' "$DFILE" 2>/dev/null)]"
             grep -qx 'Exec=/usr/bin/shrek-bench-run probe2 e42' "$DFILE" 2>/dev/null && say "BENCH-EXPORT fixed-exec=ok" || say "BENCH-EXPORT fixed-exec=FAIL [$(grep '^Exec=' "$DFILE" 2>/dev/null)]"
             { grep -qiE '^(DBusActivatable|Actions|MimeType)=' "$DFILE" 2>/dev/null || grep '^Exec=' "$DFILE" 2>/dev/null | grep -qE '%[fFuUick]'; } && say "BENCH-EXPORT no-command=FAIL leaks-fieldcode-or-risky-directive" || say "BENCH-EXPORT no-command=ok"
-            grep -q '^export e42 ' "$BPOOL/records/probe2" && say "BENCH-EXPORT recorded=ok" || say "BENCH-EXPORT recorded=FAIL"
+            grep -q '^export e42 ' "$BRECS/probe2" && say "BENCH-EXPORT recorded=ok" || say "BENCH-EXPORT recorded=FAIL"
             # run-export resolves the registered key server-side and runs the exit42 helper in the bench (rc42).
             "$GKB" bench run-export probe2 e42 >/tmp/bx2.log 2>&1; XRC=$?
             [ "$XRC" -eq 42 ] && say "BENCH-EXPORT run-export=ok rc=$XRC" || say "BENCH-EXPORT run-export=FAIL rc=$XRC [$(tr -d '\r' </tmp/bx2.log | tail -1)]"
@@ -825,7 +842,7 @@ if command -v podman >/dev/null 2>&1; then
         [ ! -e /home/dev/m_in/pwn.txt ] && say "BENCH-MEDIA ro-input-sealed=ok" || say "BENCH-MEDIA ro-input-sealed=FAIL (ro grant was writable)"
         # destroy removes the bench (record + data + /run) but the delivered output PERSISTS on the host.
         "$GKB" bench destroy media >/dev/null 2>&1
-        { [ ! -f "$BPOOL/records/media" ] && [ ! -d "$BPOOL/b/media" ] && [ ! -d /run/shrek/bench/media ] && [ -s "$MOUT" ]; } && say "BENCH-MEDIA destroy-keeps-output=ok" || say "BENCH-MEDIA destroy-keeps-output=FAIL"
+        { [ ! -f "$BRECS/media" ] && [ ! -d "$BPOOL/b/media" ] && [ ! -d /run/shrek/bench/media ] && [ -s "$MOUT" ]; } && say "BENCH-MEDIA destroy-keeps-output=ok" || say "BENCH-MEDIA destroy-keeps-output=FAIL"
     else
         say "BENCH-SUP gatekeeperd=MISSING (not at $GKB)"
     fi
