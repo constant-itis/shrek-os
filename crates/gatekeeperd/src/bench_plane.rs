@@ -23,6 +23,7 @@ use crate::bench_record::{self, BenchRecord};
 use crate::linux_uapi::{umount2, Ucred};
 use crate::mount_plane::{open_anchor, pin_beneath, relocate_ro, relocate_rw, Ident};
 use crate::net_plane;
+use crate::workshop_record::{self, valid_pkg_token, WorkshopRecord};
 use std::ffi::CString;
 use std::io;
 use std::io::Write as _;
@@ -1415,6 +1416,49 @@ fn list() -> i32 {
     0
 }
 
+/// workshop-list: print every Workshop recipe and its seed / declared-package counts / source bench.
+/// Read-only — reads the root-owned world-readable recipes directly (no authority, no ceremony).
+fn workshop_list() -> i32 {
+    let recs = workshop_record::list_records(&workshop_record::workshops_dir());
+    if recs.is_empty() {
+        println!("workshop: no recipes");
+        return 0;
+    }
+    println!("NAME                 SEED       APT  PIP  FROM");
+    for r in recs {
+        println!("{:<20} {:<10} {:<4} {:<4} {}", r.name, r.seed, r.apt.len(), r.pip.len(), r.source);
+    }
+    0
+}
+
+/// workshop-show <name>: print one recipe in full — the base seed, provenance, declared package sets, the
+/// declared-maximum grant requests, and the carried launchers. Read-only. `rc 4` if the recipe is absent.
+fn workshop_show(name: &str) -> i32 {
+    let Some(r) = workshop_record::load_record(&workshop_record::workshops_dir(), name) else {
+        eprintln!("workshop: no such recipe {name}");
+        return 4;
+    };
+    println!("workshop {}", r.name);
+    println!("  seed     {}", r.seed);
+    println!("  source   {} (bench)", r.source);
+    println!("  created  {}", r.created);
+    if !r.apt.is_empty() {
+        println!("  apt      {}", r.apt.join(" "));
+    }
+    if !r.pip.is_empty() {
+        println!("  pip      {}", r.pip.join(" "));
+    }
+    for g in &r.grants {
+        println!("  declares grant {g}");
+    }
+    for e in &r.exports {
+        if let Some(x) = Export::parse(e) {
+            println!("  launcher {} -> {}", x.key, x.cmd.join(" "));
+        }
+    }
+    0
+}
+
 /// reissue: boot-time re-application of the volatile state the records are the source of truth for. `/home`
 /// is durable but `/run` is not, so at boot the supervisor re-applies each Bench's project quota (and,
 /// step 5, its FS/egress grants). Idempotent. Driven by a `shrek-bench-reissue` oneshot after the pool mount.
@@ -1467,10 +1511,14 @@ pub(crate) struct AuthorityPlan {
 }
 
 impl AuthorityPlan {
-    /// Higher-authority verbs demand a typed confirmation code (not a bare `y`): a read-WRITE grant or
-    /// an export (which mints a durable, ceremony-free launcher). A read-only grant / egress attach take `y`.
+    /// Higher-authority verbs demand a typed confirmation code (not a bare `y`): a read-WRITE grant, an
+    /// export (which mints a durable, ceremony-free launcher), or a promote (which mints a durable,
+    /// reusable authority TEMPLATE). A read-only grant / egress attach take `y`.
     pub(crate) fn high_authority(&self) -> bool {
-        matches!(&self.kind, CommitKind::Export { .. } | CommitKind::Grant { rw: true, .. })
+        matches!(
+            &self.kind,
+            CommitKind::Export { .. } | CommitKind::Grant { rw: true, .. } | CommitKind::Promote { .. }
+        )
     }
 
     /// Human-facing one-line action summary for the ceremony header (safe: verb + validated bench name).
@@ -1479,6 +1527,7 @@ impl AuthorityPlan {
             CommitKind::Grant { rw, .. } => format!("GRANT a host folder ({}) to bench '{}'", if *rw { "read-write" } else { "read-only" }, self.bench),
             CommitKind::Network { .. } => format!("SET the network egress on bench '{}'", self.bench),
             CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
+            CommitKind::Promote { workshop, .. } => format!("PROMOTE bench '{}' to the Workshop recipe '{}'", self.bench, workshop),
         }
     }
 }
@@ -1487,6 +1536,11 @@ enum CommitKind {
     Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
     Network { profiles: Vec<String> },
     Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
+    /// A validated bench→Workshop recipe. Carries the CONSENTED snapshot (declared package sets + the
+    /// grants/exports copied from the source bench at precheck time) so `commit_promote` writes exactly
+    /// what the human saw — not a fresh re-read that could have drifted since the OK. `self.bench` is the
+    /// source bench (build provenance).
+    Promote { workshop: String, seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, exports: Vec<String> },
 }
 
 #[cfg(test)]
@@ -1502,6 +1556,14 @@ impl AuthorityPlan {
                 ident: Ident { dev_major: 0, dev_minor: 0, ino: 1 },
             },
             "network" => CommitKind::Network { profiles: vec!["p".into()] },
+            "promote" => CommitKind::Promote {
+                workshop: "ws".into(),
+                seed: "debian".into(),
+                apt: vec!["sl".into()],
+                pip: vec![],
+                grants: vec![],
+                exports: vec![],
+            },
             _ => CommitKind::Export {
                 key: "k".into(),
                 file: "shrek-bench-media-k.desktop".into(),
@@ -1536,8 +1598,96 @@ pub(crate) fn precheck_authority(verb: &str, rest: &[String]) -> Result<Authorit
         "grant" => precheck_grant(rest),
         "network" => precheck_network(rest),
         "export" => precheck_export(rest),
+        "promote" => precheck_promote(rest),
         other => Err((2, format!("not an authority verb: {other}"))),
     }
+}
+
+/// Validate + resolve a `promote <bench> --name <workshop> [--apt pkg]... [--pip pkg]...` request to an
+/// [`AuthorityPlan`]. Promote reads the SOURCE bench's declared authority (its `fs`/`net` grants + exported
+/// launchers) and, together with the human-declared package sets, resolves the reproducible recipe the
+/// human is about to persist. It is authority-DECLARING (mints a durable, reusable template), so it takes
+/// the HIGH-authority typed-code path and the full diff of the resulting recipe. `Err((rc, msg))` on ANY
+/// validation failure — the human is never asked.
+fn precheck_promote(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    let (mut bench, mut ws) = (None, None);
+    let mut apt: Vec<String> = Vec::new();
+    let mut pip: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--name" => { i += 1; ws = rest.get(i).cloned(); }
+            "--apt" => { i += 1; match rest.get(i) { Some(p) => apt.push(p.clone()), None => return Err((2, "--apt needs a package".into())) } }
+            "--pip" => { i += 1; match rest.get(i) { Some(p) => pip.push(p.clone()), None => return Err((2, "--pip needs a package".into())) } }
+            other if !other.starts_with('-') && bench.is_none() => bench = Some(other.to_string()),
+            other => return Err((2, format!("unexpected arg {other}"))),
+        }
+        i += 1;
+    }
+    let (bench, ws) = match (bench, ws) {
+        (Some(b), Some(w)) => (b, w),
+        _ => return Err((2, "usage: promote <bench> --name <workshop> [--apt pkg]... [--pip pkg]...".into())),
+    };
+    if !bench_record::valid_bench_name(&ws) {
+        return Err((2, format!("workshop name {ws:?} must be a safe token (alnum ._- , no leading dot, <=64)")));
+    }
+    // Every declared package must satisfy the token grammar BEFORE any human is asked — a leading `-` or
+    // whitespace token could otherwise reach `apt`/`pip` as a flag/second-arg at launch (must-fix 5).
+    for p in apt.iter().chain(pip.iter()) {
+        if !valid_pkg_token(p) {
+            return Err((2, format!("package {p:?} is not a valid token (no leading '-', no whitespace; '=' / '==' pins ok)")));
+        }
+    }
+    // Duplicate tokens in a set are REFUSED (a clear error, never a silent dedup) — mirrors the egress set.
+    for (label, set) in [("apt", &apt), ("pip", &pip)] {
+        for (j, p) in set.iter().enumerate() {
+            if set[..j].iter().any(|q| q == p) {
+                return Err((1, format!("duplicate {label} package {p:?}")));
+            }
+        }
+    }
+    let rdir = bench_record::records_dir();
+    let Some(rec) = bench_record::load_record(&rdir, &bench) else {
+        return Err((4, format!("no such bench {bench}")));
+    };
+    // The bench's seed must still be a sealed catalog name (create validated it; re-check fail-closed so a
+    // recipe never records a seed the catalog cannot re-derive from).
+    if !valid_seed(&rec.seed) {
+        return Err((2, format!("bench {bench} runs an unknown seed {:?} — cannot promote (sealed catalog, fail-closed)", rec.seed)));
+    }
+    // Copy the DECLARED-MAXIMUM authority (fs + net grants) and the exported launchers FROM the bench —
+    // the recipe REQUESTS this maximum (ADR-002 §5); launch (commit 2) re-consents ≤ it per run.
+    let grants = rec.grants.clone();
+    let exports = rec.exports.clone();
+    // Trifecta: on launch this recipe will compose the bench's untrusted FS read WITH egress if the bench
+    // already has both — surface it in the ceremony exactly as grant/network do (nothing added here).
+    let trifecta = trifecta_after(record_has_fs(&rec), !egress_profiles(&rec).is_empty(), false, false);
+    // Diff rows: the COMPLETE recipe the human consents to persist as a reusable authority template.
+    let mut rows = vec![
+        ("From bench".to_string(), bench.clone()),
+        ("Base seed".to_string(), rec.seed.clone()),
+        ("apt packages".to_string(), if apt.is_empty() { "(none)".into() } else { apt.join(" ") }),
+        ("pip packages".to_string(), if pip.is_empty() { "(none)".into() } else { pip.join(" ") }),
+    ];
+    for g in &grants {
+        rows.push(("Declares grant".to_string(), g.clone()));
+    }
+    for e in &exports {
+        if let Some(x) = Export::parse(e) {
+            rows.push(("Carries launcher".to_string(), format!("{} -> {}", x.key, x.cmd.join(" "))));
+        }
+    }
+    // A re-promote atomically REPLACES an existing recipe of the same name — surface it (transparency; the
+    // overwrite is not itself a gate, but the human should see they are redefining an existing recipe).
+    if workshop_record::load_record(&workshop_record::workshops_dir(), &ws).is_some() {
+        rows.push(("Replaces recipe".to_string(), ws.clone()));
+    }
+    Ok(AuthorityPlan {
+        bench,
+        diff_rows: rows,
+        trifecta,
+        kind: CommitKind::Promote { workshop: ws, seed: rec.seed, apt, pip, grants, exports },
+    })
 }
 
 fn precheck_grant(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
@@ -1702,7 +1852,36 @@ pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
         CommitKind::Grant { canonical, leaf, rw, ident } => commit_grant(&plan.bench, canonical, leaf, *rw, *ident),
         CommitKind::Network { profiles } => commit_network(&plan.bench, profiles),
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
+        CommitKind::Promote { workshop, seed, apt, pip, grants, exports } => commit_promote(&plan.bench, workshop, seed, apt, pip, grants, exports),
     }
+}
+
+/// Apply a pre-checked promote (called ONLY after the ceremony approves, or inline by root's `cli()`).
+/// Writes the consented recipe snapshot to the root-owned workshops dir (atomic temp+rename; a re-promote
+/// REPLACES). Re-validates the seed against the sealed catalog at apply time (defensive — commit never
+/// trusts the plan's string for the catalog decision, mirroring `commit_network`). `source` = the bench.
+#[allow(clippy::too_many_arguments)]
+fn commit_promote(source: &str, workshop: &str, seed: &str, apt: &[String], pip: &[String], grants: &[String], exports: &[String]) -> i32 {
+    if !valid_seed(seed) {
+        eprintln!("bench promote: {seed:?} is not a sealed seed (re-check) — refused");
+        return 2;
+    }
+    let rec = WorkshopRecord {
+        name: workshop.to_string(),
+        seed: seed.to_string(),
+        created: now_secs(),
+        source: source.to_string(),
+        apt: apt.to_vec(),
+        pip: pip.to_vec(),
+        grants: grants.to_vec(),
+        exports: exports.to_vec(),
+    };
+    if let Err(e) = workshop_record::write_record(&workshop_record::workshops_dir(), &rec) {
+        eprintln!("bench promote: recipe write failed: {e}");
+        return 1;
+    }
+    println!("bench: promoted {source} -> Workshop recipe '{workshop}' (seed={seed} apt={} pip={})", apt.len(), pip.len());
+    0
 }
 
 fn commit_grant(bench: &str, canonical: &Path, leaf: &str, rw: bool, expected: Ident) -> i32 {
@@ -1926,13 +2105,21 @@ pub fn cli(args: &[String]) -> i32 {
                 _ => { eprintln!("usage: gatekeeperd bench unexport <name> <key>"); 2 }
             }
         }
-        // The ADR-002 promote path is a later MVP step. Explicit stub so the verb surface is stable and a
-        // caller gets a clear "not yet", never a silent success.
         "promote" => {
-            eprintln!("bench promote: deferred to a later MVP step (ADR-002 promote → Workshop)");
-            3
+            // ROOT runs no ceremony (no VT peer): it drives the SAME precheck+commit the socket ceremony
+            // wraps, so root's in-process promote and a dev-over-socket promote write a byte-identical
+            // recipe (the proofs/boot path stays root, no console — mirrors grant/network/export).
+            match precheck_authority("promote", rest) {
+                Ok(plan) => commit_authority(&plan),
+                Err((rc, msg)) => { eprintln!("bench promote: {msg}"); rc }
+            }
         }
-        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|reset|quota|destroy|list|reissue> …"); 2 }
+        "workshop-list" => workshop_list(),
+        "workshop-show" => match rest.first() {
+            Some(n) => workshop_show(n),
+            None => { eprintln!("usage: gatekeeperd bench workshop-show <name>"); 2 }
+        },
+        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|promote|workshop-list|workshop-show|reset|quota|destroy|list|reissue> …"); 2 }
         other => { eprintln!("bench: unknown verb {other}"); 2 }
     }
 }
@@ -2051,7 +2238,41 @@ pub fn dispatch_socket(cred: Ucred, peer_fd: RawFd, argv: &[String]) -> (i32, Ve
                 crate::consent::run_socket_consent(cred, peer_fd, "network", rest)
             }
         }
-        "promote" => (3, vec!["RESULT bench-promote - deferred".into()]),
+        // promote is authority-DECLARING (mints a durable reusable recipe) → the console consent ceremony,
+        // exactly like grant/export. precheck rejects a bad bench/name/package before any human is prompted.
+        "promote" => crate::consent::run_socket_consent(cred, peer_fd, "promote", rest),
+        // workshop list/show are READ-ONLY (a recipe is root-owned world-readable metadata) → ceremony-free,
+        // like `list`. The daemon reads the recipes and streams RESULT lines to the allowlisted peer.
+        "workshop-list" => {
+            let mut lines: Vec<String> = workshop_record::list_records(&workshop_record::workshops_dir())
+                .into_iter()
+                .map(|r| format!("RESULT workshop {} seed={} apt={} pip={} source={}", r.name, r.seed, r.apt.len(), r.pip.len(), r.source))
+                .collect();
+            if lines.is_empty() {
+                lines.push("RESULT workshop - none".into());
+            }
+            (0, lines)
+        }
+        "workshop-show" => match rest.first() {
+            Some(n) => match workshop_record::load_record(&workshop_record::workshops_dir(), n) {
+                Some(r) => {
+                    let mut lines = vec![
+                        format!("RESULT workshop {} seed={} source={} created={}", r.name, r.seed, r.source, r.created),
+                        format!("RESULT workshop-apt {}", r.apt.join(" ")),
+                        format!("RESULT workshop-pip {}", r.pip.join(" ")),
+                    ];
+                    for g in &r.grants {
+                        lines.push(format!("RESULT workshop-grant {g}"));
+                    }
+                    for e in &r.exports {
+                        lines.push(format!("RESULT workshop-export {e}"));
+                    }
+                    (0, lines)
+                }
+                None => (4, vec![format!("RESULT workshop-show {n} fail")]),
+            },
+            None => (2, vec!["RESULT workshop-show - usage".into()]),
+        },
         "" => (2, vec!["RESULT bench - usage".into()]),
         other => (2, vec![format!("RESULT bench-{other} - refused unknown-verb")]),
     }
@@ -2338,6 +2559,35 @@ mod tests {
         let action = plan.action();
         assert!(action.contains("SET the network egress"), "truthful replace-semantics header: {action}");
         assert!(!action.to_lowercase().contains("attach"));
+    }
+
+    #[test]
+    fn promote_is_high_authority_and_action_names_both_bench_and_workshop() {
+        // promote mints a durable reusable authority template ⇒ HIGH-authority (typed confirmation code),
+        // like export. The ceremony header must name BOTH the source bench and the target recipe.
+        let plan = AuthorityPlan::test_plan("promote", "workbench", false, false);
+        assert!(plan.high_authority(), "promote must demand the typed confirmation code");
+        let action = plan.action();
+        assert!(action.contains("PROMOTE"), "header says PROMOTE: {action}");
+        assert!(action.contains("workbench") && action.contains("ws"), "names bench + workshop: {action}");
+    }
+
+    #[test]
+    fn precheck_promote_rejects_before_touching_fs() {
+        // These all fail during arg-validation, BEFORE any bench record is loaded (the human is never
+        // asked): a missing --name, an unsafe workshop name, a flag-shaped package token, and a duplicate.
+        // (AuthorityPlan is not Debug, so read the rc off the Err arm rather than `unwrap_err`.)
+        let rc = |args: &[&str]| -> i32 {
+            let v: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            match precheck_promote(&v) {
+                Ok(_) => panic!("expected refusal for {args:?}"),
+                Err((rc, _)) => rc,
+            }
+        };
+        assert_eq!(rc(&["wb"]), 2, "missing --name is a usage error");
+        assert_eq!(rc(&["wb", "--name", "../escape"]), 2, "unsafe workshop name refused");
+        assert_eq!(rc(&["wb", "--name", "ws", "--apt", "--force-yes"]), 2, "a flag-shaped package token is refused");
+        assert_eq!(rc(&["wb", "--name", "ws", "--pip", "six", "--pip", "six"]), 1, "a duplicate package token is refused");
     }
 
     #[test]

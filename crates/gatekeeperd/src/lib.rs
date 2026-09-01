@@ -19,3 +19,4 @@ pub mod provenance_plane;
 pub mod sandbox;
 pub mod session_view;
 pub mod t2_plane;
+pub mod workshop_record;
