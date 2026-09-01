@@ -44,7 +44,11 @@ mkdir -p /mnt/pool
 # intermittently ("no such bench" cascade — the mount silently didn't take). Create a wide range so any
 # free loop the kernel picks has a node. (STM docker-loop-mount-mkosi-image.)
 for i in $(seq 0 63); do [ -e /dev/loop$i ] || mknod -m660 /dev/loop$i b 7 $i; done
-mount -o loop,prjquota /pool.img /mnt/pool
+# noexec,nosuid,nodev mirrors the production Bench pool (shrek-bench-pool.service remounts the /home pool
+# noexec; podman's `-v data:/work` bind inherits it). dev's rootless podman graphroot is the DEFAULT under
+# /home/dev (HOME=/home/dev), NOT this pool, so container rootfs execs are unaffected — only the /work bind
+# is noexec, which is exactly rule 2 (granted/bench DATA is never executable; scripts run via `sh <file>`).
+mount -o loop,prjquota,noexec,nosuid,nodev /pool.img /mnt/pool
 # FS grants relocate a bind into the HOST mount ns and rely on it PROPAGATING into dev's already-running
 # rootless-podman pause mount-ns. That propagation needs `/` to be rshared BEFORE the first podman command
 # creates the pause ns (real systemd makes / rshared at boot; a bare docker container's / is private, so
@@ -186,7 +190,10 @@ if [ "${WORKSHOP_SEED:-0}" = 1 ] && [ -f /host-seed/debian.tar ]; then
   bdev podman load -i /seed/debian.tar >/dev/null 2>&1
   bdev podman image inspect localhost/debian --format '{{.Id}}' > /seed/debian.tar.digest 2>/dev/null
   # per-bench seed selection (the structural fix): create a bench ON the debian seed, validated vs the catalog.
-  $GK bench create workshop --seed debian --quota 8192 >/tmp/w1.log 2>&1 && ok "workshop bench created on the debian seed (--seed debian)" || bad "create --seed debian failed [$(tail -1 /tmp/w1.log)]"
+  # 512 MiB quota: enough headroom for a python venv in /work (~15-25 MiB) + a couple of pip packages. (The
+  # apt install lands in the container's EPHEMERAL layer, not the quota'd /work, so it was fine at 8 MiB; a
+  # venv writes to /work and needs real room. Real `shrek bench create` uses the 4 GiB DEFAULT_QUOTA_KIB.)
+  $GK bench create workshop --seed debian --quota 524288 >/tmp/w1.log 2>&1 && ok "workshop bench created on the debian seed (--seed debian)" || bad "create --seed debian failed [$(tail -1 /tmp/w1.log)]"
   grep -q '^seed debian' /mnt/records/workshop && ok "the record carries seed=debian (per-bench catalog selection)" || bad "seed not recorded [$(grep '^seed' /mnt/records/workshop 2>/dev/null)]"
   $GK bench create badseed --seed gentoo >/tmp/wbad.log 2>&1 && bad "an unknown seed must be refused" || ok "unknown seed name refused (sealed catalog, fail-closed)"
   # the SHIPPED seed's runtime sources are https deb.debian.org only (plain --network=none run, no egress yet).
@@ -213,6 +220,86 @@ if [ "${WORKSHOP_SEED:-0}" = 1 ] && [ -f /host-seed/debian.tar ]; then
   [ "$C" -ne 0 ] && ok "a host outside debian-apt (apt changelog) is refused (deny-by-default holds)" || bad "changelog reached an unlisted host — egress too broad"
   # host stays SEALED: the package landed in the bench's ephemeral layer, never on the host.
   [ ! -e /usr/games/sl ] && ok "the host stayed sealed (sl installed in the bench, not on the host)" || bad "sl leaked onto the host"
+
+  echo "----- PIP fast-follow: the REPEATABLE network verb composes debian-apt + pypi-https on ONE bench -----"
+  # A small egress-up barrier written into /work (persistent, dev-owned): block until a GRANTED host:443 is
+  # TCP-reachable through the injected veth, so a workload started before the late-attach window doesn't race
+  # it. Written as a FILE + run via `sh /work/egwait.sh <host>` (sh READS the script — noexec /work blocks
+  # execve of a script, not reading one) so there are NO nested quotes in the `bench run` command lines.
+  cat > /mnt/pool/b/workshop/egwait.sh <<'EGW'
+#!/bin/sh
+h="$1"; i=0
+until python3 -c "import socket,sys; socket.create_connection((sys.argv[1],443),timeout=3)" "$h" 2>/dev/null; do
+  i=$((i+1)); [ "$i" -ge 25 ] && exit 9; sleep 1
+done
+EGW
+  chown dev:dev /mnt/pool/b/workshop/egwait.sh
+  # resolv.sh: exit 0 iff <host> RESOLVES from inside the bench. The bench has NO DNS resolver (--no-hosts +
+  # a bench-owned /etc/hosts holding ONLY the granted profiles' pinned hosts), so an UNgranted host is
+  # unresolvable — the crisp no-leakage assertion (a leak would make an ungranted host resolvable+reachable).
+  cat > /mnt/pool/b/workshop/resolv.sh <<'RSV'
+#!/bin/sh
+python3 -c "import socket,sys; socket.getaddrinfo(sys.argv[1],443)" "$1"
+RSV
+  chown dev:dev /mnt/pool/b/workshop/resolv.sh
+  # DECLARATIVE SET: `network <name> debian-apt pypi-https` records BOTH profiles (the deferred-until-now
+  # Fable step-5 fix 5 — one bench, a set of egress profiles, resolved as their union at run time).
+  { $GK bench network workshop debian-apt pypi-https >/tmp/wp1.log 2>&1 \
+      && grep -q '^grant net debian-apt' /mnt/records/workshop \
+      && grep -q '^grant net pypi-https' /mnt/records/workshop; } \
+    && ok "repeatable network verb recorded BOTH profiles (debian-apt + pypi-https)" \
+    || bad "compose network failed [$(tail -1 /tmp/wp1.log)]"
+  [ "$(grep -c '^grant net ' /mnt/records/workshop)" = 2 ] \
+    && ok "record holds EXACTLY the 2-profile set (declarative, no stale/dup net lines)" \
+    || bad "net grant count wrong [$(grep '^grant net ' /mnt/records/workshop | tr '\n' '|')]"
+  # LIVE pip install over the UNION: a venv in /work, then `/work/venv/bin/python3 -m pip` (six is pure-python
+  # so it lives happily on the persistent /work pool; native wheels would need PROT_EXEC → an in-overlay venv).
+  # Invoke pip as `python3 -m pip` — python3 is a symlink to the on-exec /usr/bin/python3; the /work entry-point
+  # script cannot execve off noexec /work (proven right below).
+  PIPRUN='sh /work/egwait.sh files.pythonhosted.org; python3 -m venv /work/venv && /work/venv/bin/python3 -m pip install --no-input --disable-pip-version-check --retries 2 --timeout 20 six==1.17.0 && /work/venv/bin/python3 -c "import six; print(six.__version__)"'
+  $GK bench run workshop -- sh -c "$PIPRUN" >/tmp/wp2.log 2>&1; P=$?
+  [ "$P" -eq 0 ] \
+    && ok "pip install six reached PyPI through the composed egress (apt + pip on ONE bench)" \
+    || bad "pip install failed [rc=$P $(tail -3 /tmp/wp2.log | tr '\n' '|')]"
+  # must-fix 1 as a TESTED INVARIANT: the /work/venv/bin/pip entry-point SCRIPT cannot exec (noexec /work);
+  # if this ever PASSES, /work silently lost noexec — a real regression this guards against.
+  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; /work/venv/bin/pip --version' >/tmp/wp3.log 2>&1; E=$?
+  [ "$E" -ne 0 ] \
+    && ok "the /work/venv/bin/pip script cannot exec off noexec /work (blessed path is python3 -m pip)" \
+    || bad "a script executed off /work — the pool lost noexec (regression)"
+  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; /work/venv/bin/python3 -m pip --version' >/tmp/wp4.log 2>&1; M=$?
+  [ "$M" -eq 0 ] \
+    && ok "python3 -m pip runs (resolves the on-exec /usr/bin/python3, not a /work script)" \
+    || bad "python3 -m pip failed [rc=$M $(tail -2 /tmp/wp4.log | tr '\n' '|')]"
+
+  echo "----- no-leakage: each profile ALONE fails closed for the OTHER's host (declarative REPLACE) -----"
+  # Cross-profile isolation is enforced at NAME RESOLUTION: the bench's /etc/hosts holds ONLY the granted
+  # profiles' pinned hosts, so an ungranted host is unresolvable. (IP-level overlap on the shared Fastly CDN
+  # is the documented shared-CDN aperture, contained by the no-secrets rule — NOT asserted here by IP.)
+  { $GK bench network workshop pypi-https >/tmp/wr1.log 2>&1 \
+      && [ "$(grep -c '^grant net ' /mnt/records/workshop)" = 1 ] \
+      && grep -q '^grant net pypi-https' /mnt/records/workshop; } \
+    && ok "network REPLACED the set down to just pypi-https (declarative, drops debian-apt)" \
+    || bad "replace-to-pypi failed [$(tail -1 /tmp/wr1.log)]"
+  # egress is UP for pypi (barrier waits on files.pythonhosted.org) yet deb.debian.org is UNRESOLVABLE: it is
+  # not in this bench's hosts. (apt-get update itself exits 0 even when a source is unreachable — it treats a
+  # fetch failure as a warning — so the crisp assertion is resolvability, which is what enforces isolation.)
+  $GK bench run workshop -- sh -c 'sh /work/egwait.sh files.pythonhosted.org; sh /work/resolv.sh deb.debian.org' >/tmp/wr2.log 2>&1; A=$?
+  [ "$A" -ne 0 ] \
+    && ok "with only pypi-https, deb.debian.org is unresolvable (fails closed — no cross-reach)" \
+    || bad "deb.debian.org resolved without the debian-apt profile — leakage"
+  { $GK bench network workshop debian-apt >/tmp/wr3.log 2>&1 \
+      && [ "$(grep -c '^grant net ' /mnt/records/workshop)" = 1 ] \
+      && grep -q '^grant net debian-apt' /mnt/records/workshop; } \
+    && ok "network REPLACED the set down to just debian-apt (declarative, drops pypi-https)" \
+    || bad "replace-to-debian failed [$(tail -1 /tmp/wr3.log)]"
+  # egress UP for debian yet files.pythonhosted.org (pip's download CDN) is UNRESOLVABLE: not in this bench's
+  # hosts. Symmetric to the pypi-only case — the crisp assertion is resolvability, which is what pip needs.
+  $GK bench run workshop -- sh -c 'sh /work/egwait.sh deb.debian.org; sh /work/resolv.sh files.pythonhosted.org' >/tmp/wr4.log 2>&1; B=$?
+  [ "$B" -ne 0 ] \
+    && ok "with only debian-apt, files.pythonhosted.org is unresolvable (fails closed — no cross-reach)" \
+    || bad "files.pythonhosted.org resolved without the pypi-https profile — leakage"
+
   $GK bench destroy workshop >/dev/null 2>&1
   [ ! -f /mnt/records/workshop ] && ok "workshop destroy removed the record" || bad "destroy left residue"
 else

@@ -499,7 +499,9 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
       "seed-recorded=ok|create --seed debian records the per-bench seed (sealed-catalog selection)" \
       "unknown-seed-refused=ok|an unknown seed name is refused up front (fail-closed, like an egress profile)" \
       "seed-loaded=ok|ensure_seed loads localhost/debian from the baked debian.tar on a plain run" \
-      "seed-apt-ready=ok|the shipped seed's runtime apt sources are https deb.debian.org only (one CDN host)"; do
+      "seed-apt-ready=ok|the shipped seed's runtime apt sources are https deb.debian.org only (one CDN host)" \
+      "python-baked=ok|the seed bakes python3 + pip + the venv/ensurepip wheels (offline-functional)" \
+      "net-set-repeatable=ok|the repeatable network verb records the composed debian-apt + pypi-https set"; do
       tok=${pair%%|*}; desc=${pair#*|}
       if grep -qa "SHREK-DOGFOOD BENCH-WORKSHOP ${tok}" "$LOG"; then ok "bench-workshop — ${desc}"
       else bad "bench-workshop — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-WORKSHOP ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-WORKSHOP //')]"; fi

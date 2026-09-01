@@ -870,6 +870,15 @@ if command -v podman >/dev/null 2>&1; then
             WSRC=$("$GKB" bench run workshop -- cat /etc/apt/sources.list.d/debian.sources 2>/tmp/bw2.log)
             bdev podman image exists localhost/debian && say "BENCH-WORKSHOP seed-loaded=ok" || say "BENCH-WORKSHOP seed-loaded=FAIL (ensure_seed did not load debian.tar)"
             { echo "$WSRC" | grep -q 'https://deb.debian.org/debian' && ! echo "$WSRC" | grep -qi 'security.debian.org'; } && say "BENCH-WORKSHOP seed-apt-ready=ok" || say "BENCH-WORKSHOP seed-apt-ready=FAIL [$(echo "$WSRC" | tr '\n' '|' | tail -c 120)]"
+            # PIP fast-follow, offline halves (the live pip-over-egress fetch is the host oracle's job):
+            # (a) the seed BAKES python3 + pip + the venv/ensurepip wheels (a plain --network=none run proves
+            # they are present and functional without any network); (b) the REPEATABLE network verb records the
+            # composed debian-apt + pypi-https SET on one bench (declarative set, both net lines, exactly two).
+            "$GKB" bench run workshop -- sh -c 'python3 --version && python3 -m pip --version && python3 -c "import ensurepip, venv"' >/tmp/bw3.log 2>&1 \
+                && say "BENCH-WORKSHOP python-baked=ok" || say "BENCH-WORKSHOP python-baked=FAIL [$(tr -d '\r' </tmp/bw3.log | tail -1)]"
+            "$GKB" bench network workshop debian-apt pypi-https >/tmp/bw4.log 2>&1
+            { grep -q '^grant net debian-apt' "$BRECS/workshop" && grep -q '^grant net pypi-https' "$BRECS/workshop" && [ "$(grep -c '^grant net ' "$BRECS/workshop")" = 2 ]; } \
+                && say "BENCH-WORKSHOP net-set-repeatable=ok" || say "BENCH-WORKSHOP net-set-repeatable=FAIL [$(grep '^grant net ' "$BRECS/workshop" 2>/dev/null | tr '\n' '|')]"
             "$GKB" bench destroy workshop >/dev/null 2>&1
         else
             say "BENCH-WORKSHOP seed=absent (debian.tar not baked into the shrek-bench sysext)"
