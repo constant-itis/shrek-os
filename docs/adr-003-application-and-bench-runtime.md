@@ -223,13 +223,17 @@ A Bench runs from a SEALED **seed catalog** (bench_plane `SEED_CATALOG`), not a 
 image — the same fail-closed discipline as an egress profile name. Two seeds ship:
 
 - **`scratch`** — the tiny Alpine/media proof seed (musl; ffmpeg north-star).
-- **`debian`** — the **apt workshop** seed (glibc): `debian:trixie` + `ca-certificates`, with
-  deb822 runtime sources pointing EVERY suite (`trixie`, `-updates`, `-security`) at
-  **`https://deb.debian.org`** and `/var/lib/apt/lists` purged. Built by
-  `scripts/build-workshop-seed.sh` (~56M archive baked beside `scratch.tar` in the shrek-bench
+- **`debian`** — the **apt + pip workshop** seed (glibc): `debian:trixie` + `ca-certificates`
+  **+ `python3` / `python3-venv` / `python3-pip`** (`--no-install-recommends`, so NO build
+  toolchain rides along), with deb822 runtime sources pointing EVERY suite (`trixie`,
+  `-updates`, `-security`) at **`https://deb.debian.org`** and `/var/lib/apt/lists` purged. Built
+  by `scripts/build-workshop-seed.sh` (~76M archive baked beside `scratch.tar` in the shrek-bench
   sysext), loaded on demand by `ensure_seed`, selected per-bench at
   `shrek bench create <name> --seed debian` (recorded as a `seed` line in the durable record;
-  a pre-seed record defaults to `scratch`).
+  a pre-seed record defaults to `scratch`). A dedicated `python` seed was considered and rejected:
+  the debian seed already carries apt, so `apt` **and** `pip` in ONE bench is the natural workshop
+  base (and the only way to `pip install` an sdist needing an apt-installed compiler, since a
+  `--rm` run makes apt state per-session).
 
 This realizes ADR-002's "mess-with-a-door": `apt-get install` real tooling in a bench without
 touching the sealed `/usr`. Egress is the sealed **`debian-apt`** profile — **ONE host**,
@@ -251,16 +255,60 @@ VM proves the shipped seed bakes + loads + selects, offline.
 > — a host-side apt broker (same shape as `model-proxy`/`swamp-broker`, enforcing `Host`/SNI =
 > deb.debian.org) — is post-MVP.
 
-**Two follow-ups this exposed (both on the proven step-5 path — do NOT bolt on blind):**
+### PyPI / pip workshop & the repeatable `network` verb — ✅ GREEN (2026-09-01)
+
+The pip fast-follow adds a sibling egress profile and makes a Bench hold a **set** of profiles so
+`apt` and `pip` compose on one bench.
+
+- **`pypi-https` sealed profile** (shrek-policy `egress.rs`) — **TWO hosts**: `pypi.org:443`
+  (the Simple/JSON index + pip's own version self-check) and `files.pythonhosted.org:443` (the
+  separate CDN serving wheels/sdists + PEP 658 `.metadata`). Both Fastly-fronted — the SAME
+  shared-CDN aperture as `debian-apt`/`github-https`, so https/443 only and the **SEALED-EGRESS
+  INVARIANT above applies verbatim** (a pip bench must hold no secret). `pypi.python.org` (a 301
+  relic) and `test.pypi.org` are deliberately unlisted; pip vendors its own certifi bundle, so
+  there is no CA-fetch host.
+
+- **Repeatable `network` verb — a DECLARATIVE SET.** `shrek bench network <name> <profile...>`
+  now sets the bench's egress to EXACTLY the listed set (it **replaces** the prior set; `network
+  <name> none` revokes all). So `network web debian-apt pypi-https` composes both; `run_networked`
+  resolves the **union** via `net_plane::resolve_profiles_v4` (endpoints deduped by
+  `(ip,proto,port)`, `/etc/hosts` by name — a single-element set is byte-for-byte the legacy
+  result). The record simply holds multiple `net <profile>` lines. Declarative-set was chosen over
+  an additive `--add/--remove` flag because it is **consent-superior**: the ceremony always shows
+  the COMPLETE resulting reachability (one diff row per profile), and the approved tuple binds the
+  absolute set — a concurrent record change between prompt and commit is overwritten by exactly
+  what the human saw, never composed with unseen state. The ceremony-free `none` revoke is routed
+  by EXACT arity (`<name> none` with nothing after) so no `network <name> none <profile>` can
+  silently drop args into a revoke.
+
+- **NOEXEC `/work` shapes the pip UX.** The bench data pool is mounted `noexec`, so a venv's
+  entry-point **scripts** (`/work/venv/bin/pip`) cannot `execve`. The blessed invocation is
+  `python3 -m venv /work/venv` then **`/work/venv/bin/python3 -m pip install <pkg>`** — `python3`
+  is a symlink resolving to the on-exec `/usr/bin/python3`, so it runs; pip is imported as a
+  module, never exec'd as a script. The persistent `/work` venv is therefore **pure-python only**
+  (a native-extension wheel needs `PROT_EXEC` to `dlopen`, so it belongs in an ephemeral in-overlay
+  venv within one session — consistent with apt's per-session semantics). The oracle pins this as a
+  tested invariant: `/work/venv/bin/pip --version` MUST fail (script on noexec) while `python3 -m
+  pip` succeeds — a guard against a future pool-loses-noexec regression.
+
+Proven LIVE in the host oracle: a `debian` bench granted `debian-apt pypi-https` runs
+`apt-get install` AND a `python3 -m pip install` reaching PyPI through the injected veth+nft; each
+profile ALONE fails closed for the other's host (cross-profile isolation is enforced at name
+resolution — the bench `/etc/hosts` holds only the granted profiles' pinned hosts; IP-level
+overlap on the shared Fastly CDN is the documented aperture, not asserted by IP). The sealed VM
+proves, offline, that the seed bakes python3/pip/venv and that the repeatable verb records the
+composed set.
+
+**Two follow-ups still on the proven step-5 path — do NOT bolt on blind:**
 1. **Egress-before-workload.** `run_networked` late-attaches egress AFTER the container starts
    (the rootless constraint), so a naive `apt-get update` fails during the no-egress window and
    the container exits before inject (netns-drift guard, fail-closed). A workload that survives
    the window (retry-until-egress) works today; the product fix is a **holder+exec** model
    (start a `sleep`-holder → inject → `exec` the workload), mirroring interactive `enter`.
-2. **Persistence.** `run` is `--rm`, so an `apt install` lands in the EPHEMERAL container layer,
-   not the persistent `/work` — durable installs are the ADR-002 **`promote`** path (bench →
-   signed Workshop layer), still a stub. PyPI (`pypi-https`) is a sibling egress profile + a
-   repeatable `network` verb (net_plane already unions), queued as the immediate fast-follow.
+2. **Persistence.** `run` is `--rm`, so an `apt`/`pip install` lands in the EPHEMERAL container
+   layer, not the persistent `/work` — durable installs are the ADR-002 **`promote`** path (bench
+   → signed Workshop layer), still a stub. (PyPI `pypi-https` + the repeatable `network` verb —
+   the third fast-follow named here — is now ✅ done, see the subsection above.)
 
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
 
