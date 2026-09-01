@@ -80,6 +80,9 @@ export SHREK_BENCH_ANCHOR=/home/dev
 # Per-bench seeds resolve from the sealed catalog (scratch->localhost/scratch, debian->localhost/debian);
 # the oracle only steers the ARCHIVE DIR (staged tars live in /seed here, not the sysext path).
 export SHREK_BENCH_SEED_DIR=/seed
+# Workshop recipes (ADR-002 promote target) live in their OWN root-owned dir, a SIBLING of the bench
+# records/ — never inside the dev-owned pool (same forgery anchor). The oracle steers it here.
+export SHREK_WORKSHOP_DIR=/mnt/workshops
 GK=/gatekeeperd
 
 echo "--- create two benches (distinct auto-allocated project ids) ---"
@@ -349,6 +352,44 @@ DF2="$APPS/shrek-bench-exp1-hello2.desktop"
 $GK bench destroy exp1 >/dev/null 2>&1
 [ ! -f "$DF2" ] && ok "destroy swept the bench's exported .desktop(s)" || bad "destroy left a .desktop behind"
 
+echo "===== PROMOTE: a Bench promotes to a reproducible Workshop recipe (+ list/show) ====="
+WSD=/mnt/workshops
+$GK bench create wb >/dev/null 2>&1
+# give the bench some DECLARED authority to capture: an fs grant, a sealed egress profile, an export.
+mkdir -p /home/dev/wb_in; echo hi > /home/dev/wb_in/f; chown -R dev:dev /home/dev/wb_in
+$GK bench grant wb /home/dev/wb_in --ro >/dev/null 2>&1
+$GK bench network wb github-https >/dev/null 2>&1
+$GK bench export wb build -- sh -c 'echo built' >/dev/null 2>&1
+# promote it into a NAMED recipe with declared apt + pip package sets (the == pin must survive).
+$GK bench promote wb --name toolshop --apt sl --apt cowsay --pip six==1.17.0 >/tmp/pr1.log 2>&1 && ok "promote wrote a recipe (rc0)" || bad "promote failed [$(tail -1 /tmp/pr1.log)]"
+REC=$WSD/toolshop
+[ -f "$REC" ] && ok "recipe persisted under the root-owned workshops dir (sibling of records/)" || bad "recipe file missing at $REC"
+# forgery anchor: a recipe is a declared-authority TEMPLATE — root-owned 0644 (world-readable, dev-unwritable).
+[ "$(stat -c '%u %a' "$REC" 2>/dev/null)" = "0 644" ] && ok "recipe is root-owned 0644 (forgery-anchored, world-readable)" || bad "recipe perms wrong [$(stat -c '%u %a' "$REC" 2>/dev/null)]"
+grep -q '^SHREK-WORKSHOP 1' "$REC" && ok "recipe carries the versioned header" || bad "recipe header wrong"
+grep -q '^seed scratch' "$REC" && ok "recipe copied the base seed from the bench" || bad "seed not copied [$(grep '^seed' "$REC")]"
+grep -q '^source wb' "$REC" && ok "recipe records build provenance (source bench)" || bad "source not recorded"
+{ grep -q '^apt sl$' "$REC" && grep -q '^apt cowsay$' "$REC" && grep -q '^pip six==1.17.0$' "$REC"; } && ok "declared apt + pip sets recorded (== pin preserved)" || bad "packages not recorded [$(grep -E '^(apt|pip) ' "$REC"|tr '\n' '|')]"
+grep -q '^grant fs-ro /home/dev/wb_in$' "$REC" && ok "declared-maximum fs grant copied from the bench" || bad "fs grant not copied"
+grep -q '^grant net github-https$' "$REC" && ok "declared egress profile copied from the bench" || bad "net grant not copied"
+grep -q '^export build ' "$REC" && ok "exported launcher carried into the recipe" || bad "export not carried"
+$GK bench workshop-list 2>/dev/null | grep -q toolshop && ok "workshop-list shows the recipe" || bad "workshop-list missing the recipe"
+$GK bench workshop-show toolshop 2>/tmp/ps.log | grep -qE 'seed +scratch' && ok "workshop-show renders the recipe detail" || bad "workshop-show wrong [$(tail -2 /tmp/ps.log|tr '\n' '|')]"
+
+echo "--- promote refusals (fail-closed) ---"
+$GK bench promote nosuchbench --name x >/dev/null 2>&1 && bad "promote of a missing bench must refuse" || ok "promote of a missing bench refused (rc!=0)"
+$GK bench promote wb --name x --apt --force-yes >/dev/null 2>&1 && bad "a flag-shaped package token must refuse" || ok "a flag-shaped package token refused (no leading - reaches apt)"
+$GK bench promote wb >/dev/null 2>&1 && bad "promote without --name must refuse" || ok "promote without --name refused (usage)"
+[ ! -f "$WSD/x" ] && ok "a refused promote wrote NO recipe (fail-closed, no partial)" || bad "a refused promote left a recipe"
+
+echo "--- re-promote atomically REPLACES the recipe ---"
+$GK bench promote wb --name toolshop --apt sl >/dev/null 2>&1
+[ "$(grep -c '^apt ' "$REC")" = 1 ] && ok "re-promote replaced the recipe in place (one apt line now)" || bad "re-promote did not replace [$(grep -c '^apt ' "$REC")]"
+
+echo "--- the recipe is a STANDALONE reproducible artifact: it outlives its source bench ---"
+$GK bench destroy wb >/dev/null 2>&1
+{ [ ! -f /mnt/records/wb ] && [ -f "$REC" ]; } && ok "destroying the source bench leaves the promoted recipe intact" || bad "recipe lost when the source bench was destroyed"
+
 echo "===== STEP 8: NORTH-STAR — a real offline Media transcode E2E through the Bench ====="
 if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
   # Use the ACTUAL shipped Scratch seed (alpine+coreutils+ffmpeg+exit42), not a stand-in — this is the real
@@ -398,7 +439,7 @@ bdev podman tag docker.io/library/busybox:latest localhost/scratch >/dev/null 2>
 SHREK=/shrek; SBR=/shrek-bench-run   # the real clients, mounted into the container by the outer harness
 SHREK_BROKER_NOMOUNT=1 \
   SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/records SHREK_BENCH_FS=/mnt/pool \
-  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED_DIR=/seed \
+  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED_DIR=/seed SHREK_WORKSHOP_DIR=/mnt/workshops \
   "$GK" >/tmp/gkd.log 2>&1 &
 GKD=$!
 GKSOCK=/run/shrek-gk.sock
@@ -462,6 +503,13 @@ echo "$CX" | grep -q 'refused cooldown' && ok "a repeated authority request is c
 NX=$(sdev "$SHREK" bench network czt github-https 2>&1)
 { echo "$NX" | grep -q 'refused ceremony-' && ! grep -q '^grant net ' /mnt/records/czt; } && ok "network <profile> is ceremony-gated and records nothing on deny" || bad "network profile not gated [$NX]"
 sdev "$SHREK" bench network czt none >/tmp/nn.log 2>&1 && ok "network none (revoke, reducing authority) is allowed ceremony-free over the socket" || bad "network none should be ceremony-free [$(cat /tmp/nn.log)]"
+# (vi) promote is authority-DECLARING (mints a durable reusable recipe) → ceremony-gated; a headless deny
+# applies NOTHING (no recipe written) — the same fail-closed contract as grant/export/network-to-a-profile.
+PW=$(sdev "$SHREK" bench promote czt --name czt_ws 2>&1)
+{ echo "$PW" | grep -q 'refused ceremony-' && [ ! -f /mnt/workshops/czt_ws ]; } && ok "promote over the socket is ceremony-gated and writes NO recipe on a headless deny" || bad "promote not ceremony-gated [$PW / ws=$(ls /mnt/workshops 2>/dev/null|tr '\n' ' ')]"
+# (vii) workshop-list is READ-ONLY (a recipe is root-owned world-readable metadata) → ceremony-free over
+# the socket, even for the dev peer (mirrors `bench list`).
+sdev "$SHREK" bench workshop-list >/tmp/wl.log 2>&1 && ok "workshop-list is read-only over the socket (no ceremony, like list)" || bad "workshop-list failed over the socket [$(cat /tmp/wl.log)]"
 # (v) root is refused on the socket ceremony path (root drives cli() in-process, never the socket).
 RX=$(printf 'BENCH grant 2\nczt\n%s\n' "$(printf /home/dev/czt_grant | sed 's/\//%2F/g')" | timeout 5 socat - "UNIX-CONNECT:$GKSOCK" 2>/dev/null)
 echo "$RX" | grep -q 'root-uses-cli' && ok "root is refused on the socket ceremony (must use cli() in-process)" || bad "root not refused on the socket ceremony [$(echo "$RX" | tr '\n' '|')]"
