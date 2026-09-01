@@ -56,6 +56,8 @@
 # sidecar are ignored.
 /layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/scratch.tar
 /layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/scratch.tar.digest
+/layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/debian.tar
+/layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/debian.tar.digest
 
 # Dogfood-0 (M0): build-time systemd masks staged by DOGFOOD=1 (interactive image) — like boot-poison,
 # these are build inputs, not tracked units (the real units live under image/overlay/usr/lib).

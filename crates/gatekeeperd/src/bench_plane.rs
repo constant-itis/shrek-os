@@ -52,21 +52,58 @@ fn quota_fs() -> String {
     bench_record::bench_env("SHREK_BENCH_FS").unwrap_or_else(|| "/home".to_string())
 }
 
-/// The offline seed image a Bench runs from (step 6 ships the real Scratch/Media seed; the oracle loads
-/// a stand-in). A NAME, resolved by podman against the local store only (registries.conf search is empty).
-fn seed_image() -> String {
-    bench_record::bench_env("SHREK_BENCH_SEED").unwrap_or_else(|| "localhost/scratch".to_string())
+/// One entry in the SEALED seed catalog: the fixed set of Bench base images the OS ships, each an offline
+/// OCI-archive baked into the shrek-bench sysext. A Bench NAMES one at `create --seed <name>` (default
+/// `scratch`); the name is validated against this list exactly like an egress profile name — an unknown
+/// seed is REFUSED, never substituted. `image` = the fully-qualified local tag podman resolves against the
+/// local store only (registries.conf search is empty); `tar` = the archive basename `ensure_seed` loads.
+struct Seed {
+    name: &'static str,
+    image: &'static str,
+    tar: &'static str,
 }
 
-/// The offline seed's OCI-archive, baked into the shrek-bench sysext and `podman load`ed into `dev`'s
-/// rootless store on demand ([`ensure_seed`]). `podman load` is the step-6 de-risk winner: it reads a
-/// plain file + writes layers to the /home graphroot (a depth-1 ext4 mount), whereas an
-/// `additionalimagestores` on the already-overlayed merged /usr risks the kernel's overlay
-/// stacking-depth-2 limit. Overridable for the oracle (which stages its own tar).
-fn seed_tar() -> PathBuf {
-    bench_record::bench_env("SHREK_BENCH_SEED_TAR")
-        .unwrap_or_else(|| "/usr/share/shrek/bench/seeds/scratch.tar".to_string())
+/// The sealed catalog. `scratch` = the tiny Alpine/media proof seed (musl); `debian` = the apt WORKSHOP
+/// seed (glibc + apt over the `debian-apt` egress profile). Extend HERE (a `pypi`/`workshop` sibling is a
+/// later slice); a user can never add a seed, only pick a shipped one.
+const SEED_CATALOG: &[Seed] = &[
+    Seed { name: "scratch", image: "localhost/scratch", tar: "scratch.tar" },
+    Seed { name: "debian", image: "localhost/debian", tar: "debian.tar" },
+];
+
+fn seed_lookup(name: &str) -> Option<&'static Seed> {
+    SEED_CATALOG.iter().find(|s| s.name == name)
+}
+
+/// Is `name` a shipped seed? `create --seed` validates against this, fail-closed (unknown ⇒ refused).
+pub(crate) fn valid_seed(name: &str) -> bool {
+    seed_lookup(name).is_some()
+}
+
+/// The dir holding the baked seed OCI-archives. Overridable for the oracle (which stages its own tars)
+/// via `SHREK_BENCH_SEED_DIR` in the `oracle-env` build only.
+fn seeds_dir() -> PathBuf {
+    bench_record::bench_env("SHREK_BENCH_SEED_DIR")
+        .unwrap_or_else(|| "/usr/share/shrek/bench/seeds".to_string())
         .into()
+}
+
+/// The offline seed image a given Bench runs from (a NAME resolved by podman against the local store only).
+/// From the sealed catalog; the oracle may override a single seed's tag via `SHREK_BENCH_SEED_IMG_<NAME>`.
+fn seed_image(seed: &str) -> String {
+    if let Some(o) = bench_record::bench_env(&format!("SHREK_BENCH_SEED_IMG_{}", seed.to_uppercase())) {
+        return o;
+    }
+    seed_lookup(seed).map(|s| s.image.to_string()).unwrap_or_else(|| "localhost/scratch".to_string())
+}
+
+/// A seed's OCI-archive, baked into the shrek-bench sysext and `podman load`ed into `dev`'s rootless store
+/// on demand ([`ensure_seed`]). `podman load` is the step-6 de-risk winner: it reads a plain file + writes
+/// layers to the /home graphroot (a depth-1 ext4 mount), whereas an `additionalimagestores` on the
+/// already-overlayed merged /usr risks the kernel's overlay stacking-depth-2 limit.
+fn seed_tar(seed: &str) -> PathBuf {
+    let base = seed_lookup(seed).map(|s| s.tar).unwrap_or("scratch.tar");
+    seeds_dir().join(base)
 }
 
 /// The trusted anchor grants are resolved strictly beneath (rule 3 / mount_plane TOCTOU model). A Bench
@@ -520,8 +557,8 @@ fn seed_is_fresh(want: Option<&str>, have: &str) -> bool {
 /// `localhost/scratch` tag would otherwise pin a user to the old image after an OS update). Best-effort +
 /// fail-OPEN: no baked tar (the oracle supplies the image another way) ⇒ no-op; a load error is logged but
 /// `run` proceeds so podman surfaces a clear "image not found" rather than this masking it.
-fn ensure_seed() {
-    let tar = seed_tar();
+fn ensure_seed(seed: &str) {
+    let tar = seed_tar(seed);
     if !tar.exists() {
         return; // no baked seed on this host — the image is provided by other means (oracle/test).
     }
@@ -530,7 +567,7 @@ fn ensure_seed() {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     let have = podman_as_dev_stdout(&[
-        "image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), seed_image(),
+        "image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), seed_image(seed),
     ]).map(|s| s.trim().to_string()).unwrap_or_default();
     if seed_is_fresh(want.as_deref(), &have) {
         return;
@@ -736,11 +773,17 @@ fn records() -> Vec<BenchRecord> {
     bench_record::list_records(&bench_record::records_dir())
 }
 
-/// create <name> [--quota KiB]: allocate a project id, make the Bench data dir on the pool, tag it with
-/// the project id, cap it, chown to `dev`, and write the durable record. Fails if the Bench exists.
-fn create(name: &str, quota_kib: u64) -> i32 {
+/// create <name> [--quota KiB] [--seed NAME]: allocate a project id, make the Bench data dir on the pool,
+/// tag it with the project id, cap it, chown to `dev`, and write the durable record. Fails if the Bench
+/// exists or the seed name is not in the sealed catalog. `seed` defaults to `scratch`.
+fn create(name: &str, quota_kib: u64, seed: &str) -> i32 {
     if !bench_record::valid_bench_name(name) {
         eprintln!("bench: invalid name {name:?}");
+        return 2;
+    }
+    if !valid_seed(seed) {
+        let known: Vec<&str> = SEED_CATALOG.iter().map(|s| s.name).collect();
+        eprintln!("bench: unknown seed {seed:?} — the OS ships {known:?} (a seed is a sealed base image, not user-chosen)");
         return 2;
     }
     let rdir = bench_record::records_dir();
@@ -763,6 +806,7 @@ fn create(name: &str, quota_kib: u64) -> i32 {
             quota_kib,
             created: now_secs(),
             state: "created".into(),
+            seed: seed.to_string(),
             grants: vec![],
             exports: vec![],
         };
@@ -771,7 +815,7 @@ fn create(name: &str, quota_kib: u64) -> i32 {
     };
     match build() {
         Ok(()) => {
-            println!("bench: created {name} (project={project} quota_kib={quota_kib} data={})", data.display());
+            println!("bench: created {name} (project={project} quota_kib={quota_kib} seed={seed} data={})", data.display());
             0
         }
         Err(e) => {
@@ -793,8 +837,8 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
         eprintln!("bench: no such bench {name}");
         return 4;
     };
-    // Ensure the offline seed is loaded into dev's store (load-if-absent-or-stale from the sysext archive).
-    ensure_seed();
+    // Ensure the Bench's offline seed is loaded into dev's store (load-if-absent-or-stale from its archive).
+    ensure_seed(&rec.seed);
     // Materialize FS grants in the host ns (idempotent — no-op if already mounted). Fail-closed.
     if let Err(e) = ensure_grants_materialized(&rec) {
         eprintln!("bench run: FS grant materialization failed (fail-closed): {e}");
@@ -811,7 +855,7 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
     let spec = RunSpec {
         name,
         data: &data,
-        image: &seed_image(),
+        image: &seed_image(&rec.seed),
         interactive,
         detached: false,
         remove: true,
@@ -871,7 +915,7 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profile:
     let spec = RunSpec {
         name: &name,
         data,
-        image: &seed_image(),
+        image: &seed_image(&rec.seed),
         interactive: false,
         detached: true,
         remove: false,
@@ -1613,18 +1657,20 @@ pub fn cli(args: &[String]) -> i32 {
         "create" => {
             let mut name = None;
             let mut quota = DEFAULT_QUOTA_KIB;
+            let mut seed = "scratch".to_string();
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
                     "--quota" => { i += 1; quota = rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(quota); }
+                    "--seed" => { i += 1; match rest.get(i) { Some(s) => seed = s.clone(), None => { eprintln!("bench create: --seed needs a value"); return 2; } } }
                     other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
                     other => { eprintln!("bench create: unexpected arg {other}"); return 2; }
                 }
                 i += 1;
             }
             match name {
-                Some(n) => create(&n, quota),
-                None => { eprintln!("usage: gatekeeperd bench create <name> [--quota KiB]"); 2 }
+                Some(n) => create(&n, quota, &seed),
+                None => { eprintln!("usage: gatekeeperd bench create <name> [--quota KiB] [--seed NAME]"); 2 }
             }
         }
         "run" | "enter" => {
@@ -1757,17 +1803,19 @@ pub fn dispatch_socket(cred: Ucred, peer_fd: RawFd, argv: &[String]) -> (i32, Ve
         "create" => {
             let mut name = None;
             let mut quota = DEFAULT_QUOTA_KIB;
+            let mut seed = "scratch".to_string();
             let mut i = 0;
             while i < rest.len() {
                 match rest[i].as_str() {
                     "--quota" => { i += 1; quota = rest.get(i).and_then(|s| s.parse().ok()).unwrap_or(quota); }
+                    "--seed" => { i += 1; match rest.get(i) { Some(s) => seed = s.clone(), None => return (2, vec!["RESULT bench-create - refused seed-needs-value".into()]) } }
                     other if !other.starts_with('-') && name.is_none() => name = Some(other.to_string()),
                     other => return (2, vec![format!("RESULT bench-create - refused bad-arg-{other}")]),
                 }
                 i += 1;
             }
             match name {
-                Some(n) => { let rc = create(&n, quota); (rc, summ("create", &n, rc)) }
+                Some(n) => { let rc = create(&n, quota, &seed); (rc, summ("create", &n, rc)) }
                 None => (2, vec!["RESULT bench-create - usage".into()]),
             }
         }
@@ -1943,18 +1991,32 @@ mod tests {
     }
 
     #[test]
-    fn seed_tar_default_and_override() {
-        // default lives in the sysext seeds dir (the shipped build ALWAYS uses it — overrides compiled out).
-        std::env::remove_var("SHREK_BENCH_SEED_TAR");
-        assert_eq!(seed_tar(), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
-        // SHREK_BENCH_SEED_TAR steers the oracle's staged archive ONLY in the oracle-env build; a shipped
-        // build ignores it entirely (must-fix 1 — env can't redirect the trust anchor).
-        std::env::set_var("SHREK_BENCH_SEED_TAR", "/tmp/x/scratch.tar");
+    fn seed_tar_default_and_dir_override() {
+        // each seed's archive lives in the sysext seeds dir by its catalog basename (the shipped build
+        // ALWAYS uses it — the override is compiled out).
+        std::env::remove_var("SHREK_BENCH_SEED_DIR");
+        assert_eq!(seed_tar("scratch"), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
+        assert_eq!(seed_tar("debian"), PathBuf::from("/usr/share/shrek/bench/seeds/debian.tar"));
+        // SHREK_BENCH_SEED_DIR steers the oracle's staged-archive DIR ONLY in the oracle-env build; a
+        // shipped build ignores it entirely (env can't redirect the trust anchor).
+        std::env::set_var("SHREK_BENCH_SEED_DIR", "/seed");
         #[cfg(feature = "oracle-env")]
-        assert_eq!(seed_tar(), PathBuf::from("/tmp/x/scratch.tar"));
+        assert_eq!(seed_tar("scratch"), PathBuf::from("/seed/scratch.tar"));
         #[cfg(not(feature = "oracle-env"))]
-        assert_eq!(seed_tar(), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
-        std::env::remove_var("SHREK_BENCH_SEED_TAR");
+        assert_eq!(seed_tar("scratch"), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
+        std::env::remove_var("SHREK_BENCH_SEED_DIR");
+    }
+
+    #[test]
+    fn seed_catalog_resolves_image_and_validates_names() {
+        assert!(valid_seed("scratch") && valid_seed("debian"));
+        assert!(!valid_seed("bogus") && !valid_seed(""));
+        assert_eq!(seed_image("scratch"), "localhost/scratch");
+        assert_eq!(seed_image("debian"), "localhost/debian");
+        // an unknown seed falls back to the scratch basename/image (create() rejects unknown names up front,
+        // so a run never reaches here with a bad seed — this is belt-and-suspenders).
+        assert_eq!(seed_tar("bogus"), PathBuf::from("/usr/share/shrek/bench/seeds/scratch.tar"));
+        assert_eq!(seed_image("bogus"), "localhost/scratch");
     }
 
     #[test]
@@ -2029,7 +2091,7 @@ mod tests {
     fn egress_profile_reads_the_single_net_grant() {
         let mut r = BenchRecord {
             name: "b".into(), id: "b".into(), project: 100_000, quota_kib: 1024,
-            created: 0, state: "created".into(),
+            created: 0, state: "created".into(), seed: "scratch".into(),
             grants: vec!["fs-ro /home/dev/in".into(), "net github-https".into()],
             exports: vec![],
         };

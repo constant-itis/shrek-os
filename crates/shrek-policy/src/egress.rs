@@ -97,6 +97,20 @@ const GITHUB_HTTPS: &[EgressRule] = &[
     EgressRule { host: "objects.githubusercontent.com", proto: Proto::Tcp, port: 443 },
 ];
 
+// A Debian apt WORKSHOP bench (ADR-002/003): reach the Debian archive to `apt-get install`. ONE host by
+// design — deb.debian.org is a direct Fastly-CDN service (NOT the old httpredir 302-redirector) serving
+// /debian, /debian-security AND /debian-updates, so the seed's deb822 sources point ALL suites at it and
+// no second pin is needed (security.debian.org is a separately-rotating round-robin — deliberately NOT
+// listed). HTTPS/tcp:443 only: on a shared-CDN IP allow-list, plaintext :80 would let a `Host:` header
+// reach any Fastly customer, so every profile in this catalog is uniformly 443. apt validates the cert
+// against the SNI name (deb.debian.org), never the spawn-time-pinned IP, exactly like `github-https`.
+// SEALED-EGRESS INVARIANT: a bench holding this (or any internet) profile must NEVER receive a secret via
+// grant/env/export — the shared-CDN aperture (any Fastly site is reachable to a workload crafting its own
+// TLS) is contained only by the no-secrets rule, not by the network layer (host-side apt broker = post-MVP).
+const DEBIAN_APT: &[EgressRule] = &[
+    EgressRule { host: "deb.debian.org", proto: Proto::Tcp, port: 443 },
+];
+
 const RUST_CRATES: &[EgressRule] = &[
     EgressRule { host: "crates.io", proto: Proto::Tcp, port: 443 },
     EgressRule { host: "static.crates.io", proto: Proto::Tcp, port: 443 },
@@ -178,6 +192,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     // The canonical empty grant: a C-net request may name it to assert "reaches nothing" explicitly.
     EgressProfile { name: "none", rules: &[] },
     EgressProfile { name: "github-https", rules: GITHUB_HTTPS },
+    EgressProfile { name: "debian-apt", rules: DEBIAN_APT },
     EgressProfile { name: "rust-crates", rules: RUST_CRATES },
     EgressProfile { name: "model-local", rules: MODEL_LOCAL },
     EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
@@ -205,6 +220,18 @@ mod tests {
         assert_eq!(resolve("github-https").unwrap().rules.len(), 3);
         assert_eq!(resolve("rust-crates").unwrap().rules.len(), 3);
         assert!(resolve("none").unwrap().is_empty());
+    }
+
+    #[test]
+    fn debian_apt_is_one_https_host_deny_by_default() {
+        let d = resolve("debian-apt").unwrap();
+        // ONE host by design (deb.debian.org fronts every suite); https/tcp:443 only.
+        assert_eq!(d.rules.len(), 1, "debian-apt must reach exactly one host");
+        assert!(d.allows("deb.debian.org", Proto::Tcp, 443));
+        // Deny-by-default around it: no plaintext :80, no separately-rotating security mirror, no wildcard.
+        assert!(!d.allows("deb.debian.org", Proto::Tcp, 80));
+        assert!(!d.allows("security.debian.org", Proto::Tcp, 443));
+        assert!(!d.allows("snapshot.debian.org", Proto::Tcp, 443));
     }
 
     #[test]

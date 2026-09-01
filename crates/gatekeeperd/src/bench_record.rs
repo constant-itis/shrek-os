@@ -85,6 +85,11 @@ pub struct BenchRecord {
     pub created: u64,
     /// `created` | `running` | `stopped`.
     pub state: String,
+    /// The sealed seed catalog NAME this Bench runs from (`scratch` = the default Alpine/media seed;
+    /// `debian` = the apt workshop seed). Chosen at `create --seed` and validated against the sealed
+    /// catalog in `bench_plane`. A record written before per-bench seeds existed has no `seed` line and
+    /// defaults to `scratch` (back-compat), so this is parsed as OPTIONAL — its absence is NOT a failure.
+    pub seed: String,
     /// granted host paths (step 5). Empty in step 4.
     pub grants: Vec<String>,
     /// exported launcher apps (step 7): opaque `Export::encode` strings (key + .desktop file + icon +
@@ -103,6 +108,7 @@ impl BenchRecord {
         s.push_str(&format!("quota_kib {}\n", self.quota_kib));
         s.push_str(&format!("created {}\n", self.created));
         s.push_str(&format!("state {}\n", self.state));
+        s.push_str(&format!("seed {}\n", self.seed));
         for g in &self.grants {
             s.push_str(&format!("grant {g}\n"));
         }
@@ -126,6 +132,7 @@ impl BenchRecord {
         let mut quota_kib = None;
         let mut created = None;
         let mut state = None;
+        let mut seed = None;
         let mut grants = Vec::new();
         let mut exports = Vec::new();
         let mut saw_end = false;
@@ -142,6 +149,7 @@ impl BenchRecord {
                 "quota_kib" => quota_kib = Some(v.parse::<u64>().ok()?),
                 "created" => created = Some(v.parse::<u64>().ok()?),
                 "state" => state = Some(v.to_string()),
+                "seed" => seed = Some(v.to_string()),
                 "grant" => grants.push(v.to_string()),
                 "export" => exports.push(v.to_string()),
                 _ => return None, // unknown field ⇒ fail closed (never silently ignore)
@@ -154,6 +162,8 @@ impl BenchRecord {
             quota_kib: quota_kib?,
             created: created?,
             state: state?,
+            // OPTIONAL: a pre-seed record defaults to the scratch seed (back-compat, not a parse failure).
+            seed: seed.unwrap_or_else(|| "scratch".to_string()),
             grants,
             exports,
         };
@@ -290,6 +300,7 @@ mod tests {
             quota_kib: 1024,
             created: 42,
             state: "created".into(),
+            seed: "scratch".into(),
             grants: vec![],
             exports: vec![],
         }
@@ -360,6 +371,20 @@ mod tests {
         fs::write(d.join("z"), "corrupt").unwrap(); // corrupt: skipped
         let names: Vec<String> = list_records(&d).into_iter().map(|r| r.name).collect();
         assert_eq!(names, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn seed_roundtrips_and_pre_seed_record_defaults_to_scratch() {
+        let d = tmpdir();
+        // explicit non-default seed round-trips
+        let mut r = rec("workshop", 100_000);
+        r.seed = "debian".into();
+        write_record(&d, &r).unwrap();
+        assert_eq!(load_record(&d, "workshop").unwrap().seed, "debian");
+        // a record written before per-bench seeds (no `seed` line) parses with seed = scratch
+        let legacy = "SHREK-BENCH 1\nname old\nid old\nproject 100000\nquota_kib 1024\ncreated 0\nstate created\nEND\n";
+        fs::write(d.join("old"), legacy).unwrap();
+        assert_eq!(load_record(&d, "old").unwrap().seed, "scratch");
     }
 
     #[test]
