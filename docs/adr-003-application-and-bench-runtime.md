@@ -299,13 +299,36 @@ overlap on the shared Fastly CDN is the documented aperture, not asserted by IP)
 proves, offline, that the seed bakes python3/pip/venv and that the repeatable verb records the
 composed set.
 
-**Two follow-ups still on the proven step-5 path — do NOT bolt on blind:**
-1. **Egress-before-workload.** `run_networked` late-attaches egress AFTER the container starts
-   (the rootless constraint), so a naive `apt-get update` fails during the no-egress window and
-   the container exits before inject (netns-drift guard, fail-closed). A workload that survives
-   the window (retry-until-egress) works today; the product fix is a **holder+exec** model
-   (start a `sleep`-holder → inject → `exec` the workload), mirroring interactive `enter`.
-2. **Persistence.** `run` is `--rm`, so an `apt`/`pip install` lands in the EPHEMERAL container
+### Egress-before-workload (holder+exec) — ✅ GREEN (2026-09-01)
+
+The rootless late-attach constraint means egress can only be injected AFTER the container starts
+(gatekeeperd must discover the netns leader, then `inject()` a veth + nft into it). Running the
+untrusted workload as PID1 raced that no-egress window: a naive `apt-get update`/`pip install`
+failed, and if the workload exited before inject the netns-drift guard fail-closed the whole run.
+
+The fix (Fable item-2, GO-WITH-FIXES): **`run_networked` ALWAYS starts a `sleep infinity` HOLDER as
+PID1**, injects egress, re-verifies netns identity, and only THEN `podman exec`s the workload into
+the now-networked container — mirroring interactive `enter`. So the workload has egress from its
+FIRST instruction; the retry-until-egress wrapper is gone. Because the holder is a stable PID1 that
+never exits on its own, the leader/netns identity is fixed across discover→inject→re-verify→exec, so
+the drift/pid-recycle guards are STRENGTHENED (the untrusted workload is never in that window). Key
+points folded from the review: (a) a networked run refuses an EMPTY workload up front (`podman exec`
+with no command is a 125 error after the plumbing is built); (b) `podman exec --workdir /work` pins
+cwd parity (exec already inherits the container's run `-w /work` — a drift-pin, not a fix), flags
+strictly before the container name so a workload's `-c` is a command arg; (c) NO `podman stop` on the
+non-interactive path — a `sleep` PID1 ignores SIGTERM from an ancestor pidns, so the existing
+`net.teardown()` (severs the veth) → `podman rm -f` (SIGKILLs the holder) tail is both correct and
+faster; (d) the non-interactive rc is the workload's own exec status (126/127/128+n verbatim; a
+podman-infra failure → the −1 sentinel; 125 ambiguous — identical to the plain path). Bonus: `podman
+exec` (no `-d`/`-t`) streams the workload's stdout to the caller, so oracle assertions can read it
+directly. Proven LIVE in the host oracle: a bare `apt-get update` / `pip install`, a no-retry
+first-syscall connect, a fast-exiting `exit 42` returning its real rc (the drift-fail regression
+guard that replaces the retry wrapper), and `pwd` → `/work` over the streamed stdout. (Networked runs
+need live endpoints + DNS, so this is oracle-only; the endpoint-free VM cannot exercise it, and the
+non-networked plain-run path is untouched.)
+
+**Remaining follow-up on the proven step-5 path — do NOT bolt on blind:**
+1. **Persistence.** `run` is `--rm`, so an `apt`/`pip install` lands in the EPHEMERAL container
    layer, not the persistent `/work` — durable installs are the ADR-002 **`promote`** path (bench
    → signed Workshop layer), still a stub. (PyPI `pypi-https` + the repeatable `network` verb —
    the third fast-follow named here — is now ✅ done, see the subsection above.)
