@@ -371,13 +371,53 @@ carried as opaque bytes.
   from the bench, the `==` pin preserved, list/show, the fail-closed refusals, atomic re-promote,
   standalone-survives-destroy) + the socket path (promote is ceremony-gated & writes nothing on a
   headless deny; list is read-only). Oracle **PASS=116/0**.
-- **NOT yet built** (the next two commits): `workshop launch` re-derives the recipe into a working
-  env (re-validate seed+egress vs the sealed catalog/policy, materialize from seed, install the
-  declared packages over the egress-before-workload holder+exec path, fresh writable task-state);
-  then the **Tool Shed** — a content-addressed, root-index-trusted derivation cache keyed on
-  `SHA-256(schema ‖ seed image-Id ‖ apt tokens ‖ pip tokens ‖ egress set)` — a DISPOSABLE
-  optimization that NEVER becomes an independent source of authority (a miss/invalidation always
-  re-derives from the recipe through the approved seed+egress).
+- **`workshop launch` is now ✅ done** (re-derivation, no cache — see the Launch subsection below).
+- **NOT yet built** (the last commit): the **Tool Shed** — a content-addressed, root-index-trusted
+  derivation cache keyed on `SHA-256(schema ‖ seed image-Id ‖ apt tokens ‖ pip tokens ‖ egress set)` —
+  a DISPOSABLE optimization that NEVER becomes an independent source of authority (a miss/invalidation
+  always re-derives from the recipe through the approved seed+egress). Commit 3 retains+indexes the
+  transient derivation the launch path already produces, instead of deleting it after the run.
+
+### Workshop launch → re-derivation (two-container, no cache) — ✅ GREEN (2026-09-01)
+
+`workshop launch <ws> [-- workload…]` turns a recipe back into a working environment. It is
+authority-MATERIALIZING (it activates the recipe's declared-maximum grants/egress and runs a
+workload), so it runs the **composite consent ceremony** per launch (HIGH-authority typed code) —
+the §5 triple in action: `recipe = declared maximum ⊇ launch approval = activation ⊇ gatekeeper
+per-run = actual`. Precheck re-validates the recipe against the sealed catalog/policy fail-closed (a
+recipe on disk is data, never trusted for the seed/egress decision) and enforces install-egress
+coherence (declared `apt` ⇒ `debian-apt` in the egress set; `pip` ⇒ `pypi-https`) so an
+un-launchable recipe is refused before any container starts.
+
+**Two-container derivation** (owner decision — preserve the pristine boundary NOW so Commit 3 only
+retains, never splits a contaminated container):
+
+1. **Phase A — pristine derivation.** A container from the recipe's sealed seed with the recipe's
+   install egress ONLY — **no grants, no `/work`, no exports, no workload**. A `sleep infinity` holder
+   is PID1; egress is injected + re-verified (the item-2 egress-before-install path); then the
+   declared packages install as **ARGV vectors** via `podman exec` (`apt-get update` → `apt-get
+   install -y --no-install-recommends <pkgs>` → `apt-get clean`; `python3 -m pip install
+   --no-cache-dir --break-system-packages <pkgs>`) — never a shell string, so a package token can only
+   ever be an argv element, not a flag. `podman commit` (before any user workload has ever run in it)
+   captures a **transient** image; the derivation container is torn down. The committed bytes are
+   software-only by construction — the no-secrets invariant that makes a derived image safe to reuse.
+2. **Phase B — workload.** A FRESH ephemeral bench materialized from the recipe runs the workload
+   FROM the derived image, with the recipe's grants + egress + a clean `/work` task-state (the proven
+   `run`/`run_networked` path, parameterized by an image override). Bench + `/work` are torn down after.
+3. **Phase C.** The transient derived image is **deleted** — Commit 2 has no cache, so the next launch
+   re-derives ("installs stick by re-derivation"). The recipe stays the sole durable state; ADR-002 is
+   unchanged (a transient derivation is not Workshop persistence). A package-free recipe skips Phase A
+   entirely and runs straight from the seed.
+
+**Proven** — 4 unit tests ride in `bench_plane.rs` (launch HIGH-authority + action, usage refusal,
+`egress_profiles_from`, the pristine-derivation argv has no `/work`/grants). The host oracle
+`bench-plane-proof.sh` adds a LIVE launch (behind the Debian workshop seed): promote a debian bench
+with `--apt jq --pip six==1.17.0`, `workshop-launch` it — a real pristine derivation installs jq+six
+over the sealed egress, commits, and the workload proves BOTH tools present in the derived env — then
+asserts the transient image is deleted, the ephemeral launch bench is torn down, the recipe survives,
+a package-free recipe launches with no derivation, and the fail-closed refusals (missing recipe; an
+apt recipe with no `debian-apt` egress refused at precheck, building no derivation). Oracle
+**PASS=127/0**.
 
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
 
