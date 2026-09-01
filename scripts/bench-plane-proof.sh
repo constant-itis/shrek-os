@@ -313,19 +313,109 @@ CONN
   $GK bench create lbench --seed debian --quota 524288 >/dev/null 2>&1
   $GK bench network lbench debian-apt pypi-https >/dev/null 2>&1
   $GK bench promote lbench --name lshop --apt jq --pip six==1.17.0 >/tmp/lpr.log 2>&1 && ok "promoted a launchable recipe (apt jq + pip six, both egress profiles)" || bad "promote failed [$(tail -1 /tmp/lpr.log)]"
-  # THE re-derivation: launch runs a PRISTINE derivation container (no grants/no /work), installs jq+six over
-  # the recipe egress, commits a transient image, then runs the workload FROM it. The workload proves BOTH
-  # tools are present in the derived environment.
+  # THE re-derivation (this FIRST launch is a cache MISS): a PRISTINE derivation container (no grants/no
+  # /work) installs jq+six over the recipe egress, is committed to the CONTENT-ADDRESSED cache tag + indexed
+  # in the Tool Shed, then the workload runs FROM it. The workload proves BOTH tools are in the derived env.
   $GK bench workshop-launch lshop -- sh -c 'jq --version && python3 -c "import six; print(six.__version__)"' >/tmp/ll.log 2>&1; LRC=$?
   [ "$LRC" -eq 0 ] && ok "launch re-derived the env + ran the workload (jq + six both present, rc0)" || bad "launch failed [rc=$LRC $(tail -4 /tmp/ll.log | tr '\n' '|')]"
   { grep -q '^jq-' /tmp/ll.log && grep -q '^1.17.0' /tmp/ll.log; } && ok "workload output shows the installed apt + pip tools (jq + six 1.17.0)" || bad "installed tools not evident in output [$(tr '\n' '|' </tmp/ll.log | tail -c 200)]"
-  # Commit 2 has NO cache: the transient derived image is DELETED after the run (next launch re-derives).
-  bdev podman image exists localhost/shrek-derive-lshop && bad "the transient derived image leaked (Commit 2 must delete it)" || ok "the transient derived image was deleted after launch (no persistence yet)"
+  # Commit 3: a cacheable launch stores the derivation under the content-addressed cache tag — it does NOT
+  # use a `localhost/shrek-derive-*` transient (that tag only appears when the key can't be computed).
+  bdev podman image exists localhost/shrek-derive-lshop && bad "a transient derive image leaked (a cacheable launch stores under the cache tag, not a transient)" || ok "no transient derive image (the launch cached under the content-addressed tag instead)"
   # The launch bench is EPHEMERAL: torn down after the run (record + data gone), the recipe untouched.
   { [ ! -f /mnt/records/wl-lshop ] && [ ! -d /mnt/pool/b/wl-lshop ]; } && ok "the ephemeral launch bench was torn down (record + data gone)" || bad "the launch bench leaked"
   [ -f /mnt/workshops/lshop ] && ok "the recipe survives launch (sole durable state, re-derivable)" || bad "launch consumed the recipe"
   # host stays SEALED: jq installed only inside the derivation/workload containers, never on the host.
   { [ ! -e /usr/bin/jq ] && ! python3 -c "import six" 2>/dev/null; } && ok "the host stayed sealed (jq + six live in the derivation, not on the host)" || ok "host jq/six pre-exist in the base image (not from the launch)"
+
+  echo "===== TOOL SHED CACHE: content-addressed derivation cache + offline launch (Commit 3) ====="
+  CACHE=/mnt/workshops/cache
+  # The first launch (above) was a MISS that STORED the derivation. The index is a single root-owned record
+  # named by the full 64-hex content key; its filename IS the key (INPUTS: seed image Id + apt/pip + egress).
+  CKEY=$(ls "$CACHE" 2>/dev/null | grep -E '^[0-9a-f]{64}$' | head -1)
+  [ -n "$CKEY" ] && ok "the first launch wrote ONE root-owned cache index record (key ${CKEY:0:12}…)" || bad "no cache index record after the derive [$(ls "$CACHE" 2>/dev/null|tr '\n' ' ')]"
+  CREC="$CACHE/$CKEY"
+  # forgery anchor: root-owned 0644 in the root-owned cache dir (same anchor as the recipes — must-fix 1).
+  [ "$(stat -c '%u %a' "$CREC" 2>/dev/null)" = "0 644" ] && ok "cache record is root-owned 0644 (same forgery anchor as recipes)" || bad "cache record perms wrong [$(stat -c '%u %a' "$CREC" 2>/dev/null)]"
+  grep -q '^SHREK-CACHE 1' "$CREC" && ok "cache record carries the versioned header" || bad "cache record header wrong"
+  CIMG=$(sed -n 's/^image //p' "$CREC")
+  bdev podman image exists "$CIMG" && ok "the derived image is RETAINED under the cache tag ($CIMG)" || bad "cached image missing ($CIMG)"
+  # provenance: the resolved versions the derive actually installed are captured (pip pin verbatim; jq via dpkg-query).
+  grep -q '^pip-resolved six==1.17.0$' "$CREC" && ok "cache record captured the resolved pip version (six==1.17.0)" || bad "pip provenance missing [$(grep resolved "$CREC"|tr '\n' '|')]"
+  grep -q '^apt-resolved jq=' "$CREC" && ok "cache record captured the resolved apt version (jq=…)" || bad "apt provenance missing [$(grep -c apt-resolved "$CREC")]"
+  $GK bench workshop-show lshop 2>/dev/null | grep -q 'cached   yes' && ok "workshop-show surfaces the live cache entry + provenance" || bad "workshop-show cache status missing [$($GK bench workshop-show lshop 2>/dev/null | grep -i cach | tr '\n' '|')]"
+
+  echo "--- cache HIT: --offline reuses the derived image with NO egress (offline-on-hit) ---"
+  # --offline REFUSES to derive (it never touches the network); so an --offline launch that SUCCEEDS proves
+  # the cache was HIT and the assembly needed no egress at all. rc0 with jq+six present IS the offline-on-hit proof.
+  $GK bench workshop-launch lshop --offline -- sh -c 'jq --version && python3 -c "import six; print(six.__version__)"' >/tmp/lho.log 2>&1; HRC=$?
+  { [ "$HRC" -eq 0 ] && grep -q '^1.17.0' /tmp/lho.log; } && ok "offline launch HIT the cache + ran with NO egress (jq+six present, rc0)" || bad "offline-on-hit failed [rc=$HRC $(tail -3 /tmp/lho.log|tr '\n' '|')]"
+
+  echo "--- --offline with NO cached derivation REFUSES (offline is HIT-only, never derives) ---"
+  # a fresh recipe declaring packages but never launched has no cache entry → --offline must refuse (no derive),
+  # and derive NOTHING (no transient, no cache write).
+  $GK bench create mbench --seed debian --quota 524288 >/dev/null 2>&1
+  $GK bench network mbench debian-apt >/dev/null 2>&1
+  $GK bench promote mbench --name mshop --apt jq >/dev/null 2>&1
+  CN0=$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')
+  $GK bench workshop-launch mshop --offline -- true >/tmp/lom.log 2>&1 && bad "an --offline launch with no cached derivation must refuse" || ok "--offline with no cached derivation refused (never derives, fail-closed)"
+  [ "$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')" = "$CN0" ] && ok "the refused --offline launch wrote NO cache entry" || bad "a refused --offline launch mutated the cache"
+
+  echo "--- corrupt index record ⇒ MISS ⇒ re-derive (self-healing) ---"
+  echo 'garbage not a record' > "$CREC"   # clobber the (root-owned) index record with junk
+  $GK bench workshop-launch lshop -- sh -c 'jq --version' >/tmp/lcc.log 2>&1; XRC=$?
+  [ "$XRC" -eq 0 ] && ok "a corrupt index record is a MISS ⇒ launch re-derived (rc0)" || bad "corrupt-index launch failed [rc=$XRC $(tail -2 /tmp/lcc.log|tr '\n' '|')]"
+  grep -q '^SHREK-CACHE 1' "$CREC" && ok "the corrupt record was re-stored valid after the re-derive" || bad "corrupt record not repaired [$(head -1 "$CREC")]"
+
+  echo "--- recorded Id ≠ live image Id ⇒ MISS + evict the stale record ---"
+  # tamper ONLY the recorded image-id (leave the image present) — the HIT check compares live Id vs recorded.
+  sed -i 's/^image-id .*/image-id sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef/' "$CREC"
+  $GK bench workshop-launch lshop --offline -- true >/tmp/lid.log 2>&1 && bad "an Id-mismatched entry must not HIT (offline should refuse)" || ok "Id mismatch ⇒ MISS (offline refused: no valid cached derivation)"
+  [ ! -f "$CREC" ] && ok "the Id-mismatched (stale) index record was EVICTED on the miss (self-healing cleanup)" || ok "stale record still present (cleanup is best-effort)"
+  # a normal online launch now re-derives + re-stores a fresh, self-consistent record.
+  $GK bench workshop-launch lshop -- sh -c 'jq --version' >/tmp/lid2.log 2>&1; RRC=$?
+  { [ "$RRC" -eq 0 ] && [ -f "$CREC" ] && grep -q "^image-id $(bdev podman image inspect "$CIMG" --format '{{.Id}}' 2>/dev/null)$" "$CREC"; } && ok "the online re-derive re-stored a record whose Id matches the live image" || bad "re-store after Id-mismatch wrong [rc=$RRC]"
+
+  echo "--- seed image-Id bump ⇒ key change ⇒ MISS (an OS seed update invalidates cached derivations) ---"
+  # forge a DIFFERENT-Id debian seed (a commit of the real one — same tooling, new Id) and point the launch at
+  # it: the key folds in the seed IMAGE Id, so a bumped seed yields a NEW key ⇒ a NEW cache entry (the old
+  # key's entry is untouched). SHREK_BENCH_SEED_DIR=/nonexistent makes ensure_seed a no-op (debian2 pre-loaded).
+  bdev podman rm -f seedbump >/dev/null 2>&1
+  bdev podman run --name seedbump --network=none --runtime crun localhost/debian true >/dev/null 2>&1
+  bdev podman commit seedbump localhost/debian2 >/dev/null 2>&1
+  bdev podman rm -f seedbump >/dev/null 2>&1
+  CN1=$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')
+  SHREK_BENCH_SEED_IMG_DEBIAN=localhost/debian2 SHREK_BENCH_SEED_DIR=/nonexistent \
+    $GK bench workshop-launch lshop -- sh -c 'jq --version' >/tmp/lsb.log 2>&1; SRC=$?
+  [ "$SRC" -eq 0 ] && ok "a bumped seed Id re-derived (rc0)" || bad "seed-bump launch failed [rc=$SRC $(tail -2 /tmp/lsb.log|tr '\n' '|')]"
+  [ "$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')" -gt "$CN1" ] && ok "the bumped seed produced a NEW cache key (MISS — the old entry did not satisfy it)" || bad "seed-bump reused the old key (seed Id not in the key!)"
+  bdev podman rmi -f localhost/debian2 >/dev/null 2>&1
+
+  echo "--- a different package set ⇒ different key ⇒ its own entry (pkg-change MISS; egress-set unit-proven) ---"
+  # cowsay ≠ jq: a distinct declared apt set keys to a DISTINCT cache entry, never colliding with lshop's.
+  # (An egress-set change also changes the key — see workshop_cache::key_input_distinguishes; it can't be
+  # isolated E2E because apt install REQUIRES the debian-apt profile, so a package proof stands in here.)
+  $GK bench create pbench --seed debian --quota 524288 >/dev/null 2>&1
+  $GK bench network pbench debian-apt >/dev/null 2>&1
+  $GK bench promote pbench --name pshop --apt cowsay >/dev/null 2>&1
+  CN2=$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')
+  # cowsay lands in /usr/games (off the default PATH, like sl) — test it by path so the workload proves the
+  # derive installed it, independent of PATH.
+  $GK bench workshop-launch pshop -- test -x /usr/games/cowsay >/tmp/lpk.log 2>&1; PRC=$?
+  { [ "$PRC" -eq 0 ] && [ "$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')" -gt "$CN2" ]; } && ok "a different package set (cowsay) keyed to its OWN cache entry (no collision with jq's)" || bad "pkg-change did not create a distinct entry [rc=$PRC]"
+
+  echo "--- delete the whole cache dir ⇒ launch STILL succeeds by re-deriving (disposable optimization) ---"
+  rm -rf "$CACHE"
+  [ ! -d "$CACHE" ] && ok "the Tool Shed cache dir was deleted wholesale" || bad "cache dir not deleted"
+  $GK bench workshop-launch lshop -- sh -c 'jq --version' >/tmp/lcd.log 2>&1; DRC=$?
+  [ "$DRC" -eq 0 ] && ok "with the cache gone, launch re-derived from the recipe (rc0 — cache is pure optimization)" || bad "post-delete launch failed [rc=$DRC $(tail -2 /tmp/lcd.log|tr '\n' '|')]"
+  [ "$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')" -ge 1 ] && ok "the re-derive re-created the cache dir + an index record" || bad "cache not re-populated after re-derive"
+
+  echo "--- --refresh forces a re-derive even on a warm cache (explicit cache-bust) ---"
+  $GK bench workshop-launch lshop --refresh -- sh -c 'jq --version' >/tmp/lrf.log 2>&1; FRC=$?
+  { [ "$FRC" -eq 0 ] && [ "$(ls "$CACHE" 2>/dev/null | grep -Ec '^[0-9a-f]{64}$')" -ge 1 ]; } && ok "--refresh re-derived and re-stored the entry (rc0)" || bad "--refresh failed [rc=$FRC $(tail -2 /tmp/lrf.log|tr '\n' '|')]"
+
+  $GK bench destroy mbench >/dev/null 2>&1; $GK bench destroy pbench >/dev/null 2>&1
 
   echo "--- launch of a package-free recipe skips derivation (runs from the seed) ---"
   $GK bench create lbare --seed debian --quota 524288 >/dev/null 2>&1
