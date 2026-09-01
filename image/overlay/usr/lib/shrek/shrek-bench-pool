@@ -29,6 +29,19 @@ POOL=/home/.shrek/benches
 # The pool root must exist ON shrek-data before the self-bind (home.mount has already mounted /home).
 mkdir -p "$POOL"
 
+# SECURITY (record-forgery anchor, mycelium #2982 hole 2): the durable Bench records live at
+# /home/.shrek/records, NOT under $POOL. $POOL is about to be chowned dev:dev 0700 (rootless podman owns
+# its graphroot), so anything INSIDE it has a dev-owned parent that dev could rename aside to substitute
+# forged records. /home/.shrek stays root:root 0755 — dev cannot create an entry in it nor swap the
+# records dir, so only the privileged supervisor (gatekeeperd, running as root) ever writes a record.
+# Assert the anchor's ownership+mode here (load-bearing, not incidental to `mkdir -p`) and pre-create the
+# records dir root-owned; gatekeeperd refines the group to `dev` on first write so `shrek bench list` reads.
+chown root:root /home/.shrek
+chmod 0755 /home/.shrek
+mkdir -p /home/.shrek/records
+chown root:root /home/.shrek/records
+chmod 0755 /home/.shrek/records
+
 # Build the noexec sub-mount: bind the dir onto itself, then remount with the hardening flags. A bare
 # `mount --bind` does NOT carry noexec (the kernel ignores non-bind flags on the initial bind(2)), so the
 # explicit second remount is load-bearing — the same two-step the Bench-0 proof used.

@@ -36,12 +36,21 @@ pub(crate) fn bench_env(_var: &str) -> Option<String> {
     None
 }
 
-/// Default location of the durable Bench records — on the PERSISTENT `/home` plane (not volatile `/run`),
-/// beside the container-storage pool. Overridable for the host/container oracle (no `/home`) via
-/// `SHREK_BENCH_DIR` in the `oracle-env` build only.
+/// Default location of the durable Bench records — on the PERSISTENT `/home` plane (not volatile `/run`).
+///
+/// SECURITY (record-forgery anchor): the records live directly under `/home/.shrek`, which is
+/// `root:root 0755` — NOT under the container-storage pool `/home/.shrek/benches`, which
+/// `shrek-bench-pool.service` chowns to `dev:dev 0700`. If the records dir sat inside that pool, `dev`
+/// would own its PARENT and could `rename(2)` the records dir aside and substitute a forged one —
+/// arbitrary grants/net/exports with no console-consent ceremony, then materialized by a neutral
+/// `bench run`. Rooting them under the root-owned `/home/.shrek` means `dev` can neither create an entry
+/// there nor swap the dir, so a record can only be written by the privileged supervisor. The individual
+/// records stay `root`-owned world-readable (0644) so an unprivileged `shrek bench list` still reads them.
+///
+/// Overridable for the host/container oracle (no `/home`) via `SHREK_BENCH_DIR` in the `oracle-env` build.
 pub fn records_dir() -> PathBuf {
     bench_env("SHREK_BENCH_DIR")
-        .unwrap_or_else(|| "/home/.shrek/benches/records".to_string())
+        .unwrap_or_else(|| "/home/.shrek/records".to_string())
         .into()
 }
 
