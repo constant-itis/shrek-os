@@ -73,8 +73,9 @@ export SHREK_BENCH_POOL=/mnt/pool
 export SHREK_BENCH_DIR=/mnt/records
 export SHREK_BENCH_FS=/mnt/pool
 export SHREK_BENCH_ANCHOR=/home/dev
-export SHREK_BENCH_SEED=localhost/scratch
-export SHREK_BENCH_SEED_TAR=/seed/scratch.tar
+# Per-bench seeds resolve from the sealed catalog (scratch->localhost/scratch, debian->localhost/debian);
+# the oracle only steers the ARCHIVE DIR (staged tars live in /seed here, not the sysext path).
+export SHREK_BENCH_SEED_DIR=/seed
 GK=/gatekeeperd
 
 echo "--- create two benches (distinct auto-allocated project ids) ---"
@@ -178,6 +179,46 @@ echo "--- destroy tears down grants + the /run bench dir ---"
 $GK bench destroy gamma >/dev/null 2>&1
 { [ ! -d /run/shrek/bench/gamma ] && [ ! -f /mnt/records/gamma ]; } && ok "destroy removed grant mounts + /run dir + record" || bad "destroy left residue"
 
+echo "===== APT WORKSHOP: a Debian bench installs over the sealed debian-apt egress profile ====="
+if [ "${WORKSHOP_SEED:-0}" = 1 ] && [ -f /host-seed/debian.tar ]; then
+  # stage the shipped Debian seed as the catalog's debian archive (seed_tar(debian) = $SHREK_BENCH_SEED_DIR/debian.tar).
+  cp /host-seed/debian.tar /seed/debian.tar; chown dev:dev /seed/debian.tar
+  bdev podman load -i /seed/debian.tar >/dev/null 2>&1
+  bdev podman image inspect localhost/debian --format '{{.Id}}' > /seed/debian.tar.digest 2>/dev/null
+  # per-bench seed selection (the structural fix): create a bench ON the debian seed, validated vs the catalog.
+  $GK bench create workshop --seed debian --quota 8192 >/tmp/w1.log 2>&1 && ok "workshop bench created on the debian seed (--seed debian)" || bad "create --seed debian failed [$(tail -1 /tmp/w1.log)]"
+  grep -q '^seed debian' /mnt/records/workshop && ok "the record carries seed=debian (per-bench catalog selection)" || bad "seed not recorded [$(grep '^seed' /mnt/records/workshop 2>/dev/null)]"
+  $GK bench create badseed --seed gentoo >/tmp/wbad.log 2>&1 && bad "an unknown seed must be refused" || ok "unknown seed name refused (sealed catalog, fail-closed)"
+  # the SHIPPED seed's runtime sources are https deb.debian.org only (plain --network=none run, no egress yet).
+  SRC=$($GK bench run workshop -- cat /etc/apt/sources.list.d/debian.sources 2>/tmp/wc.log)
+  { echo "$SRC" | grep -q 'https://deb.debian.org/debian' && ! echo "$SRC" | grep -qi 'security.debian.org'; } && ok "seed sources = https deb.debian.org only (one CDN host, all suites)" || bad "seed sources wrong [$(echo "$SRC" | tr '\n' '|')]"
+  # grant the sealed debian-apt egress profile, then prove the nft allow-list is deb.debian.org:443.
+  $GK bench network workshop debian-apt >/tmp/w2.log 2>&1 && grep -q '^grant net debian-apt' /mnt/records/workshop && ok "debian-apt egress profile recorded" || bad "network debian-apt failed [$(tail -1 /tmp/w2.log)]"
+  # LIVE: apt-get update fetches the index THROUGH the injected veth + sealed nft (deb.debian.org:443 only).
+  # NOTE the late-attach window: run_networked starts the container THEN injects egress, so the workload must
+  # survive the brief no-egress start (a naive one-shot `apt-get update` fails fast and the container exits
+  # before inject, tripping the netns-drift guard). Retry-until-egress keeps PID1 alive across the window —
+  # a real workshop UX fix (holder+exec = egress-before-workload) is a follow-up on the proven step-5 path.
+  # The run is DETACHED, so the workload's stdout is in the container log, not this file — assert on the EXIT
+  # CODE (the retry-until returns 0 ONLY once apt-get update actually succeeds) + a host-visible side effect.
+  UNTIL='i=0; until apt-get update; do i=$((i+1)); [ $i -ge 25 ] && exit 3; sleep 1; done'
+  $GK bench run workshop -- sh -c "$UNTIL" >/tmp/w3.log 2>&1; U=$?
+  [ "$U" -eq 0 ] && ok "apt-get update reached deb.debian.org through the sealed egress (rc0)" || bad "apt-get update failed [rc=$U $(tail -2 /tmp/w3.log | tr '\n' '|')]"
+  # end-to-end install of a tiny package — exits 0 only if sl actually installed (sl lands in /usr/games).
+  $GK bench run workshop -- sh -c "$UNTIL; apt-get install -y --no-install-recommends sl && test -x /usr/games/sl" >/tmp/w4.log 2>&1; I=$?
+  [ "$I" -eq 0 ] && ok "apt-get install sl succeeded inside the bench (the apt workshop works)" || bad "apt install failed [rc=$I $(tail -3 /tmp/w4.log | tr '\n' '|')]"
+  # NEGATIVE: with egress UP, a host NOT in debian-apt (apt changelog -> metadata.ftp-master.debian.org)
+  # still fails closed — the allow-list is exactly deb.debian.org, nothing else.
+  $GK bench run workshop -- sh -c "$UNTIL; apt-get changelog sl" >/tmp/w5.log 2>&1; C=$?
+  [ "$C" -ne 0 ] && ok "a host outside debian-apt (apt changelog) is refused (deny-by-default holds)" || bad "changelog reached an unlisted host — egress too broad"
+  # host stays SEALED: the package landed in the bench's ephemeral layer, never on the host.
+  [ ! -e /usr/games/sl ] && ok "the host stayed sealed (sl installed in the bench, not on the host)" || bad "sl leaked onto the host"
+  $GK bench destroy workshop >/dev/null 2>&1
+  [ ! -f /mnt/records/workshop ] && ok "workshop destroy removed the record" || bad "destroy left residue"
+else
+  echo "  SKIP APT WORKSHOP: no Debian seed mounted (build it: scripts/build-workshop-seed.sh)"
+fi
+
 echo "===== STEP 6: the offline-seed product loader (ensure_seed, digest-keyed) ====="
 echo "--- ensure_seed re-loads the seed from the sysext archive when the image is absent ---"
 bdev podman rmi -f localhost/scratch >/dev/null 2>&1
@@ -222,10 +263,12 @@ if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
   # Use the ACTUAL shipped Scratch seed (alpine+coreutils+ffmpeg+exit42), not a stand-in — this is the real
   # product ffmpeg doing a real transcode via REAL rootless podman (the run path gatekeeperd drives as dev).
   # The step-6 gotcha was a ROOT podman-in-docker nested-cgroup artifact; the rootless path is the real one.
-  cp /host-seed/scratch.tar /seed/scratch-media.tar; chown dev:dev /seed/scratch-media.tar
+  # Overwrite the staged scratch archive with the REAL ffmpeg seed (seed_tar(scratch) = $SHREK_BENCH_SEED_DIR
+  # /scratch.tar now — the per-invocation tar override is gone), so ensure_seed re-loads the real seed.
+  cp /host-seed/scratch.tar /seed/scratch.tar; chown dev:dev /seed/scratch.tar
   bdev podman rmi -f localhost/scratch >/dev/null 2>&1     # drop the busybox stand-in from steps 1-7
-  bdev podman load -i /seed/scratch-media.tar >/dev/null 2>&1   # load the real seed to fabricate the input
-  bdev podman image inspect localhost/scratch --format '{{.Id}}' > /seed/scratch-media.tar.digest 2>/dev/null
+  bdev podman load -i /seed/scratch.tar >/dev/null 2>&1   # load the real seed to fabricate the input
+  bdev podman image inspect localhost/scratch --format '{{.Id}}' > /seed/scratch.tar.digest 2>/dev/null
   mkdir -p /home/dev/m_in /home/dev/m_out; chown -R dev:dev /home/dev/m_in /home/dev/m_out
   # fabricate a real input video OFFLINE (testsrc -> mpeg4, a built-in encoder), owned by dev.
   bdev podman run --rm --network=none --no-hosts --runtime crun -v /home/dev/m_in:/o localhost/scratch \
@@ -233,8 +276,6 @@ if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
   { [ -s /home/dev/m_in/clip.mp4 ] && [ "$(stat -c %u /home/dev/m_in/clip.mp4)" = 1000 ]; } && ok "offline input video fixture created ($(stat -c %s /home/dev/m_in/clip.mp4) bytes, dev-owned)" || bad "input fixture failed [$(tail -2 /tmp/m0.log|tr '\n' '|')]"
   # drop the image so the bench run's ensure_seed must RE-LOAD the real seed from the archive (product path).
   bdev podman rmi -f localhost/scratch >/dev/null 2>&1
-  export SHREK_BENCH_SEED=localhost/scratch
-  export SHREK_BENCH_SEED_TAR=/seed/scratch-media.tar
   # the interaction model: create a media bench, grant ONLY input (ro) + dest (rw), transcode inside it.
   $GK bench create media --quota 8192 >/tmp/m1.log 2>&1 && ok "media bench created" || bad "create failed [$(tail -1 /tmp/m1.log)]"
   $GK bench grant media /home/dev/m_in  --ro >/tmp/m2.log 2>&1 && ok "input dir granted --ro" || bad "grant ro failed [$(tail -1 /tmp/m2.log)]"
@@ -254,7 +295,6 @@ if [ "${MEDIA_SEED:-0}" = 1 ] && [ -f /host-seed/scratch.tar ]; then
   # destroy removes ALL the bench's tooling + mutable state, but the delivered output PERSISTS on the host.
   $GK bench destroy media >/dev/null 2>&1
   { [ ! -f /mnt/records/media ] && [ ! -d /mnt/pool/b/media ] && [ ! -d /run/shrek/bench/media ] && [ -s "$OUT" ]; } && ok "destroy removed the bench (record+data+/run) yet kept the transcoded output" || bad "destroy left residue or lost the output"
-  unset SHREK_BENCH_SEED SHREK_BENCH_SEED_TAR
 else
   echo "  SKIP STEP 8: no shipped Scratch seed mounted (build it: scripts/build-bench-seed.sh) — the sealed-VM dogfood proves the media north-star with the baked seed"
 fi
@@ -267,7 +307,7 @@ bdev podman tag docker.io/library/busybox:latest localhost/scratch >/dev/null 2>
 SHREK=/shrek; SBR=/shrek-bench-run   # the real clients, mounted into the container by the outer harness
 SHREK_BROKER_NOMOUNT=1 \
   SHREK_BENCH_POOL=/mnt/pool SHREK_BENCH_DIR=/mnt/records SHREK_BENCH_FS=/mnt/pool \
-  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED=localhost/scratch SHREK_BENCH_SEED_TAR=/seed/scratch.tar \
+  SHREK_BENCH_ANCHOR=/home/dev SHREK_BENCH_SEED_DIR=/seed \
   "$GK" >/tmp/gkd.log 2>&1 &
 GKD=$!
 GKSOCK=/run/shrek-gk.sock
@@ -356,5 +396,16 @@ if [ -f "$SEED_TAR" ]; then
 else
   DOCKER_ARGS+=(-e MEDIA_SEED=0)
   echo "  (media north-star: no shipped seed built — step 8 will SKIP in the oracle; build with scripts/build-bench-seed.sh)"
+fi
+# The Debian WORKSHOP seed (glibc + apt over the debian-apt egress profile) — a gitignored build product
+# (scripts/build-workshop-seed.sh). Mount it for the LIVE apt-over-sealed-egress proof; else the inner
+# script SKIPs it loudly (the sealed VM is endpoint-free, so the live apt fetch is the oracle's job).
+WORKSHOP_TAR="$(pwd)/layers/shrek-bench/overlay/usr/share/shrek/bench/seeds/debian.tar"
+if [ -f "$WORKSHOP_TAR" ]; then
+  DOCKER_ARGS+=(-v "$WORKSHOP_TAR":/host-seed/debian.tar:ro -e WORKSHOP_SEED=1)
+  echo "  (apt workshop: mounting the Debian seed $(du -h "$WORKSHOP_TAR" | cut -f1))"
+else
+  DOCKER_ARGS+=(-e WORKSHOP_SEED=0)
+  echo "  (apt workshop: no Debian seed built — the workshop section will SKIP; build with scripts/build-workshop-seed.sh)"
 fi
 docker run "${DOCKER_ARGS[@]}" debian:trixie bash /inner.sh

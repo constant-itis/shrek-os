@@ -492,6 +492,21 @@ if grep -qa 'SHREK-DOGFOOD BENCH ' "$LOG" && ! grep -qa 'BENCH podman=MISSING' "
       else bad "bench-media — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-MEDIA ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-MEDIA //')]"; fi
     done
   fi
+  # Bench WORKSHOP (apt seed): the Debian workshop seed bakes + loads + per-bench selection, OFFLINE (the live
+  # apt-over-egress fetch is the host oracle's job). Scored only if the debian.tar was baked into the sysext.
+  if grep -qa 'SHREK-DOGFOOD BENCH-WORKSHOP seed-recorded' "$LOG"; then
+    for pair in \
+      "seed-recorded=ok|create --seed debian records the per-bench seed (sealed-catalog selection)" \
+      "unknown-seed-refused=ok|an unknown seed name is refused up front (fail-closed, like an egress profile)" \
+      "seed-loaded=ok|ensure_seed loads localhost/debian from the baked debian.tar on a plain run" \
+      "seed-apt-ready=ok|the shipped seed's runtime apt sources are https deb.debian.org only (one CDN host)"; do
+      tok=${pair%%|*}; desc=${pair#*|}
+      if grep -qa "SHREK-DOGFOOD BENCH-WORKSHOP ${tok}" "$LOG"; then ok "bench-workshop — ${desc}"
+      else bad "bench-workshop — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-WORKSHOP ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-WORKSHOP //')]"; fi
+    done
+  elif grep -qa 'SHREK-DOGFOOD BENCH-WORKSHOP seed=absent' "$LOG"; then
+    echo "  (bench-workshop skipped — debian.tar not baked into this store)"
+  fi
 elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  (bench proof skipped — shrek-bench sysext not in this store)"
 fi

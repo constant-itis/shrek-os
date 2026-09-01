@@ -856,6 +856,24 @@ if command -v podman >/dev/null 2>&1; then
         # destroy removes the bench (record + data + /run) but the delivered output PERSISTS on the host.
         "$GKB" bench destroy media >/dev/null 2>&1
         { [ ! -f "$BRECS/media" ] && [ ! -d "$BPOOL/b/media" ] && [ ! -d /run/shrek/bench/media ] && [ -s "$MOUT" ]; } && say "BENCH-MEDIA destroy-keeps-output=ok" || say "BENCH-MEDIA destroy-keeps-output=FAIL"
+
+        # --- Bench WORKSHOP (apt seed): the Debian workshop seed BAKES + LOADS + per-bench selection works,
+        # all OFFLINE. The live apt-over-egress fetch is the host oracle's job (this VM is endpoint-free); what
+        # only the sealed image proves is that the SHIPPED debian.tar is apt-ready — `create --seed debian`
+        # records the seed, ensure_seed loads localhost/debian from the baked archive on a plain run, and the
+        # seed's runtime sources are https deb.debian.org (one CDN host). An unknown seed is refused up front.
+        if [ -f "$BSEED/debian.tar" ]; then
+            "$GKB" bench create workshop --seed debian --quota 8192 >/tmp/bw1.log 2>&1
+            grep -q '^seed debian' "$BRECS/workshop" 2>/dev/null && say "BENCH-WORKSHOP seed-recorded=ok" || say "BENCH-WORKSHOP seed-recorded=FAIL [$(grep '^seed' "$BRECS/workshop" 2>/dev/null)]"
+            if "$GKB" bench create wbad --seed gentoo >/dev/null 2>&1; then say "BENCH-WORKSHOP unknown-seed-refused=FAIL accepted"; else say "BENCH-WORKSHOP unknown-seed-refused=ok"; fi
+            # plain (--network=none) run: ensure_seed loads the baked debian.tar; cat the runtime sources.
+            WSRC=$("$GKB" bench run workshop -- cat /etc/apt/sources.list.d/debian.sources 2>/tmp/bw2.log)
+            bdev podman image exists localhost/debian && say "BENCH-WORKSHOP seed-loaded=ok" || say "BENCH-WORKSHOP seed-loaded=FAIL (ensure_seed did not load debian.tar)"
+            { echo "$WSRC" | grep -q 'https://deb.debian.org/debian' && ! echo "$WSRC" | grep -qi 'security.debian.org'; } && say "BENCH-WORKSHOP seed-apt-ready=ok" || say "BENCH-WORKSHOP seed-apt-ready=FAIL [$(echo "$WSRC" | tr '\n' '|' | tail -c 120)]"
+            "$GKB" bench destroy workshop >/dev/null 2>&1
+        else
+            say "BENCH-WORKSHOP seed=absent (debian.tar not baked into the shrek-bench sysext)"
+        fi
     else
         say "BENCH-SUP gatekeeperd=MISSING (not at $GKB)"
     fi
