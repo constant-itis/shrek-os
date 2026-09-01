@@ -484,5 +484,25 @@ elif grep -qa 'BENCH podman=MISSING' "$LOG"; then
   echo "  (bench proof skipped — shrek-bench sysext not in this store)"
 fi
 
+# --- Bench-authz step 3: console consent ceremony (BENCH-CONSENT) — scored ONLY if the marker-gated
+# consent stage ran. A plain dogfood run seeds no /home/.shrek-consent-dogfood marker, so the persist probe
+# never invokes dogfood-consent-probe and NO BENCH-CONSENT lines appear -> this whole block is skipped with
+# zero new FAIL. The full driven proof (real SAK chord + typed answers + scanout OCR) is
+# scripts/bench-consent-vm-proof.sh; this is only a courtesy score if the lines happen to be present.
+if grep -qa 'SHREK-DOGFOOD BENCH-CONSENT begin' "$LOG"; then
+  for pair in \
+    "approve=ok|read-only grant: real SAK chord + typed y APPLIES" \
+    "code-approve=ok|read-write grant: the 6-digit confirmation code APPLIES" \
+    "deny-n=ok|a non-affirmative answer DENIES with no record change" \
+    "swap-refused=ok|a same-name diff-inode swap after render is refused at apply" \
+    "vt-restored=ok|the previously-active VT is restored after the ceremony" \
+    "compositor-alive=ok|the compositor + seat0 session survived the ceremony"; do
+    tok=${pair%%|*}; desc=${pair#*|}
+    if grep -qa "SHREK-DOGFOOD BENCH-CONSENT ${tok}" "$LOG"; then ok "consent — ${desc}"
+    elif grep -qa "SHREK-DOGFOOD BENCH-CONSENT ${tok%%=*}=SKIP" "$LOG"; then echo "  (consent ${tok%%=*} skipped — SAK delivery failed; see bench-consent-vm-proof.sh)"
+    else bad "consent — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-CONSENT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-CONSENT //')]"; fi
+  done
+fi
+
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== Dogfood-0 M1+M2+M3: GREEN ===" || { echo "=== Dogfood-0: NOT GREEN — inspect $LOG ==="; exit 1; }

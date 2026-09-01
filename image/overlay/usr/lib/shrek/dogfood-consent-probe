@@ -1,0 +1,446 @@
+#!/bin/sh
+# dogfood-consent-probe — the sealed-VM BENCH-CONSENT stage (docs/bench-authz-consent-slice.md, step 3).
+#
+# This is the in-guest ORACLE + CUE EMITTER for the console consent ceremony (crates/gatekeeperd/src/
+# consent.rs::RealConsole). The ceremony is the ONE part of the bench-authz slice that unit tests and the
+# headless host oracle CANNOT reach: it needs a real logind seat (SecureAttentionKey), a real kernel VT
+# handoff away from the live compositor, and a real typed answer. This probe drives that path on a booted
+# sealed image and scores it.
+#
+# CHOREOGRAPHY (Fable pre-build review, mycelium "Fable consent dogfood review"):
+#   * We are the GUEST oracle. We launch an authority-increasing `shrek bench` request AS DEV over the
+#     real gatekeeperd socket (SO_PEERCRED=dev -> run_socket_consent, NOT the root in-process cli() which
+#     bypasses the ceremony). That client call BLOCKS in the serial broker for the whole ceremony.
+#   * scripts/bench-consent-vm-proof.sh is the HOST executor. It cannot see guest state, so we tell it what
+#     to do over the serial console with `SHREK-DOGFOOD CONSENT-CUE ...` lines; it replies with QEMU
+#     monitor `sendkey`/`screendump`. We NEVER inject the SAK signal at the D-Bus boundary (arm_sak's
+#     sender-pinned match filters a forged signal by the very defense under test) — the host drives the
+#     REAL chord (Ctrl+Alt+Shift+Esc) through the virtio-keyboard -> guest evdev -> logind.
+#   * TWO evidence channels for the "a human saw it" property (never vcs8 alone — a failed DRM handoff is
+#     consent-to-a-desktop-screenshot): (a) we read /dev/vcs8 (the tty8 char buffer) for the render barrier
+#     AND the confirmation code; (b) we cue the host to `screendump` the live SCANOUT mid-ceremony for OCR.
+#
+# MARKER-GATED: only runs when /home/.shrek-consent-dogfood exists (seeded on the data disk by
+# bench-consent-vm-proof.sh). A plain dogfood-vm.sh run has no marker, so the persist probe never invokes
+# us and the BENCH-CONSENT scoring section stays silent (no new FAIL). An undriven interactive stage would
+# otherwise burn 60s SAK-arm timeouts and arm per-(uid,verb) cooldowns on a normal run.
+#
+# STILL HEADLESS after this (NOT proven here — see the honest-scope block in the proof script + doc):
+# no-seat fail-closed (green in bench-plane-proof.sh), VT-switch-deadline against an uncooperative
+# compositor, render-fail, PID-reuse microsecond TOCTOU, daemon-restart-mid-ceremony. This harness proves
+# detection ALONGSIDE A HEALTHY compositor only; it does NOT claim a hijacked compositor cannot suppress
+# the chord.
+#
+# set +e for the whole body: every leg must emit its verdict regardless of individual failures.
+set -u
+
+CONSENT_VT=8
+BPOOL=/home/.shrek/benches                 # daemon default records dir root (records/<bench>)
+ANCHOR=/home/dev                           # bench fs-grant anchor (default)
+RT=/run/user/1000
+GKSOCK=/run/shrek-gk.sock
+WORK=/run/shrek-consent
+SAK_BROKEN=0                               # set once the first ceremony returns ceremony-no-sak
+
+say() { echo "SHREK-DOGFOOD $*"; }         # verdicts the proof script greps (BENCH-CONSENT ...)
+cue() { echo "SHREK-DOGFOOD CONSENT-CUE $*"; }  # commands to the host executor
+vcs() { cat "/dev/vcs${CONSENT_VT}" 2>/dev/null | tr -d '\000'; }   # tty8 glyph buffer (flat, no newlines)
+active_vt() { tr -d '\n' < /sys/class/tty/tty0/active 2>/dev/null; }
+rec_file() { echo "$BPOOL/records/$1"; }
+
+# dev socket client (mirrors bench-plane-proof.sh sdev): connects with dev's SO_PEERCRED so grant/network/
+# export route through run_socket_consent. shrek reads SHREK_BROKER_SOCK (defaults to GKSOCK anyway).
+sdev() { runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" SHREK_BROKER_SOCK="$GKSOCK" PATH=/usr/bin:/bin "$@"; }
+
+mkdir -p "$WORK"
+
+say "BENCH-CONSENT begin probe=dogfood-consent-probe vt=$CONSENT_VT"
+
+# ---- preconditions -----------------------------------------------------------------------------------
+if [ ! -x /usr/bin/shrek ]; then say "BENCH-CONSENT precondition=FAIL reason=no-shrek-client"; exit 0; fi
+if [ ! -S "$GKSOCK" ]; then
+    # daemon may still be coming up; wait briefly.
+    w=0; while [ "$w" -lt 30 ]; do [ -S "$GKSOCK" ] && break; sleep 1; w=$((w + 1)); done
+fi
+[ -S "$GKSOCK" ] && say "BENCH-CONSENT daemon=ok sock=$GKSOCK" || { say "BENCH-CONSENT daemon=FAIL sock-absent"; exit 0; }
+
+# The ceremony needs the compositor to own seat0 (so the VT_ACTIVATE away from it triggers the DRM/input
+# handoff). Wait for an active graphical session on seat0.
+gs=0
+while [ "$gs" -lt 90 ]; do
+    as=$(loginctl show-seat seat0 -p ActiveSession --value 2>/dev/null)
+    if [ -n "$as" ]; then
+        ty=$(loginctl show-session "$as" -p Type --value 2>/dev/null)
+        st=$(loginctl show-session "$as" -p State --value 2>/dev/null)
+        case "$ty" in wayland|x11|mir) [ "$st" = active ] && break ;; esac
+    fi
+    [ $((gs % 20)) -eq 0 ] && say "BENCH-CONSENT seat-wait t=${gs}s active-session=[${as:-none}] type=[${ty:-?}] state=[${st:-?}]"
+    sleep 1; gs=$((gs + 1))
+done
+PRE_VT="$(active_vt)"
+say "BENCH-CONSENT seat0-active-session=[${as:-none}] type=[${ty:-?}] pre-ceremony-vt=[${PRE_VT:-?}] after=${gs}s"
+# Record the compositor pid (for compositor-alive at the end). DMS/sway on the autologin session.
+COMP_PID=$(pgrep -x sway 2>/dev/null | head -1)
+[ -z "$COMP_PID" ] && COMP_PID=$(pgrep -x niri 2>/dev/null | head -1)
+[ -z "$COMP_PID" ] && COMP_PID=$(pgrep -f 'dms|quickshell' 2>/dev/null | head -1)
+say "BENCH-CONSENT compositor-pid=[${COMP_PID:-none}]"
+
+# ---- static / content-independent legs (run regardless of SAK delivery) ------------------------------
+# no-getty: CONSENT_VT=8 > logind NAutoVTs(6), so no autovt@ getty spawns on top of the consent screen.
+gy=$(systemctl is-active "getty@tty${CONSENT_VT}.service" 2>/dev/null || echo inactive)
+gp=$(pgrep -af "agetty.*tty${CONSENT_VT}\b" 2>/dev/null | grep -v pgrep | head -1)
+if [ "$gy" != active ] && [ -z "$gp" ]; then say "BENCH-CONSENT no-getty=ok tty${CONSENT_VT}-getty=$gy"
+else say "BENCH-CONSENT no-getty=FAIL tty${CONSENT_VT}-getty=$gy proc=[$gp]"; fi
+
+# agent-blind-vcs: a sandboxed agent in dev's session must NOT be able to read the consent screen buffer
+# (that would let it auto-answer). dev opening /dev/vcs8 must fail (root:tty perms).
+if sdev sh -c "cat /dev/vcs${CONSENT_VT} >/dev/null 2>&1"; then
+    say "BENCH-CONSENT agent-blind-vcs=FAIL dev-could-read-/dev/vcs${CONSENT_VT}"
+else
+    say "BENCH-CONSENT agent-blind-vcs=ok dev-cannot-read-/dev/vcs${CONSENT_VT}"
+fi
+
+# ---- ceremony primitives -----------------------------------------------------------------------------
+# Prepare a dev-owned grant dir strictly beneath the anchor for a grant leg. $1 = leaf name.
+mk_grant_dir() { rm -rf "$ANCHOR/$1"; mkdir -p "$ANCHOR/$1"; chown -R dev:dev "$ANCHOR/$1"; echo "$ANCHOR/$1"; }
+
+# Create a bench (ceremony-free) as dev over the socket.
+mk_bench() { sdev shrek bench create "$1" --quota 4096 >"$WORK/create.$1" 2>&1; }
+
+# Launch a dev ceremony client in the background; $CLIENT_PID is the launcher pid, RESULT lands in
+# $CLIENT_OUT once the ceremony completes. Args after the leg name are the `shrek bench` argv.
+CLIENT_PID=""; CLIENT_OUT=""
+launch_client() {
+    _leg="$1"; shift
+    CLIENT_OUT="$WORK/out.$_leg"; : > "$CLIENT_OUT"
+    sdev shrek "$@" >"$CLIENT_OUT" 2>&1 &
+    CLIENT_PID=$!
+}
+
+# Drive to the render barrier: cue the host to chord until tty8 is active, confirm the rendered prompt in
+# /dev/vcs8, cue a mid-ceremony scanout screendump, and (if present) capture the confirmation code.
+# Sets: VT_REACHED(0/1) RENDERED(0/1) PROMPT_CODE(digits or empty). Emits stop-chord on exit.
+VT_REACHED=0; RENDERED=0; PROMPT_CODE=""
+drive_to_prompt() {
+    _leg="$1"
+    VT_REACHED=0; RENDERED=0; PROMPT_CODE=""
+    # Wipe the reserved VT's buffer FIRST so the render barrier below cannot match STALE content left by a
+    # previous ceremony: restore() cannot VT_DISALLOCATE tty8 while the daemon still holds its fd, so the
+    # prior screen — which carries the SAME "AUTHORITY CHANGE REQUEST" header and its own confirmation code —
+    # lingers. Without this, the barrier fires on the old screen and we read the wrong code / miss the
+    # trifecta warning. tty8 is a background VT here; the ceremony's own render clears+redraws after it flips.
+    printf '\033[2J\033[H' > "/dev/tty${CONSENT_VT}" 2>/dev/null || true
+    cue "chord leg=$_leg"
+    # SAK-arm window is 60s; the host re-chords ~every 2s. Poll the foreground VT up to ~62s.
+    t=0
+    while [ "$t" -lt 620 ]; do
+        [ "$(active_vt)" = "tty${CONSENT_VT}" ] && { VT_REACHED=1; break; }
+        # If the client already exited (e.g. arm timed out / precheck), stop waiting.
+        kill -0 "$CLIENT_PID" 2>/dev/null || break
+        sleep 0.1; t=$((t + 1))
+    done
+    cue "stop-chord leg=$_leg"
+    if [ "$VT_REACHED" -ne 1 ]; then return 1; fi
+    # Render barrier: the ceremony writes "AUTHORITY CHANGE REQUEST" to tty8 before read_answer.
+    r=0
+    while [ "$r" -lt 80 ]; do
+        _b="$(vcs)"
+        case "$_b" in *"AUTHORITY CHANGE REQUEST"*) RENDERED=1; break ;; esac
+        sleep 0.1; r=$((r + 1))
+    done
+    # Scanout proof: cue the host to screendump the live display WHILE tty8 is scanned out.
+    cue "shot leg=$_leg name=consent-$_leg"
+    # High-authority verbs render a 6-digit code after "Enter:"; grab it for the answer.
+    PROMPT_CODE="$(vcs | grep -oE 'Enter:[ ]+[0-9]{6}' | grep -oE '[0-9]{6}' | head -1)"
+    return 0
+}
+
+# Send an answer via the host and wait for the client to finish; RESULT_LINE is the wire result.
+RESULT_LINE=""
+answer_and_collect() {
+    _leg="$1"; _keys="$2"      # _keys empty => send nothing (drive an answer timeout)
+    sleep 0.5                  # barrier + 500ms: read_answer has run tcflush and is polling
+    [ -n "$_keys" ] && cue "answer leg=$_leg keys=$_keys"
+    wait "$CLIENT_PID" 2>/dev/null
+    # The shrek client reprints the daemon's result WITHOUT the leading "RESULT " tag, so match the body.
+    RESULT_LINE="$(grep -aE 'bench-[a-z]+ ' "$CLIENT_OUT" 2>/dev/null | tail -1 | tr -d '\r')"
+    [ -z "$RESULT_LINE" ] && RESULT_LINE="$(tr -d '\r' <"$CLIENT_OUT" 2>/dev/null | grep -a . | tail -1)"
+    [ -z "$RESULT_LINE" ] && RESULT_LINE="[no-output]"
+}
+
+# After a ceremony, the previously-active VT must be restored.
+assert_vt_restored() {
+    _leg="$1"; av="$(active_vt)"
+    if [ "$av" = "$PRE_VT" ]; then say "BENCH-CONSENT vt-restored=ok leg=$_leg vt=$av"
+    else say "BENCH-CONSENT vt-restored=FAIL leg=$_leg vt=[$av] expected=[$PRE_VT]"; fi
+}
+
+# ---- LEG: approve (read-only grant, bare y) — the primary happy path + SAK-delivery probe -------------
+# This runs FIRST; if SAK never delivers, we short-circuit the other interactive legs so a broken run
+# returns fast (~1 min) instead of burning ~9x60s arm timeouts.
+B=cappr; GD="$(mk_grant_dir cappr_g)"; mk_bench "$B"
+launch_client approve bench grant "$B" "$GD" --ro
+if drive_to_prompt approve; then
+    [ "$RENDERED" -eq 1 ] && say "BENCH-CONSENT vcs-render=ok leg=approve buf-has-request" \
+                          || say "BENCH-CONSENT vcs-render=FAIL leg=approve no-request-in-vcs${CONSENT_VT}"
+    answer_and_collect approve "y,ret"
+    if echo "$RESULT_LINE" | grep -q "bench-grant $B ok" && grep -q '^grant fs-ro ' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT approve=ok result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT approve=FAIL result=[$RESULT_LINE] rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)]"
+    fi
+    assert_vt_restored approve
+else
+    # No VT flip => arm_sak did not deliver (or client died at precheck). Classify from the client output.
+    answer_and_collect approve ""     # reap the client
+    if echo "$RESULT_LINE" | grep -q 'ceremony-no-sak'; then
+        SAK_BROKEN=1
+        say "BENCH-CONSENT sak-delivery=FAIL result=[$RESULT_LINE] — SAK chord did not reach logind or logind emitted no signal; short-circuiting the interactive legs"
+        say "BENCH-CONSENT approve=FAIL reason=no-sak result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT approve=FAIL reason=no-vt result=[$RESULT_LINE]"
+    fi
+fi
+
+# ---- guard: skip the remaining interactive legs if SAK never delivered -------------------------------
+skip_if_broken() {
+    if [ "$SAK_BROKEN" -eq 1 ]; then
+        for _l in code-approve export-approve trifecta-warn deny-n cooldown answer-timeout swap-refused forged-sak disconnect; do
+            say "BENCH-CONSENT $_l=SKIP reason=no-sak"
+        done
+        return 0
+    fi
+    return 1
+}
+
+if ! skip_if_broken; then
+
+# ---- LEG: code-approve (read-WRITE grant => 6-digit confirmation code) --------------------------------
+B=ccode; GD="$(mk_grant_dir ccode_g)"; mk_bench "$B"
+launch_client code-approve bench grant "$B" "$GD" --rw
+if drive_to_prompt code-approve && [ -n "$PROMPT_CODE" ]; then
+    _keys="$(echo "$PROMPT_CODE" | sed 's/./&,/g')ret"   # 4,2,4,2,4,2,ret
+    answer_and_collect code-approve "$_keys"
+    if echo "$RESULT_LINE" | grep -q "bench-grant $B ok" && grep -q '^grant fs-rw ' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT code-approve=ok code=$PROMPT_CODE result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT code-approve=FAIL code=$PROMPT_CODE result=[$RESULT_LINE]"
+    fi
+    assert_vt_restored code-approve
+else
+    answer_and_collect code-approve ""
+    say "BENCH-CONSENT code-approve=FAIL no-code-in-render code=[$PROMPT_CODE] result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: export-approve (high-authority; commits via write_desktop_as_dev => runuser => CAP_SETUID) ---
+# Fable flagged that grant/create never drop to the dev uid, so the earlier cap set silently omitted
+# CAP_SETUID/SETGID and the harness would not have noticed. An APPROVED export runs commit_export ->
+# write_desktop_as_dev (runuser -u dev) AFTER the human OK — this leg proves that path works on the sealed
+# image (it EPERMs post-approval if SETUID/SETGID are missing). Runs BEFORE deny-n so the export cooldown
+# deny-n arms cannot block it.
+B=cxexp; mk_bench "$B"
+launch_client export-approve bench export "$B" xk --label "Export Key" -- true
+if drive_to_prompt export-approve && [ -n "$PROMPT_CODE" ]; then
+    _keys="$(echo "$PROMPT_CODE" | sed 's/./&,/g')ret"
+    answer_and_collect export-approve "$_keys"
+    if echo "$RESULT_LINE" | grep -q "bench-export $B ok" && grep -q '^export xk ' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT export-approve=ok code=$PROMPT_CODE result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT export-approve=FAIL code=$PROMPT_CODE result=[$RESULT_LINE] rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)]"
+    fi
+    assert_vt_restored export-approve
+else
+    answer_and_collect export-approve ""
+    say "BENCH-CONSENT export-approve=FAIL no-code result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: trifecta-warn (fs grant already present + attach egress => lethal-trifecta warning) ---------
+# Two ceremonies: approve an fs grant, then approve a network profile whose render must carry the WARNING.
+B=ctri; GD="$(mk_grant_dir ctri_g)"; mk_bench "$B"
+launch_client trifecta-pre bench grant "$B" "$GD" --ro
+if drive_to_prompt trifecta-pre; then answer_and_collect trifecta-pre "y,ret"; fi
+tri_pre_ok=0; echo "$RESULT_LINE" | grep -q "bench-grant $B ok" && tri_pre_ok=1
+# now the network attach — its render should warn (fs + net composed)
+launch_client trifecta-warn bench network "$B" github-https
+if drive_to_prompt trifecta-warn; then
+    _buf="$(vcs)"
+    _warn=0; case "$_buf" in *"WARNING"*"data could leave this box"*) _warn=1 ;; *"WARNING"*) _warn=1 ;; esac
+    answer_and_collect trifecta-warn "y,ret"
+    if [ "$tri_pre_ok" -eq 1 ] && [ "$_warn" -eq 1 ] && echo "$RESULT_LINE" | grep -q "bench-network $B ok"; then
+        say "BENCH-CONSENT trifecta-warn=ok warning-rendered result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT trifecta-warn=FAIL pre-ok=$tri_pre_ok warn=$_warn result=[$RESULT_LINE]"
+        # diagnose warn=0: dump what actually rendered on the VT (is the WARNING text there or not?).
+        say "BENCH-CONSENT dbg trifecta-rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)] buf=[$(printf '%s' "$_buf" | tr -d '\000' | tr -s ' ' | cut -c1-360)]"
+    fi
+    assert_vt_restored trifecta-warn
+else
+    answer_and_collect trifecta-warn ""
+    say "BENCH-CONSENT trifecta-warn=FAIL no-prompt result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: deny-n (export family; answer NOT the code => Declined, nothing recorded) -------------------
+# Spread deny legs across verb families (cooldown is per (uid,verb), uid always dev): export here.
+B=cden; mk_bench "$B"
+launch_client deny-n bench export "$B" dk --label "Deny Key" -- true
+if drive_to_prompt deny-n; then
+    answer_and_collect deny-n "n,ret"     # export is high-authority; 'n' != code => Declined
+    if echo "$RESULT_LINE" | grep -q 'refused ceremony-declined' && ! grep -q '^export ' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT deny-n=ok result=[$RESULT_LINE] no-export-recorded"
+    else
+        say "BENCH-CONSENT deny-n=FAIL result=[$RESULT_LINE] rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)]"
+    fi
+    assert_vt_restored deny-n
+else
+    answer_and_collect deny-n ""
+    say "BENCH-CONSENT deny-n=FAIL no-prompt result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: cooldown (a repeat export request from dev, inside the post-deny window, is rate-limited) ----
+# Must run immediately after deny-n (10s base cooldown for (dev,export)). No ceremony => no chord.
+CX="$(sdev shrek bench export "$B" dk2 --label x -- true 2>&1 | tr -d '\r')"
+if echo "$CX" | grep -q 'refused cooldown'; then say "BENCH-CONSENT cooldown=ok result=[$CX]"
+else say "BENCH-CONSENT cooldown=FAIL result=[$CX]"; fi
+
+# ---- LEG: answer-timeout (network family; drive to the prompt then send NOTHING => ceremony-timeout) ---
+B=ctmo; mk_bench "$B"
+launch_client answer-timeout bench network "$B" github-https
+if drive_to_prompt answer-timeout; then
+    answer_and_collect answer-timeout ""   # no keys: the 45s ANSWER_TIMEOUT must fire
+    if echo "$RESULT_LINE" | grep -q 'refused ceremony-timeout' && ! grep -q '^grant net ' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT answer-timeout=ok result=[$RESULT_LINE]"
+    else
+        say "BENCH-CONSENT answer-timeout=FAIL result=[$RESULT_LINE]"
+    fi
+    assert_vt_restored answer-timeout
+else
+    answer_and_collect answer-timeout ""
+    say "BENCH-CONSENT answer-timeout=FAIL no-prompt result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: swap-refused (grant family; same-name diff-inode swap after render => apply-time identity refuse)
+# commit_grant re-pins beneath the anchor (openat2 NO_SYMLINKS) and requires the SAME (dev,ino) it approved.
+# We rename the approved dir aside and recreate the name with a fresh inode after the render barrier; the
+# human types the correct code, but commit refuses (Approved outcome, rc1 => RESULT ... fail, no record).
+B=cswap; GD="$(mk_grant_dir cswap_g)"; mk_bench "$B"
+launch_client swap-refused bench grant "$B" "$GD" --rw
+if drive_to_prompt swap-refused && [ -n "$PROMPT_CODE" ]; then
+    # perform the swap AS DEV (dev owns the anchor) — this is exactly the attacker's capability.
+    sdev sh -c "mv '$GD' '${GD}.moved' && mkdir '$GD'" >/dev/null 2>&1
+    _swok=$?
+    _keys="$(echo "$PROMPT_CODE" | sed 's/./&,/g')ret"
+    answer_and_collect swap-refused "$_keys"
+    if [ "$_swok" -eq 0 ] && ! echo "$RESULT_LINE" | grep -q "bench-grant $B ok" && ! grep -q '^grant fs-' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT swap-refused=ok result=[$RESULT_LINE] no-grant-applied"
+    else
+        say "BENCH-CONSENT swap-refused=FAIL swap-rc=$_swok result=[$RESULT_LINE] rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)]"
+    fi
+    assert_vt_restored swap-refused
+else
+    answer_and_collect swap-refused ""
+    say "BENCH-CONSENT swap-refused=FAIL no-code result=[$RESULT_LINE]"
+fi
+
+# ---- LEG: forged-sak (anti-vacuity: a forged SecureAttentionKey from a non-login1 sender is filtered) --
+# While a ceremony is arming, emit the matching signal as root AND dev. arm_sak's sender-pinned match
+# (sender='org.freedesktop.login1') must drop it: the VT must NOT flip for 5s. Then the REAL chord must
+# still complete the ceremony (proving arm still works). Anti-vacuity: the emits must return rc0 (else it is
+# a bus policy-block, a DISTINCT result, not a pass). We answer 'y' at the end so the leg ends Approved and
+# does NOT arm the (dev,grant) cooldown — that cooldown would otherwise block the disconnect leg below (also
+# grant). Ordering: this grant-APPROVE leg runs before the single grant-DENY leg (disconnect), which is last.
+B=cforge; GD="$(mk_grant_dir cforge_g)"; mk_bench "$B"
+launch_client forged-sak bench grant "$B" "$GD" --ro
+sleep 1     # let arm_sak subscribe before forging
+_emit='busctl emit /org/freedesktop/login1 org.freedesktop.login1.Manager SecureAttentionKey'
+$_emit >/dev/null 2>&1; _er=$?
+[ "$_er" -ne 0 ] && { $_emit s seat0 >/dev/null 2>&1; _er=$?; }     # retry with a plausible arg
+sdev $_emit >/dev/null 2>&1; _ed=$?
+[ "$_ed" -ne 0 ] && { sdev $_emit s seat0 >/dev/null 2>&1; _ed=$?; }
+# the forged signal must NOT flip the VT within 5s.
+_flip=0; f=0
+while [ "$f" -lt 50 ]; do
+    [ "$(active_vt)" = "tty${CONSENT_VT}" ] && { _flip=1; break; }
+    kill -0 "$CLIENT_PID" 2>/dev/null || break
+    sleep 0.1; f=$((f + 1))
+done
+if [ "$_flip" -eq 1 ]; then
+    # a forged signal flipped the VT — that is the sender-pin FAILING. Reap and report.
+    answer_and_collect forged-sak "y,ret"
+    say "BENCH-CONSENT forged-sak=FAIL forged-signal-flipped-vt emit-root-rc=$_er emit-dev-rc=$_ed result=[$RESULT_LINE]"
+elif [ "$_er" -ne 0 ]; then
+    # could not actually emit as root => cannot distinguish sender-pin from bus policy. Distinct result.
+    say "BENCH-CONSENT forged-sak=emit-blocked emit-root-rc=$_er emit-dev-rc=$_ed (bus policy blocked the emit; sender-pin not exercised)"
+    # still complete the ceremony via the real chord so we do not leave it arming.
+    if drive_to_prompt forged-sak; then answer_and_collect forged-sak "y,ret"; assert_vt_restored forged-sak; else answer_and_collect forged-sak ""; fi
+else
+    # emit succeeded (rc0) and did NOT flip => sender-pin held. Now the REAL chord must still complete.
+    if drive_to_prompt forged-sak; then
+        answer_and_collect forged-sak "y,ret"
+        if echo "$RESULT_LINE" | grep -q "bench-grant $B ok"; then
+            say "BENCH-CONSENT forged-sak=ok forged-filtered emit-root-rc=$_er emit-dev-rc=$_ed real-chord-completed result=[$RESULT_LINE]"
+        else
+            say "BENCH-CONSENT forged-sak=FAIL real-chord-outcome result=[$RESULT_LINE]"
+        fi
+        assert_vt_restored forged-sak
+    else
+        answer_and_collect forged-sak ""
+        say "BENCH-CONSENT forged-sak=FAIL forged-filtered-but-real-chord-also-failed result=[$RESULT_LINE]"
+    fi
+fi
+
+# ---- LEG: disconnect (kill the dev client after render, then answer => Deny(Disconnected)) -------------
+# The peer-liveness check in decide_apply must veto an otherwise-affirmative answer. The client is dead, so
+# it never receives a RESULT; we read the deny from gatekeeperd's journal audit and the unchanged record.
+# LAST grant-family leg (it DENIES => arms the (dev,grant) cooldown, so nothing grant-family may follow).
+B=cdis; GD="$(mk_grant_dir cdis_g)"; mk_bench "$B"
+_since="$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+launch_client disconnect bench grant "$B" "$GD" --ro
+if drive_to_prompt disconnect; then
+    sleep 0.5
+    pkill -u dev -x shrek 2>/dev/null    # kill ONLY dev's shrek client (never this root probe)
+    sleep 0.3
+    cue "answer leg=disconnect keys=y,ret"     # affirmative, but the peer is now gone
+    wait "$CLIENT_PID" 2>/dev/null
+    # mid-ceremony assert reads the journal directly (the serial broker is blocked; no socket calls).
+    _dj=0; j=0
+    while [ "$j" -lt 25 ]; do
+        if journalctl -u gatekeeperd.service --since "$_since" 2>/dev/null | grep -q 'event=deny.*verb=grant.*disconnected\|refused ceremony-disconnected'; then _dj=1; break; fi
+        sleep 0.2; j=$((j + 1))
+    done
+    if [ "$_dj" -eq 1 ] && ! grep -q '^grant fs-' "$(rec_file "$B")" 2>/dev/null; then
+        say "BENCH-CONSENT disconnect=ok journal-deny=disconnected no-grant-applied"
+    else
+        say "BENCH-CONSENT disconnect=FAIL journal-deny=$_dj rec=[$(tr '\n' ',' <"$(rec_file "$B")" 2>/dev/null)]"
+    fi
+    assert_vt_restored disconnect
+else
+    wait "$CLIENT_PID" 2>/dev/null
+    say "BENCH-CONSENT disconnect=FAIL no-prompt"
+fi
+
+fi   # end: not SAK_BROKEN
+
+# ---- final assertions: the desktop survived the whole run --------------------------------------------
+FINAL_VT="$(active_vt)"
+if [ -n "$COMP_PID" ] && kill -0 "$COMP_PID" 2>/dev/null; then
+    _calive=1
+else
+    # pid may have changed; re-check by name/session.
+    pgrep -x sway >/dev/null 2>&1 || pgrep -x niri >/dev/null 2>&1 || pgrep -f 'dms|quickshell' >/dev/null 2>&1
+    _calive=$?
+    [ "$_calive" -eq 0 ] && _calive=1 || _calive=0
+fi
+_sess_active=0
+as2=$(loginctl show-seat seat0 -p ActiveSession --value 2>/dev/null)
+[ -n "$as2" ] && [ "$(loginctl show-session "$as2" -p State --value 2>/dev/null)" = active ] && _sess_active=1
+if [ "$_calive" -eq 1 ] && [ "$_sess_active" -eq 1 ]; then
+    say "BENCH-CONSENT compositor-alive=ok final-vt=[$FINAL_VT] seat0-active=[$as2]"
+else
+    say "BENCH-CONSENT compositor-alive=FAIL comp=$_calive sess=$_sess_active final-vt=[$FINAL_VT]"
+fi
+# overall vt-restored (belt-and-suspenders: the display is back on the compositor VT after everything).
+if [ "$FINAL_VT" = "$PRE_VT" ]; then say "BENCH-CONSENT vt-restored=ok leg=final vt=$FINAL_VT"
+else say "BENCH-CONSENT vt-restored=FAIL leg=final vt=[$FINAL_VT] expected=[$PRE_VT]"; fi
+
+say "BENCH-CONSENT done"
+exit 0

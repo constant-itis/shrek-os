@@ -834,4 +834,21 @@ else
 fi
 set -e
 
+# --- Bench-authz step 3: the console consent ceremony (BENCH-CONSENT) --------------------------------
+# Marker-gated: bench-consent-vm-proof.sh seeds /home/.shrek-consent-dogfood into the data disk so this
+# runs ONLY under that proof (a plain dogfood-vm.sh run has no marker and skips clean — an undriven
+# ceremony would burn 60s SAK-arm timeouts + arm per-(uid,verb) cooldowns). It needs boot2 (desktop up),
+# which is exactly where the persist probe already is. Never aborts the persist run (guarded).
+if [ -f /home/.shrek-consent-dogfood ]; then
+    # Fast-iteration hook: prefer a probe seeded on the data disk (bench-consent-vm-proof.sh can update it
+    # without a full image rebuild — /home may be noexec, so run it through `sh`), else the baked one.
+    if [ -f /home/.shrek-consent-probe ]; then
+        say "BENCH-CONSENT marker present — invoking data-disk override probe"
+        sh /home/.shrek-consent-probe || say "BENCH-CONSENT probe exited non-zero rc=$?"
+    elif [ -x /usr/lib/shrek/dogfood-consent-probe ]; then
+        say "BENCH-CONSENT marker present — invoking baked dogfood-consent-probe"
+        /usr/lib/shrek/dogfood-consent-probe || say "BENCH-CONSENT probe exited non-zero rc=$?"
+    fi
+fi
+
 say "DONE boot=$n"
