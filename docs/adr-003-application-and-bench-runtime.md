@@ -214,8 +214,9 @@ traversable by `dev`'s subuid range (`--userns=keep-id` vs idmapped mounts), and
 **`shrek bench` verbs** (ADR-002 already reserves the `shrek bench …` namespace):
 `create <name>` · `enter <name>` · `run <name> -- <cmd>` · `grant <name> <path> --rw` ·
 `network <name> <policy>` · `export <name> <key> -- <cmd>` · `run-export <name> <key>` ·
-`unexport <name> <key>` · `reset <name>` · `quota <name>` · `destroy <name>` · and the
-ADR-002 promote path `promote <name> → Workshop`.
+`unexport <name> <key>` · `reset <name>` · `quota <name>` · `destroy <name>` · the ADR-002
+promote path `promote <name> --name <workshop>` · and the read-only recipe verbs
+`workshop-list` / `workshop-show <name>`.
 
 ### Workshop seeds & the `debian-apt` egress profile — ✅ apt workshop GREEN (2026-09-01)
 
@@ -330,8 +331,53 @@ non-networked plain-run path is untouched.)
 **Remaining follow-up on the proven step-5 path — do NOT bolt on blind:**
 1. **Persistence.** `run` is `--rm`, so an `apt`/`pip install` lands in the EPHEMERAL container
    layer, not the persistent `/work` — durable installs are the ADR-002 **`promote`** path (bench
-   → signed Workshop layer), still a stub. (PyPI `pypi-https` + the repeatable `network` verb —
-   the third fast-follow named here — is now ✅ done, see the subsection above.)
+   → reproducible Workshop recipe). The recipe MODEL + the `promote` verb are now ✅ done (see the
+   Promote subsection below); `workshop launch` (re-derive from the recipe) + the Tool Shed
+   derivation cache are the next two build steps. (PyPI `pypi-https` + the repeatable `network`
+   verb — the third fast-follow named here — is also ✅ done, see the subsection above.)
+
+### Promote → a reproducible Workshop recipe — ✅ recipe + `promote` + list/show GREEN (2026-09-01)
+
+`promote <bench> --name <workshop> [--apt pkg]… [--pip pkg]…` captures a Bench's reviewed INTENT
+as a named, declarative **Workshop recipe** — ADR-002 core law #5, "promotion captures intent, not
+filesystem debris." It does NOT snapshot the mutable container layer; it records the *seed* + the
+human-*declared* package sets + the bench's *declared-maximum* FS/egress grants + its exported
+launchers, so the same environment can be **re-derived** (the `launch` step, next) rather than
+carried as opaque bytes.
+
+- **Source of truth = a root-owned recipe** (`crates/gatekeeperd/src/workshop_record.rs`,
+  `SHREK-WORKSHOP 1` line-text): the SAME dep-free / fail-closed / atomic-temp+rename discipline as
+  `bench_record`, under `/home/.shrek/workshops` — a SIBLING of the bench `records/`, directly on
+  the root-owned `/home/.shrek` **forgery anchor** (never inside the `dev`-owned pool; `bench_record.rs:41-48`).
+  A recipe is a declared-authority TEMPLATE, so a forged one would launder authority — hence
+  root-owned, `dev`-unwritable, but 0644 world-readable so `workshop-list`/`show` read it directly.
+- **Package-token grammar** (Fable must-fix 5): each `--apt`/`--pip` token is charset-allowlisted,
+  no leading `-`, no whitespace, `=`/`==` pins admitted — so a recorded token can NEVER reach
+  `apt`/`pip` as a flag or a smuggled second arg at launch. A flag-shaped token is refused at precheck.
+- **Promote is authority-DECLARING** — it mints a durable, reusable template — so it runs the full
+  **console consent ceremony** on the socket path (HIGH-authority typed confirmation code, like
+  `export`), with a diff showing the complete resulting recipe (seed, packages, each grant, each
+  launcher, and a "Replaces recipe" row on re-promote). Root's in-process `cli()` drives the SAME
+  precheck+commit with no ceremony (no VT peer), so a root promote and a dev-over-socket promote
+  write a byte-identical recipe. `Declared maximum ⊇ approved activation ⊇ actual session` (ADR-002
+  §5) holds: the recipe REQUESTS the bench's grants; `launch` re-consents ≤ them per run.
+- **`workshop-list` / `workshop-show <name>`** are read-only (root-owned world-readable metadata) →
+  ceremony-free, over both the root `cli()` and the socket (like `bench list`).
+- A recipe is a **standalone reproducible artifact**: it outlives its source bench (destroying the
+  bench leaves the recipe intact). Re-promote **atomically replaces** the recipe of that name.
+- **Proven** — 9 unit tests ride in `workshop_record.rs` (roundtrip, fail-closed parse, token
+  grammar, atomic replace) + 2 in `bench_plane.rs` (HIGH-authority + arg-refusal); the host oracle
+  `bench-plane-proof.sh` adds a live PROMOTE section (recipe forgery-anchor perms, every field copied
+  from the bench, the `==` pin preserved, list/show, the fail-closed refusals, atomic re-promote,
+  standalone-survives-destroy) + the socket path (promote is ceremony-gated & writes nothing on a
+  headless deny; list is read-only). Oracle **PASS=116/0**.
+- **NOT yet built** (the next two commits): `workshop launch` re-derives the recipe into a working
+  env (re-validate seed+egress vs the sealed catalog/policy, materialize from seed, install the
+  declared packages over the egress-before-workload holder+exec path, fresh writable task-state);
+  then the **Tool Shed** — a content-addressed, root-index-trusted derivation cache keyed on
+  `SHA-256(schema ‖ seed image-Id ‖ apt tokens ‖ pip tokens ‖ egress set)` — a DISPOSABLE
+  optimization that NEVER becomes an independent source of authority (a miss/invalidation always
+  re-derives from the recipe through the approved seed+egress).
 
 ### MVP sequence (build order, #2829 — each gated, don't skip ahead)
 
@@ -379,7 +425,8 @@ non-networked plain-run path is untouched.)
    (`--network=none --no-hosts`, `/work` = the quota-scoped data dir); `reset` wipes data but keeps
    identity+quota; `quota` re-caps; `destroy` frees the id + removes everything; `reissue` re-applies
    quotas at boot (the records are the source of truth `/run` is rebuilt from). `grant`/`network`
-   are explicit stubs (step 5); `promote` is later. The `gatekeeperd bench` verb (a new `main.rs`
+   were step-5 stubs (now ✅ done); `promote` → Workshop recipe is now ✅ done (see the Promote
+   subsection), with `workshop launch` + the Tool Shed cache as the next steps. The `gatekeeperd bench` verb (a new `main.rs`
    dispatch arm) is the privileged supervisor; `shrek bench` forwards to it (mirrors `shrek run` →
    `gatekeeperd sandbox`). Proven: 10 unit tests, `scripts/bench-plane-proof.sh` (14/14 in a
    privileged container — record + project-quota EDQUOT enforcement for a non-root writer + id
