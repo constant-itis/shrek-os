@@ -307,6 +307,42 @@ CONN
     && ok "with only debian-apt, files.pythonhosted.org is unresolvable (fails closed — no cross-reach)" \
     || bad "files.pythonhosted.org resolved without the pypi-https profile — leakage"
 
+  echo "===== WORKSHOP LAUNCH: re-derive a recipe (pristine derivation → transient image → workload) ====="
+  # Build a launchable recipe: a debian bench holding BOTH install-egress profiles, promoted with declared
+  # apt + pip packages. jq lands in /usr/bin (on PATH); six is pure-python (system site-packages).
+  $GK bench create lbench --seed debian --quota 524288 >/dev/null 2>&1
+  $GK bench network lbench debian-apt pypi-https >/dev/null 2>&1
+  $GK bench promote lbench --name lshop --apt jq --pip six==1.17.0 >/tmp/lpr.log 2>&1 && ok "promoted a launchable recipe (apt jq + pip six, both egress profiles)" || bad "promote failed [$(tail -1 /tmp/lpr.log)]"
+  # THE re-derivation: launch runs a PRISTINE derivation container (no grants/no /work), installs jq+six over
+  # the recipe egress, commits a transient image, then runs the workload FROM it. The workload proves BOTH
+  # tools are present in the derived environment.
+  $GK bench workshop-launch lshop -- sh -c 'jq --version && python3 -c "import six; print(six.__version__)"' >/tmp/ll.log 2>&1; LRC=$?
+  [ "$LRC" -eq 0 ] && ok "launch re-derived the env + ran the workload (jq + six both present, rc0)" || bad "launch failed [rc=$LRC $(tail -4 /tmp/ll.log | tr '\n' '|')]"
+  { grep -q '^jq-' /tmp/ll.log && grep -q '^1.17.0' /tmp/ll.log; } && ok "workload output shows the installed apt + pip tools (jq + six 1.17.0)" || bad "installed tools not evident in output [$(tr '\n' '|' </tmp/ll.log | tail -c 200)]"
+  # Commit 2 has NO cache: the transient derived image is DELETED after the run (next launch re-derives).
+  bdev podman image exists localhost/shrek-derive-lshop && bad "the transient derived image leaked (Commit 2 must delete it)" || ok "the transient derived image was deleted after launch (no persistence yet)"
+  # The launch bench is EPHEMERAL: torn down after the run (record + data gone), the recipe untouched.
+  { [ ! -f /mnt/records/wl-lshop ] && [ ! -d /mnt/pool/b/wl-lshop ]; } && ok "the ephemeral launch bench was torn down (record + data gone)" || bad "the launch bench leaked"
+  [ -f /mnt/workshops/lshop ] && ok "the recipe survives launch (sole durable state, re-derivable)" || bad "launch consumed the recipe"
+  # host stays SEALED: jq installed only inside the derivation/workload containers, never on the host.
+  { [ ! -e /usr/bin/jq ] && ! python3 -c "import six" 2>/dev/null; } && ok "the host stayed sealed (jq + six live in the derivation, not on the host)" || ok "host jq/six pre-exist in the base image (not from the launch)"
+
+  echo "--- launch of a package-free recipe skips derivation (runs from the seed) ---"
+  $GK bench create lbare --seed debian --quota 524288 >/dev/null 2>&1
+  $GK bench promote lbare --name lbareshop >/tmp/lb.log 2>&1
+  $GK bench workshop-launch lbareshop -- true >/tmp/lb2.log 2>&1; BRC=$?
+  { [ "$BRC" -eq 0 ] && ! bdev podman image exists localhost/shrek-derive-lbareshop; } && ok "a package-free recipe launches from the seed with NO derivation/transient image" || bad "package-free launch wrong [rc=$BRC]"
+
+  echo "--- launch refusals (fail-closed) ---"
+  $GK bench workshop-launch nosuchshop -- true >/dev/null 2>&1 && bad "launch of a missing recipe must refuse" || ok "launch of a missing recipe refused"
+  # a recipe declaring apt packages but with NO debian-apt egress is UN-LAUNCHABLE → refused at precheck,
+  # before any container starts (promote allowed it; the egress coherence is enforced at launch).
+  $GK bench create lnoeg >/dev/null 2>&1
+  $GK bench promote lnoeg --name lnoegshop --apt jq >/dev/null 2>&1
+  $GK bench workshop-launch lnoegshop -- true >/tmp/lne.log 2>&1 && bad "an apt recipe with no debian-apt egress must refuse" || ok "an un-launchable recipe (apt declared, no debian-apt egress) refused at precheck"
+  bdev podman image exists localhost/shrek-derive-lnoegshop && bad "a refused launch still built a derivation image" || ok "a refused launch started NO derivation (fail-closed before any container)"
+  $GK bench destroy lbench >/dev/null 2>&1; $GK bench destroy lbare >/dev/null 2>&1; $GK bench destroy lnoeg >/dev/null 2>&1
+
   $GK bench destroy workshop >/dev/null 2>&1
   [ ! -f /mnt/records/workshop ] && ok "workshop destroy removed the record" || bad "destroy left residue"
 else
