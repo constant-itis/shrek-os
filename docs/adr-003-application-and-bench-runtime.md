@@ -282,9 +282,13 @@ ADR-002 promote path `promote <name> → Workshop`.
      cannot write the `dev`-owned grant). An arbitrary image with a non-root `USER` needs an idmapped `-v`
      (deferred with the arbitrary-image story). **PROPAGATION INVARIANT (proven):** the relocate bind is
      only visible to podman's persistent pause mount-ns if `/` is `rshared` (real systemd default) — so
-     the boot `reissue` unit must NOT `PrivateMounts`/`MountFlags=slave`. **ProtectHome:** the per-bench
-     `grants` dir is `dev`-owned `0700` (Fable fix 1). Grants persist in the record and are
-     re-materialized at boot by `shrek-bench-reissue.service` (`/run` is volatile).
+     the boot `reissue` unit must NOT `PrivateMounts`/`MountFlags=slave`. **Redirect-safe grant dir
+     (mycelium #2982 hole 3):** the per-bench `<id>` and `grants` dirs are `root:dev 0710` — root owns
+     them so `dev` can neither plant a symlink leaf inside `grants` nor `rename(2)` `grants`/`<id>` aside
+     to redirect the root relocate bind onto a system target (e.g. `/etc`); `dev` (group `dev`) keeps the
+     `--x` traverse its `podman -v` needs, and `other ---` preserves Fable fix-1 (no other unprivileged
+     service follows the bind into `dev`'s home). Grants persist in the record and are re-materialized at
+     boot by `shrek-bench-reissue.service` (`/run` is volatile).
    - **Egress grants** (`network <name> <profile>`): the profile is validated against sealed
      `shrek_policy::egress` (default-deny; `none` revokes) and recorded. Benches run `--network=none`; a
      networked `run` starts DETACHED, discovers the netns leader (`podman inspect`), verifies it is in a
