@@ -915,13 +915,25 @@ fn create(name: &str, quota_kib: u64, seed: &str) -> i32 {
 /// `/grants/<leaf>`; if the Bench has an egress policy, the run goes through [`run_networked`] (detached →
 /// inject → wait). Otherwise it is the plain foreground `--network=none` path. `-i` = interactive shell.
 fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
+    run_from(name, interactive, workload, None)
+}
+
+/// The `run` core, parameterized by an optional IMAGE OVERRIDE. `None` = the Bench's sealed seed (the
+/// normal path). `Some(tag)` = run FROM a specific local image instead of the seed — used by `workshop
+/// launch` to run the workload container from its already-derived (installed) image while the record's
+/// grants/egress/quota still apply. Everything else (grant materialization, holder+exec egress, teardown)
+/// is identical, so the two callers share one implementation.
+fn run_from(name: &str, interactive: bool, workload: &[String], image_override: Option<&str>) -> i32 {
     let rdir = bench_record::records_dir();
     let Some(mut rec) = bench_record::load_record(&rdir, name) else {
         eprintln!("bench: no such bench {name}");
         return 4;
     };
     // Ensure the Bench's offline seed is loaded into dev's store (load-if-absent-or-stale from its archive).
+    // With an image override the workload runs from the derived image, but the seed is still ensured (the
+    // override was derived FROM it, and a plain-path fallback would need it) — cheap + idempotent.
     ensure_seed(&rec.seed);
+    let image = image_override.map(|s| s.to_string()).unwrap_or_else(|| seed_image(&rec.seed));
     // Materialize FS grants in the host ns (idempotent — no-op if already mounted). Fail-closed.
     if let Err(e) = ensure_grants_materialized(&rec) {
         eprintln!("bench run: FS grant materialization failed (fail-closed): {e}");
@@ -943,13 +955,13 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
             eprintln!("bench run: a networked run requires a workload after `--`");
             return 2;
         }
-        return run_networked(&mut rec, interactive, &data, &profiles, &fs_binds, &wl);
+        return run_networked(&mut rec, interactive, &data, &image, &profiles, &fs_binds, &wl);
     }
 
     let spec = RunSpec {
         name,
         data: &data,
-        image: &seed_image(&rec.seed),
+        image: &image,
         interactive,
         detached: false,
         remove: true,
@@ -984,7 +996,7 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
 /// non-interactive rc is the workload's own exec status (126/127/128+n pass through; a podman-INFRA failure
 /// maps to the -1 sentinel; 125 is ambiguous — podman-error vs a workload exiting 125 — identical to the
 /// plain foreground path, so the contract is uniform across both run paths).
-fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles: &[String], fs_binds: &[FsBind], workload: &[String]) -> i32 {
+fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, image: &str, profiles: &[String], fs_binds: &[FsBind], workload: &[String]) -> i32 {
     let rdir = bench_record::records_dir();
     let name = rec.name.clone();
     let ctr = format!("shrek-bench-{name}");
@@ -1029,7 +1041,7 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles
     let spec = RunSpec {
         name: &name,
         data,
-        image: &seed_image(&rec.seed),
+        image,
         interactive: false,
         detached: true,
         remove: false,
@@ -1517,7 +1529,10 @@ impl AuthorityPlan {
     pub(crate) fn high_authority(&self) -> bool {
         matches!(
             &self.kind,
-            CommitKind::Export { .. } | CommitKind::Grant { rw: true, .. } | CommitKind::Promote { .. }
+            CommitKind::Export { .. }
+                | CommitKind::Grant { rw: true, .. }
+                | CommitKind::Promote { .. }
+                | CommitKind::Launch { .. }
         )
     }
 
@@ -1528,6 +1543,7 @@ impl AuthorityPlan {
             CommitKind::Network { .. } => format!("SET the network egress on bench '{}'", self.bench),
             CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
             CommitKind::Promote { workshop, .. } => format!("PROMOTE bench '{}' to the Workshop recipe '{}'", self.bench, workshop),
+            CommitKind::Launch { .. } => format!("LAUNCH the Workshop recipe '{}' (re-derive its environment + run)", self.bench),
         }
     }
 }
@@ -1541,6 +1557,11 @@ enum CommitKind {
     /// what the human saw — not a fresh re-read that could have drifted since the OK. `self.bench` is the
     /// source bench (build provenance).
     Promote { workshop: String, seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, exports: Vec<String> },
+    /// A validated Workshop `launch`: the CONSENTED recipe snapshot (seed + declared package sets + the
+    /// declared-max grant lines + the workload to run). `self.bench` is the workshop name. Commit re-derives
+    /// the environment (pristine derivation → transient image), runs the workload in a fresh bench from it,
+    /// then tears both down (Commit 2 = no persistence; the recipe is the sole durable state).
+    Launch { seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, workload: Vec<String> },
 }
 
 #[cfg(test)]
@@ -1563,6 +1584,13 @@ impl AuthorityPlan {
                 pip: vec![],
                 grants: vec![],
                 exports: vec![],
+            },
+            "launch" => CommitKind::Launch {
+                seed: "debian".into(),
+                apt: vec!["sl".into()],
+                pip: vec![],
+                grants: vec![],
+                workload: vec!["true".into()],
             },
             _ => CommitKind::Export {
                 key: "k".into(),
@@ -1599,8 +1627,100 @@ pub(crate) fn precheck_authority(verb: &str, rest: &[String]) -> Result<Authorit
         "network" => precheck_network(rest),
         "export" => precheck_export(rest),
         "promote" => precheck_promote(rest),
+        "launch" => precheck_launch(rest),
         other => Err((2, format!("not an authority verb: {other}"))),
     }
+}
+
+/// The sealed egress profiles a declared package set REQUIRES at launch: apt needs `debian-apt`, pip needs
+/// `pypi-https`. A recipe that declares packages but whose copied egress set lacks the matching profile can
+/// NEVER install them (launch re-consents ≤ the recipe's declared max — it cannot add egress), so promote
+/// let it through but launch refuses it fail-closed with a clear error rather than a mid-install network hang.
+const APT_EGRESS_PROFILE: &str = "debian-apt";
+const PIP_EGRESS_PROFILE: &str = "pypi-https";
+
+/// Validate + resolve a `workshop launch <ws> [-- workload...]` request to an [`AuthorityPlan`]. Launch is
+/// authority-MATERIALIZING (it activates the recipe's declared-maximum grants/egress and runs a workload),
+/// so it re-consents per launch (HIGH-authority composite ceremony) and re-validates the recipe against the
+/// sealed catalog/policy fail-closed — a recipe on disk is data, never trusted for the seed/egress decision.
+fn precheck_launch(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
+    let mut ws = None;
+    let mut workload: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--" => { workload = rest[i + 1..].to_vec(); break; }
+            other if !other.starts_with('-') && ws.is_none() => ws = Some(other.to_string()),
+            other => return Err((2, format!("unexpected arg {other}"))),
+        }
+        i += 1;
+    }
+    let Some(ws) = ws else {
+        return Err((2, "usage: workshop launch <workshop> [-- workload...]".into()));
+    };
+    if workload.iter().any(|a| a.contains('\n')) {
+        return Err((2, "a workload arg contains a newline".into()));
+    }
+    let Some(rec) = workshop_record::load_record(&workshop_record::workshops_dir(), &ws) else {
+        return Err((4, format!("no such workshop {ws}")));
+    };
+    // Re-validate the seed against the sealed catalog (the recipe is data — never trust its string).
+    if !valid_seed(&rec.seed) {
+        return Err((2, format!("recipe {ws} names an unknown seed {:?} — refusing (sealed catalog, fail-closed)", rec.seed)));
+    }
+    // Re-validate EVERY declared package token (defensive — promote validated them, but a hand-edited or
+    // corrupt recipe must never reach apt/pip with a flag-shaped token).
+    for p in rec.apt.iter().chain(rec.pip.iter()) {
+        if !valid_pkg_token(p) {
+            return Err((2, format!("recipe {ws} holds an invalid package token {p:?} — refusing")));
+        }
+    }
+    // Re-validate every egress profile in the recipe against sealed policy, fail-closed (a single unknown
+    // name refuses the whole launch before any container starts) — the run path re-checks too, but catching
+    // it here keeps the human from consenting to an un-launchable recipe.
+    let net: Vec<String> = egress_profiles_from(&rec.grants);
+    for p in &net {
+        if shrek_policy::egress::resolve(p).is_none() {
+            return Err((2, format!("recipe {ws} names egress profile {p:?} not in sealed policy — refusing (fail-closed)")));
+        }
+    }
+    // Coherence (Fable must-fix 4): declared packages need their install egress in the recipe's set, or the
+    // derivation can never fetch them.
+    if !rec.apt.is_empty() && !net.iter().any(|p| p == APT_EGRESS_PROFILE) {
+        return Err((2, format!("recipe {ws} declares apt packages but its egress set has no {APT_EGRESS_PROFILE:?} — un-launchable")));
+    }
+    if !rec.pip.is_empty() && !net.iter().any(|p| p == PIP_EGRESS_PROFILE) {
+        return Err((2, format!("recipe {ws} declares pip packages but its egress set has no {PIP_EGRESS_PROFILE:?} — un-launchable")));
+    }
+    let has_fs = rec.grants.iter().any(|g| matches!(Grant::parse(g), Some(Grant::Fs { .. })));
+    let trifecta = trifecta_after(has_fs, !net.is_empty(), false, false);
+    // Diff rows: the COMPLETE activation the human consents to — the recipe's env + the workload to run in it.
+    let mut rows = vec![
+        ("Base seed".to_string(), rec.seed.clone()),
+        ("apt packages".to_string(), if rec.apt.is_empty() { "(none)".into() } else { rec.apt.join(" ") }),
+        ("pip packages".to_string(), if rec.pip.is_empty() { "(none)".into() } else { rec.pip.join(" ") }),
+    ];
+    for g in &rec.grants {
+        rows.push(("Activates grant".to_string(), g.clone()));
+    }
+    rows.push(("Runs".to_string(), if workload.is_empty() { "(recipe default)".into() } else { workload.join(" ") }));
+    Ok(AuthorityPlan {
+        bench: ws,
+        diff_rows: rows,
+        trifecta,
+        kind: CommitKind::Launch { seed: rec.seed, apt: rec.apt, pip: rec.pip, grants: rec.grants, workload },
+    })
+}
+
+/// The egress profile SET encoded in a recipe/bench `grants` vec (the `net <profile>` lines), in order.
+fn egress_profiles_from(grants: &[String]) -> Vec<String> {
+    grants
+        .iter()
+        .filter_map(|g| match Grant::parse(g) {
+            Some(Grant::Net { profile }) => Some(profile),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Validate + resolve a `promote <bench> --name <workshop> [--apt pkg]... [--pip pkg]...` request to an
@@ -1853,6 +1973,7 @@ pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
         CommitKind::Network { profiles } => commit_network(&plan.bench, profiles),
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
         CommitKind::Promote { workshop, seed, apt, pip, grants, exports } => commit_promote(&plan.bench, workshop, seed, apt, pip, grants, exports),
+        CommitKind::Launch { seed, apt, pip, grants, workload } => commit_launch(&plan.bench, seed, apt, pip, grants, workload),
     }
 }
 
@@ -1882,6 +2003,204 @@ fn commit_promote(source: &str, workshop: &str, seed: &str, apt: &[String], pip:
     }
     println!("bench: promoted {source} -> Workshop recipe '{workshop}' (seed={seed} apt={} pip={})", apt.len(), pip.len());
     0
+}
+
+/// The `podman run` argv for a PRISTINE derivation container (Commit-2 launch, Phase A). Deliberately NOT
+/// [`podman_run_argv`]: a derivation container has NO `/work` bind and NO FS grants and NO exports — only
+/// the seed rootfs + a bench-owned `/etc/hosts` for egress. It runs a `sleep infinity` holder as PID1 so
+/// egress can be injected BEFORE the install execs (item-2 egress-before-install), and so that the bytes it
+/// commits have never seen a user grant, `/work`, or a workload secret (the no-secrets invariant that makes
+/// a derived image safe to reuse).
+fn derive_run_argv(name: &str, image: &str, hosts: &Path) -> Vec<String> {
+    vec![
+        "run".into(), "-d".into(),
+        "--name".into(), format!("shrek-bench-{name}"),
+        "--network=none".into(), "--no-hosts".into(),
+        "--runtime".into(), "crun".into(),
+        "-v".into(), format!("{}:/etc/hosts:ro", hosts.display()),
+        image.to_string(),
+        "sleep".into(), "infinity".into(),
+    ]
+}
+
+/// A `podman exec` argv for the derivation install phase: the container name is the FIRST positional, so
+/// every token after it (incl. the install command's own `-y`/`--no-install-recommends` and the charset-
+/// validated package names) is the command, never an `exec` flag. No `--workdir` (a pristine container has
+/// no `/work`); the install runs in the image's default cwd.
+fn derive_exec_argv(ctr: &str, cmd: &[String]) -> Vec<String> {
+    let mut a: Vec<String> = vec!["exec".into(), ctr.to_string()];
+    a.extend(cmd.iter().cloned());
+    a
+}
+
+/// Phase A of `workshop launch`: build a PRISTINE derivation container from the recipe's sealed seed, bring
+/// the recipe's install egress up (holder+exec), install the declared apt/pip packages as ARGV vectors,
+/// scrub, `podman commit` to a TRANSIENT image, and tear the container down. Returns the transient image
+/// tag on success. NOTHING here touches a user grant, `/work`, an export, or a workload — so the committed
+/// bytes are software-only by construction (the no-secrets invariant #2994). Never durable: Commit 2's
+/// caller deletes the tag after the run; Commit 3 keys+indexes it into the Tool Shed instead.
+fn derive_pristine(workshop: &str, seed: &str, apt: &[String], pip: &[String], net_profiles: &[String]) -> Result<String, ()> {
+    ensure_seed(seed);
+    let dname = format!("derive-{workshop}");
+    let dctr = format!("shrek-bench-{dname}");
+    let derived_tag = format!("localhost/shrek-derive-{workshop}");
+
+    // Resolve the recipe's egress against sealed policy (a single unknown name fails the whole derivation).
+    let mut refs = Vec::with_capacity(net_profiles.len());
+    for p in net_profiles {
+        match shrek_policy::egress::resolve(p) {
+            Some(r) => refs.push(r),
+            None => {
+                eprintln!("workshop launch: derivation egress {p:?} not in sealed policy — refusing (fail-closed)");
+                return Err(());
+            }
+        }
+    }
+    let resolved = match net_plane::resolve_profiles_v4(&refs) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("workshop launch: derivation egress resolve failed (fail-closed, no network): {e}");
+            return Err(());
+        }
+    };
+    let hosts_path = match write_hosts(&dname, &resolved) {
+        Ok(p) => p,
+        Err(e) => { eprintln!("workshop launch: derivation hosts write failed: {e}"); return Err(()); }
+    };
+
+    let net = net_plane::SandboxNet::for_id(&format!("bench-{dname}"));
+    net.teardown();
+    let cleanup = |n: &net_plane::SandboxNet| {
+        n.teardown();
+        podman_rm(&dname);
+        let _ = std::fs::remove_dir_all(bench_run_dir(&dname));
+    };
+    let fail = |n: &net_plane::SandboxNet, msg: String| -> Result<String, ()> {
+        eprintln!("{msg}");
+        cleanup(n);
+        Err(())
+    };
+
+    // Start the pristine holder DETACHED (quiet: `run -d` echoes the container id).
+    if podman_as_dev_quiet(&derive_run_argv(&dname, &seed_image(seed), &hosts_path)).map(|c| c != 0).unwrap_or(true) {
+        return fail(&net, "workshop launch: pristine derivation container start failed".into());
+    }
+    let Some(leader) = podman_pid(&dname) else {
+        return fail(&net, "workshop launch: could not discover the derivation netns leader".into());
+    };
+    if !leader_in_distinct_netns(leader) {
+        return fail(&net, format!("workshop launch: derivation leader {leader} not in a distinct netns — refusing inject"));
+    }
+    if let Err(e) = net.inject(leader, &resolved.endpoints, &resolved.no_masquerade_ips()) {
+        return fail(&net, format!("workshop launch: derivation egress inject failed (fail-closed): {e}"));
+    }
+    if !attached_ns_matches_leader(&net.ns, leader) {
+        return fail(&net, "workshop launch: derivation netns identity drift after attach — tearing down".into());
+    }
+    eprintln!("gatekeeperd/bench_plane: derivation egress up ws={workshop} ns={} dsts={}", net.ns, resolved.endpoints.len());
+
+    // INSTALL PHASE (egress is up): apt then pip, each as an ARGV vector via `podman exec` — never a shell
+    // string, so a package token can only ever be an argv element, not a flag or a `;`-chained command.
+    if !apt.is_empty() {
+        if podman_as_dev(&derive_exec_argv(&dctr, &["apt-get".into(), "update".into()])).unwrap_or(-1) != 0 {
+            return fail(&net, "workshop launch: apt-get update failed in the derivation".into());
+        }
+        let mut install = vec!["apt-get".into(), "install".into(), "-y".into(), "--no-install-recommends".into()];
+        install.extend(apt.iter().cloned());
+        if podman_as_dev(&derive_exec_argv(&dctr, &install)).unwrap_or(-1) != 0 {
+            return fail(&net, "workshop launch: apt install failed in the derivation".into());
+        }
+        let _ = podman_as_dev(&derive_exec_argv(&dctr, &["apt-get".into(), "clean".into()])); // scrub the cache
+    }
+    if !pip.is_empty() {
+        // System-wide install (PEP 668 needs --break-system-packages) so the packages bake into the image
+        // layer; --no-cache-dir keeps no wheel cache in the committed bytes.
+        let mut install = vec![
+            "python3".into(), "-m".into(), "pip".into(), "install".into(),
+            "--no-cache-dir".into(), "--break-system-packages".into(),
+        ];
+        install.extend(pip.iter().cloned());
+        if podman_as_dev(&derive_exec_argv(&dctr, &install)).unwrap_or(-1) != 0 {
+            return fail(&net, "workshop launch: pip install failed in the derivation".into());
+        }
+    }
+
+    // Commit the PRISTINE container (before any user workload has ever run in it) to the transient tag.
+    if podman_as_dev_quiet(&["commit".into(), dctr.clone(), derived_tag.clone()]).map(|c| c != 0).unwrap_or(true) {
+        return fail(&net, "workshop launch: podman commit of the derivation failed".into());
+    }
+    // Tear the derivation container down — the derived IMAGE persists (transiently) for the workload phase.
+    cleanup(&net);
+    Ok(derived_tag)
+}
+
+/// Commit a pre-checked `workshop launch` (called after the ceremony approves, or inline by root's `cli()`).
+/// Two-container flow (owner decision #2997): (A) PRISTINE derivation → transient image; (B) a FRESH
+/// ephemeral bench materialized from the recipe runs the workload FROM that image with the recipe's
+/// grants/egress + a clean `/work` task-state; then both are torn down and the transient image deleted
+/// (Commit 2 = no persistence — the recipe is the sole durable state; Commit 3 keeps the image in the Tool
+/// Shed instead). Returns the workload's rc (or a non-zero derivation/setup failure).
+fn commit_launch(workshop: &str, seed: &str, apt: &[String], pip: &[String], grants: &[String], workload: &[String]) -> i32 {
+    if !valid_seed(seed) {
+        eprintln!("workshop launch: {seed:?} is not a sealed seed (re-check) — refused");
+        return 2;
+    }
+    if workload.is_empty() {
+        eprintln!("workshop launch: a workload is required after `--` (interactive launch is not offered over the socket)");
+        return 2;
+    }
+    let lname = format!("wl-{workshop}");
+    if !bench_record::valid_bench_name(&lname) {
+        eprintln!("workshop launch: derived bench name {lname:?} is not a safe token (workshop name too long)");
+        return 2;
+    }
+    let net = egress_profiles_from(grants);
+
+    // Phase A: derive the environment (skip entirely if no packages are declared — the seed IS the env).
+    let derived = if !apt.is_empty() || !pip.is_empty() {
+        match derive_pristine(workshop, seed, apt, pip, &net) {
+            Ok(tag) => Some(tag),
+            Err(()) => return 1,
+        }
+    } else {
+        None
+    };
+
+    // Phase B: a fresh ephemeral bench from the recipe, running the workload FROM the derived image.
+    let _ = destroy(&lname); // clear any stale instance from a crashed prior launch (idempotent)
+    let rc = run_launch_workload(&lname, seed, grants, derived.as_deref(), workload);
+    let _ = destroy(&lname);
+
+    // Phase C: delete the transient derived image (Commit 2 has no cache — next launch re-derives).
+    if let Some(tag) = &derived {
+        let _ = podman_as_dev_quiet(&["rmi".into(), "-f".into(), tag.clone()]);
+    }
+    rc
+}
+
+/// Phase B helper: create the ephemeral launch bench, apply the recipe's declared grants (post-consent, so
+/// no re-ceremony), and run the workload FROM the derived image with a fresh `/work` + the recipe's egress.
+fn run_launch_workload(lname: &str, seed: &str, grants: &[String], image_override: Option<&str>, workload: &[String]) -> i32 {
+    let crc = create(lname, DEFAULT_QUOTA_KIB, seed);
+    if crc != 0 {
+        eprintln!("workshop launch: could not create the ephemeral launch bench");
+        return crc;
+    }
+    let rdir = bench_record::records_dir();
+    let Some(mut rec) = bench_record::load_record(&rdir, lname) else {
+        eprintln!("workshop launch: launch bench vanished after create");
+        return 1;
+    };
+    // Apply the recipe's declared grants (fs + net) directly — the ceremony already approved them; this is
+    // the activation, not a fresh authority request. (Exports are launcher .desktops, irrelevant to a
+    // one-shot run — a persisted launched workshop is deferred to the cache.)
+    rec.grants = grants.to_vec();
+    if let Err(e) = bench_record::write_record(&rdir, &rec) {
+        eprintln!("workshop launch: could not apply the recipe grants to the launch bench: {e}");
+        return 1;
+    }
+    // Run the workload FROM the derived image (grant materialization + holder+exec egress happen in `run`).
+    run_from(lname, false, workload, image_override)
 }
 
 fn commit_grant(bench: &str, canonical: &Path, leaf: &str, rw: bool, expected: Ident) -> i32 {
@@ -2119,7 +2438,14 @@ pub fn cli(args: &[String]) -> i32 {
             Some(n) => workshop_show(n),
             None => { eprintln!("usage: gatekeeperd bench workshop-show <name>"); 2 }
         },
-        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|promote|workshop-list|workshop-show|reset|quota|destroy|list|reissue> …"); 2 }
+        "workshop-launch" => {
+            // Authority-MATERIALIZING; root drives the SAME precheck+commit the socket ceremony wraps.
+            match precheck_authority("launch", rest) {
+                Ok(plan) => commit_authority(&plan),
+                Err((rc, msg)) => { eprintln!("workshop launch: {msg}"); rc }
+            }
+        }
+        "" => { eprintln!("usage: gatekeeperd bench <create|run|enter|grant|network|export|run-export|unexport|promote|workshop-list|workshop-show|workshop-launch|reset|quota|destroy|list|reissue> …"); 2 }
         other => { eprintln!("bench: unknown verb {other}"); 2 }
     }
 }
@@ -2241,6 +2567,9 @@ pub fn dispatch_socket(cred: Ucred, peer_fd: RawFd, argv: &[String]) -> (i32, Ve
         // promote is authority-DECLARING (mints a durable reusable recipe) → the console consent ceremony,
         // exactly like grant/export. precheck rejects a bad bench/name/package before any human is prompted.
         "promote" => crate::consent::run_socket_consent(cred, peer_fd, "promote", rest),
+        // workshop-launch is authority-MATERIALIZING (activates the recipe's grants/egress + runs a workload)
+        // → the console consent ceremony, like promote. precheck rejects a bad/un-launchable recipe first.
+        "workshop-launch" => crate::consent::run_socket_consent(cred, peer_fd, "launch", rest),
         // workshop list/show are READ-ONLY (a recipe is root-owned world-readable metadata) → ceremony-free,
         // like `list`. The daemon reads the recipes and streams RESULT lines to the allowlisted peer.
         "workshop-list" => {
@@ -2588,6 +2917,46 @@ mod tests {
         assert_eq!(rc(&["wb", "--name", "../escape"]), 2, "unsafe workshop name refused");
         assert_eq!(rc(&["wb", "--name", "ws", "--apt", "--force-yes"]), 2, "a flag-shaped package token is refused");
         assert_eq!(rc(&["wb", "--name", "ws", "--pip", "six", "--pip", "six"]), 1, "a duplicate package token is refused");
+    }
+
+    #[test]
+    fn launch_is_high_authority_and_action_names_the_workshop() {
+        // launch materializes real authority (activates grants+egress, runs a workload) ⇒ HIGH-authority
+        // (typed code), and re-consents per launch. The ceremony header names the recipe.
+        let plan = AuthorityPlan::test_plan("launch", "toolshop", false, false);
+        assert!(plan.high_authority(), "launch must demand the typed confirmation code");
+        let action = plan.action();
+        assert!(action.contains("LAUNCH") && action.contains("toolshop"), "header names the recipe: {action}");
+    }
+
+    #[test]
+    fn precheck_launch_usage_without_workshop() {
+        // No positional workshop ⇒ a usage error, before any recipe is loaded (the human is never asked).
+        match precheck_launch(&["--".into(), "cmd".into()]) {
+            Ok(_) => panic!("expected a usage refusal"),
+            Err((rc, _)) => assert_eq!(rc, 2),
+        }
+    }
+
+    #[test]
+    fn egress_profiles_from_reads_only_net_lines_in_order() {
+        let grants = vec![
+            "fs-ro /home/dev/in".to_string(),
+            "net debian-apt".to_string(),
+            "fs-rw /home/dev/out".to_string(),
+            "net pypi-https".to_string(),
+        ];
+        assert_eq!(egress_profiles_from(&grants), vec!["debian-apt".to_string(), "pypi-https".to_string()]);
+    }
+
+    #[test]
+    fn derive_run_argv_is_pristine_no_work_no_grants() {
+        let argv = derive_run_argv("derive-ws", "localhost/debian", Path::new("/run/h"));
+        assert!(!argv.iter().any(|a| a.contains(":/work")), "pristine derivation binds no /work");
+        assert!(!argv.iter().any(|a| a == "-w"), "pristine derivation pins no workdir");
+        assert!(argv.iter().any(|a| a == "--network=none"), "starts with no egress (late-attach)");
+        assert_eq!(argv.last().unwrap(), "infinity", "runs a sleep-infinity holder as PID1");
+        assert!(argv.iter().any(|a| a == "/run/h:/etc/hosts:ro"), "binds only the egress hosts file");
     }
 
     #[test]
