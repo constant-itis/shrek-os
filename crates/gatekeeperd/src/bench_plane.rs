@@ -23,6 +23,7 @@ use crate::bench_record::{self, BenchRecord};
 use crate::linux_uapi::{umount2, Ucred};
 use crate::mount_plane::{open_anchor, pin_beneath, relocate_ro, relocate_rw, Ident};
 use crate::net_plane;
+use crate::workshop_cache::{self, CacheRecord};
 use crate::workshop_record::{self, valid_pkg_token, WorkshopRecord};
 use std::ffi::CString;
 use std::io;
@@ -669,6 +670,99 @@ fn podman_pid(name: &str) -> Option<u32> {
     match s.trim().parse::<u32>() {
         Ok(p) if p > 0 => Some(p),
         _ => None,
+    }
+}
+
+// ---- Tool Shed cache helpers (ADR-003 Commit 3) -------------------------------------------------
+//
+// The cache KEY hashes derivation INPUTS (seed image Id + declared apt/pip sets + egress set); a HIT
+// additionally requires the live podman image Id to equal the Id the supervisor recorded at store time.
+// Trust lives in the root-owned index record, never in the image bytes (mycelium #2994, workshop_cache).
+
+/// SHA-256 (lowercase hex) of `input`, computed by shelling the sealed `sha256sum` over STDIN (there is no
+/// dep-free hash crate in gatekeeperd, and the whole daemon shells to sealed binaries — `podman`/`ip`/`nft`
+/// — by design). STDIN, never argv, so the hashed bytes can carry newlines and are never a shell/flag
+/// surface. Fail-closed: any spawn/write/parse error ⇒ `None` (the caller then skips caching and re-derives
+/// a transient — a hash failure must never fabricate or collide a key).
+fn sha256_hex_stdin(input: &str) -> Option<String> {
+    let mut child = Command::new("sha256sum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+    let out = child.wait_with_output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `sha256sum` prints `<64hex>  -`; take the first whitespace-delimited field.
+    let hex = String::from_utf8_lossy(&out.stdout);
+    let key = hex.split_whitespace().next()?.to_string();
+    workshop_cache::valid_cache_key(&key).then_some(key)
+}
+
+/// The podman image Id of a tag (as `dev`, whose rootless store holds the bytes). `None` if the image is
+/// absent or podman prints nothing — so an absent cached image reads as a MISS, and an absent seed image
+/// makes the key uncomputable (fail-closed) rather than keying on a guessed value.
+fn podman_image_id(tag: &str) -> Option<String> {
+    let id = podman_as_dev_stdout(&[
+        "image".into(), "inspect".into(), "--format".into(), "{{.Id}}".into(), tag.to_string(),
+    ]).ok()?.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+/// The seed's live image Id, the way the cache key must see it: `ensure_seed` first (so an OS-shipped seed
+/// update is loaded and the Id reflects the CURRENT seed), then inspect. `None` (fail-closed) if the seed
+/// image can't be resolved — the launch then derives a transient without caching rather than key on nothing.
+fn seed_image_id(seed: &str) -> Option<String> {
+    ensure_seed(seed);
+    podman_image_id(&seed_image(seed))
+}
+
+/// The HIT check (mycelium #2994): a cache entry is a HIT iff (1) a root-owned index record exists at `key`,
+/// AND (2) the live podman image Id equals the Id that record captured. A missing/malformed record ⇒ MISS.
+/// An Id mismatch or an absent image ⇒ MISS **and** the stale index record is deleted (self-healing: the
+/// bytes it pointed at are gone or were replaced, so the record is worthless — the next launch re-derives
+/// and re-stores). Returns the record's image tag to run the workload from, on a HIT.
+fn cache_lookup(key: &str) -> Option<CacheRecord> {
+    let dir = workshop_cache::cache_dir();
+    let rec = workshop_cache::load_record(&dir, key)?;
+    match podman_image_id(&rec.image) {
+        Some(live) if live == rec.image_id => Some(rec),
+        other => {
+            eprintln!(
+                "workshop launch: cache Id {} for {} — evicting stale index record (fail-closed → re-derive)",
+                if other.is_some() { "mismatch" } else { "absent (image gone)" },
+                rec.image,
+            );
+            let _ = workshop_cache::remove_record(&dir, key);
+            None
+        }
+    }
+}
+
+/// Write the Tool Shed index record for a freshly derived+committed image at `tag`. The recorded `image_id`
+/// is the just-committed image's live Id (what a future HIT re-verifies against). Best-effort: a failure to
+/// read the Id or write the record logs and leaves the derivation UN-cached (the next launch re-derives) —
+/// a cache write must never fail an otherwise-successful launch.
+fn cache_store(key: &str, tag: &str, seed_id: &str, apt_resolved: Vec<String>, pip_resolved: Vec<String>) {
+    let Some(image_id) = podman_image_id(tag) else {
+        eprintln!("workshop launch: could not read derived image Id for {tag} — leaving un-cached");
+        return;
+    };
+    let rec = CacheRecord {
+        key: key.to_string(),
+        image: tag.to_string(),
+        image_id,
+        seed_id: seed_id.to_string(),
+        created: now_secs(),
+        apt_resolved,
+        pip_resolved,
+    };
+    match workshop_cache::write_record(&workshop_cache::cache_dir(), &rec) {
+        Ok(_) => eprintln!("gatekeeperd/bench_plane: cache STORE key={} image={tag}", &key[..12]),
+        Err(e) => eprintln!("workshop launch: cache index write failed (continuing, un-cached): {e}"),
     }
 }
 
@@ -1468,6 +1562,27 @@ fn workshop_show(name: &str) -> i32 {
             println!("  launcher {} -> {}", x.key, x.cmd.join(" "));
         }
     }
+    // Tool Shed status (Commit 3): compute the SAME content-address key a launch would, and surface the
+    // cached derivation's resolved versions if a live entry exists. Read-only — unlike the launch's
+    // `cache_lookup`, a stale (Id-mismatched) entry is REPORTED here, never evicted.
+    if !r.apt.is_empty() || !r.pip.is_empty() {
+        let net = egress_profiles_from(&r.grants);
+        let key = seed_image_id(&r.seed)
+            .and_then(|sid| sha256_hex_stdin(&workshop_cache::canonical_key_input(&sid, &r.apt, &r.pip, &net)));
+        match key.as_deref().and_then(|k| workshop_cache::load_record(&workshop_cache::cache_dir(), k).map(|rec| (k, rec))) {
+            Some((k, cr)) if podman_image_id(&cr.image).as_deref() == Some(cr.image_id.as_str()) => {
+                println!("  cached   yes (key {} image {})", &k[..12], cr.image);
+                for l in &cr.apt_resolved {
+                    println!("    apt-resolved {l}");
+                }
+                for l in &cr.pip_resolved {
+                    println!("    pip-resolved {l}");
+                }
+            }
+            Some(_) => println!("  cached   stale (image changed since derive; next launch re-derives)"),
+            None => println!("  cached   no (next launch derives + caches)"),
+        }
+    }
     0
 }
 
@@ -1558,10 +1673,12 @@ enum CommitKind {
     /// source bench (build provenance).
     Promote { workshop: String, seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, exports: Vec<String> },
     /// A validated Workshop `launch`: the CONSENTED recipe snapshot (seed + declared package sets + the
-    /// declared-max grant lines + the workload to run). `self.bench` is the workshop name. Commit re-derives
-    /// the environment (pristine derivation → transient image), runs the workload in a fresh bench from it,
-    /// then tears both down (Commit 2 = no persistence; the recipe is the sole durable state).
-    Launch { seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, workload: Vec<String> },
+    /// declared-max grant lines + the workload to run) plus the two launch modifiers. `self.bench` is the
+    /// workshop name. Commit resolves the environment via the Tool Shed cache (HIT reuses a derived image;
+    /// MISS derives+stores one), runs the workload in a fresh bench from it, then tears the bench down (the
+    /// cached image persists; the recipe stays the sole authoritative state). `refresh` forces a re-derive;
+    /// `offline` reduces the workload's runtime egress to none and refuses to derive (HIT-only).
+    Launch { seed: String, apt: Vec<String>, pip: Vec<String>, grants: Vec<String>, workload: Vec<String>, refresh: bool, offline: bool },
 }
 
 #[cfg(test)]
@@ -1591,6 +1708,8 @@ impl AuthorityPlan {
                 pip: vec![],
                 grants: vec![],
                 workload: vec!["true".into()],
+                refresh: false,
+                offline: false,
             },
             _ => CommitKind::Export {
                 key: "k".into(),
@@ -1646,10 +1765,16 @@ const PIP_EGRESS_PROFILE: &str = "pypi-https";
 fn precheck_launch(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
     let mut ws = None;
     let mut workload: Vec<String> = Vec::new();
+    let mut refresh = false;
+    let mut offline = false;
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
             "--" => { workload = rest[i + 1..].to_vec(); break; }
+            // `--refresh` forces a cache re-derive; `--offline` runs the workload with no egress and refuses
+            // to derive (a HIT-only launch). Both are authority-NEUTRAL/REDUCING modifiers, not new authority.
+            "--refresh" => refresh = true,
+            "--offline" => offline = true,
             other if !other.starts_with('-') && ws.is_none() => ws = Some(other.to_string()),
             other => return Err((2, format!("unexpected arg {other}"))),
         }
@@ -1704,11 +1829,17 @@ fn precheck_launch(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
         rows.push(("Activates grant".to_string(), g.clone()));
     }
     rows.push(("Runs".to_string(), if workload.is_empty() { "(recipe default)".into() } else { workload.join(" ") }));
+    if refresh {
+        rows.push(("Cache".to_string(), "--refresh (force re-derive)".into()));
+    }
+    if offline {
+        rows.push(("Cache".to_string(), "--offline (no egress; cached derivation only)".into()));
+    }
     Ok(AuthorityPlan {
         bench: ws,
         diff_rows: rows,
         trifecta,
-        kind: CommitKind::Launch { seed: rec.seed, apt: rec.apt, pip: rec.pip, grants: rec.grants, workload },
+        kind: CommitKind::Launch { seed: rec.seed, apt: rec.apt, pip: rec.pip, grants: rec.grants, workload, refresh, offline },
     })
 }
 
@@ -1973,7 +2104,7 @@ pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
         CommitKind::Network { profiles } => commit_network(&plan.bench, profiles),
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
         CommitKind::Promote { workshop, seed, apt, pip, grants, exports } => commit_promote(&plan.bench, workshop, seed, apt, pip, grants, exports),
-        CommitKind::Launch { seed, apt, pip, grants, workload } => commit_launch(&plan.bench, seed, apt, pip, grants, workload),
+        CommitKind::Launch { seed, apt, pip, grants, workload, refresh, offline } => commit_launch(&plan.bench, seed, apt, pip, grants, workload, *refresh, *offline),
     }
 }
 
@@ -2035,15 +2166,24 @@ fn derive_exec_argv(ctr: &str, cmd: &[String]) -> Vec<String> {
 
 /// Phase A of `workshop launch`: build a PRISTINE derivation container from the recipe's sealed seed, bring
 /// the recipe's install egress up (holder+exec), install the declared apt/pip packages as ARGV vectors,
-/// scrub, `podman commit` to a TRANSIENT image, and tear the container down. Returns the transient image
-/// tag on success. NOTHING here touches a user grant, `/work`, an export, or a workload — so the committed
-/// bytes are software-only by construction (the no-secrets invariant #2994). Never durable: Commit 2's
-/// caller deletes the tag after the run; Commit 3 keys+indexes it into the Tool Shed instead.
-fn derive_pristine(workshop: &str, seed: &str, apt: &[String], pip: &[String], net_profiles: &[String]) -> Result<String, ()> {
+/// scrub, `podman commit` to `derived_tag`, and tear the container down. On success returns the RESOLVED
+/// versions the derivation actually installed (`dpkg-query` / `pip freeze` for the declared packages) — the
+/// caller records them as cache provenance so `workshop show` surfaces exactly what a cached (offline)
+/// launch reuses. NOTHING here touches a user grant, `/work`, an export, or a workload — so the committed
+/// bytes are software-only by construction (the no-secrets invariant #2994). The IMAGE at `derived_tag`
+/// persists past this call: Commit 2's caller deletes it (transient); Commit 3 keeps it under the cache tag
+/// and writes an index record instead.
+fn derive_pristine(
+    workshop: &str,
+    seed: &str,
+    apt: &[String],
+    pip: &[String],
+    net_profiles: &[String],
+    derived_tag: &str,
+) -> Result<(Vec<String>, Vec<String>), ()> {
     ensure_seed(seed);
     let dname = format!("derive-{workshop}");
     let dctr = format!("shrek-bench-{dname}");
-    let derived_tag = format!("localhost/shrek-derive-{workshop}");
 
     // Resolve the recipe's egress against sealed policy (a single unknown name fails the whole derivation).
     let mut refs = Vec::with_capacity(net_profiles.len());
@@ -2075,7 +2215,7 @@ fn derive_pristine(workshop: &str, seed: &str, apt: &[String], pip: &[String], n
         podman_rm(&dname);
         let _ = std::fs::remove_dir_all(bench_run_dir(&dname));
     };
-    let fail = |n: &net_plane::SandboxNet, msg: String| -> Result<String, ()> {
+    let fail = |n: &net_plane::SandboxNet, msg: String| -> Result<(Vec<String>, Vec<String>), ()> {
         eprintln!("{msg}");
         cleanup(n);
         Err(())
@@ -2125,22 +2265,70 @@ fn derive_pristine(workshop: &str, seed: &str, apt: &[String], pip: &[String], n
         }
     }
 
-    // Commit the PRISTINE container (before any user workload has ever run in it) to the transient tag.
-    if podman_as_dev_quiet(&["commit".into(), dctr.clone(), derived_tag.clone()]).map(|c| c != 0).unwrap_or(true) {
+    // Capture the RESOLVED versions the install actually landed (cache provenance) while the container is
+    // still up — best-effort: a capture failure leaves the field empty, it never fails the derivation.
+    let apt_resolved: Vec<String> = if apt.is_empty() {
+        Vec::new()
+    } else {
+        let mut q = vec!["dpkg-query".into(), "-W".into(), "-f".into(), "${Package}=${Version}\\n".into()];
+        q.extend(apt.iter().map(|t| apt_base_name(t)));
+        podman_as_dev_stdout(&derive_exec_argv(&dctr, &q))
+            .map(|s| s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default()
+    };
+    let pip_resolved: Vec<String> = if pip.is_empty() {
+        Vec::new()
+    } else {
+        let bases: std::collections::HashSet<String> = pip.iter().map(|t| pip_norm_name(t)).collect();
+        podman_as_dev_stdout(&derive_exec_argv(&dctr, &["python3".into(), "-m".into(), "pip".into(), "freeze".into()]))
+            .map(|s| {
+                s.lines()
+                    .map(str::trim)
+                    .filter(|l| bases.contains(&pip_norm_name(l)))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    // Commit the PRISTINE container (before any user workload has ever run in it) to the derived tag.
+    if podman_as_dev_quiet(&["commit".into(), dctr.clone(), derived_tag.to_string()]).map(|c| c != 0).unwrap_or(true) {
         return fail(&net, "workshop launch: podman commit of the derivation failed".into());
     }
-    // Tear the derivation container down — the derived IMAGE persists (transiently) for the workload phase.
+    // Tear the derivation container down — the derived IMAGE persists at `derived_tag` for the workload phase.
     cleanup(&net);
-    Ok(derived_tag)
+    Ok((apt_resolved, pip_resolved))
+}
+
+/// The bare package name of an apt token for a `dpkg-query` provenance lookup: everything before the first
+/// `=` (an apt version pin `sl=3.03-17` → `sl`). The token is already [`valid_pkg_token`], so this only ever
+/// strips a pin, never smuggles a flag.
+fn apt_base_name(token: &str) -> String {
+    token.split('=').next().unwrap_or(token).to_string()
+}
+
+/// The NORMALIZED distribution name of a pip token or a `pip freeze` line: the name portion (before any
+/// `=<>~!@` version/marker punctuation or whitespace), lowercased with `_`→`-` (PEP 503 normalization is
+/// coarser but this matches freeze output well enough to pair a declared token with its resolved line).
+fn pip_norm_name(s: &str) -> String {
+    let name: String = s
+        .chars()
+        .take_while(|c| !matches!(c, '=' | '<' | '>' | '~' | '!' | '@' | ' ' | '\t' | '['))
+        .collect();
+    name.trim().to_ascii_lowercase().replace('_', "-")
 }
 
 /// Commit a pre-checked `workshop launch` (called after the ceremony approves, or inline by root's `cli()`).
-/// Two-container flow (owner decision #2997): (A) PRISTINE derivation → transient image; (B) a FRESH
-/// ephemeral bench materialized from the recipe runs the workload FROM that image with the recipe's
-/// grants/egress + a clean `/work` task-state; then both are torn down and the transient image deleted
-/// (Commit 2 = no persistence — the recipe is the sole durable state; Commit 3 keeps the image in the Tool
-/// Shed instead). Returns the workload's rc (or a non-zero derivation/setup failure).
-fn commit_launch(workshop: &str, seed: &str, apt: &[String], pip: &[String], grants: &[String], workload: &[String]) -> i32 {
+/// Two-container flow (owner decision #2997) with the Tool Shed cache (Commit 3): (A) resolve the derivation
+/// IMAGE — a content-address cache HIT reuses a previously derived+verified image with NO egress; a MISS
+/// derives a PRISTINE image (holder+exec, install-egress only) and RETAINS+indexes it in the Tool Shed; (B)
+/// a FRESH ephemeral bench materialized from the recipe runs the workload FROM that image with the recipe's
+/// grants/egress + a clean `/work`; (C) the bench is torn down but the cached image PERSISTS (a transient
+/// image — only produced when the key can't be computed — is deleted). `refresh` forces a MISS (re-derive +
+/// overwrite the entry); `offline` reduces the workload's runtime egress to none AND refuses to derive (an
+/// offline launch is only valid on a cache HIT). The recipe stays the sole authoritative state; the cache is
+/// a disposable optimization (mycelium #2994). Returns the workload's rc (or a non-zero derivation failure).
+fn commit_launch(workshop: &str, seed: &str, apt: &[String], pip: &[String], grants: &[String], workload: &[String], refresh: bool, offline: bool) -> i32 {
     if !valid_seed(seed) {
         eprintln!("workshop launch: {seed:?} is not a sealed seed (re-check) — refused");
         return 2;
@@ -2155,24 +2343,79 @@ fn commit_launch(workshop: &str, seed: &str, apt: &[String], pip: &[String], gra
         return 2;
     }
     let net = egress_profiles_from(grants);
+    let has_packages = !apt.is_empty() || !pip.is_empty();
 
-    // Phase A: derive the environment (skip entirely if no packages are declared — the seed IS the env).
-    let derived = if !apt.is_empty() || !pip.is_empty() {
-        match derive_pristine(workshop, seed, apt, pip, &net) {
-            Ok(tag) => Some(tag),
-            Err(()) => return 1,
+    // Phase A: resolve the environment image. A package-free recipe has no derivation — the seed IS the
+    // environment, so there is nothing to cache and `--offline` is trivially satisfiable (empty net below).
+    let mut transient_tag: Option<String> = None;
+    let derived: Option<String> = if has_packages {
+        // The cache key hashes the derivation INPUTS the recipe approves (seed image Id + declared apt/pip +
+        // egress set). Fail-OPEN on the cache infra: if the seed Id or the hash can't be produced we still
+        // launch — just without caching — rather than fail a launch on a cache hiccup.
+        let seed_id = seed_image_id(seed);
+        let key = seed_id.as_deref().and_then(|sid| sha256_hex_stdin(&workshop_cache::canonical_key_input(sid, apt, pip, &net)));
+
+        // `--refresh` evicts any existing entry (index + bytes) so the re-derive below doesn't leave a
+        // dangling image, then treats it as a MISS.
+        if refresh {
+            if let Some(k) = &key {
+                if let Some(old) = workshop_cache::load_record(&workshop_cache::cache_dir(), k) {
+                    let _ = podman_as_dev_quiet(&["rmi".into(), "-f".into(), old.image.clone()]);
+                }
+                let _ = workshop_cache::remove_record(&workshop_cache::cache_dir(), k);
+            }
+        }
+
+        let hit = if refresh { None } else { key.as_deref().and_then(cache_lookup) };
+        match hit {
+            Some(rec) => {
+                eprintln!("gatekeeperd/bench_plane: cache HIT ws={workshop} key={} image={}", &rec.key[..12], rec.image);
+                Some(rec.image)
+            }
+            None => {
+                // MISS. `--offline` refuses to touch the network to derive: an offline launch is valid ONLY
+                // on a HIT (assembly needs no egress) — with no cached derivation there is nothing to run.
+                if offline {
+                    eprintln!("workshop launch: --offline but no cached derivation for {workshop} — re-run online to derive it first (fail-closed)");
+                    return 1;
+                }
+                // With a key: derive straight to the cache tag and RETAIN+index it. Without a key (the hash
+                // infra failed): derive to a transient tag we delete after the run (Commit-2 behaviour).
+                let tag = match &key {
+                    Some(k) => workshop_cache::image_tag(k),
+                    None => format!("localhost/shrek-derive-{workshop}"),
+                };
+                let (apt_resolved, pip_resolved) = match derive_pristine(workshop, seed, apt, pip, &net, &tag) {
+                    Ok(r) => r,
+                    Err(()) => return 1,
+                };
+                match &key {
+                    // With a key, RETAIN the image and index it in the Tool Shed for reuse.
+                    Some(k) => cache_store(k, &tag, seed_id.as_deref().unwrap_or_default(), apt_resolved, pip_resolved),
+                    // No key (hash infra failed): the image is transient — delete it after the run.
+                    None => transient_tag = Some(tag.clone()),
+                }
+                Some(tag)
+            }
         }
     } else {
         None
     };
 
-    // Phase B: a fresh ephemeral bench from the recipe, running the workload FROM the derived image.
+    // Phase B: a fresh ephemeral bench from the recipe, running the workload FROM the derived image. Under
+    // `--offline` the workload runs with an EMPTY net set (an authority REDUCTION, ceremony-consistent): the
+    // assembled env needs no egress and the human already consented to ≤ the recipe's declared maximum.
+    let run_grants: Vec<String> = if offline {
+        grants.iter().filter(|g| !matches!(Grant::parse(g), Some(Grant::Net { .. }))).cloned().collect()
+    } else {
+        grants.to_vec()
+    };
     let _ = destroy(&lname); // clear any stale instance from a crashed prior launch (idempotent)
-    let rc = run_launch_workload(&lname, seed, grants, derived.as_deref(), workload);
+    let rc = run_launch_workload(&lname, seed, &run_grants, derived.as_deref(), workload);
     let _ = destroy(&lname);
 
-    // Phase C: delete the transient derived image (Commit 2 has no cache — next launch re-derives).
-    if let Some(tag) = &derived {
+    // Phase C: delete ONLY a transient derived image — a cached image PERSISTS in the Tool Shed for reuse.
+    if let Some(tag) = &transient_tag {
         let _ = podman_as_dev_quiet(&["rmi".into(), "-f".into(), tag.clone()]);
     }
     rc
@@ -2936,6 +3179,45 @@ mod tests {
             Ok(_) => panic!("expected a usage refusal"),
             Err((rc, _)) => assert_eq!(rc, 2),
         }
+        // A stray unknown flag is still refused (didn't silently become the workshop name).
+        assert!(matches!(precheck_launch(&["--bogus".into()]), Err((2, _))));
+    }
+
+    #[test]
+    fn launch_flags_parse_before_the_workshop_and_dashdash() {
+        // `--refresh`/`--offline` are recognized modifiers wherever they sit before `--`; they must NOT be
+        // mistaken for the positional workshop, and the workload after `--` is untouched. (No recipe on disk
+        // here, so a well-formed parse still returns the recipe-not-found refusal — that's the tell that the
+        // flags parsed and the positional `ws` was captured, not consumed by a flag.)
+        for args in [
+            vec!["--refresh".to_string(), "ws".into(), "--".into(), "true".into()],
+            vec!["--offline".to_string(), "ws".into()],
+            vec!["ws".to_string(), "--refresh".into(), "--offline".into(), "--".into(), "true".into()],
+        ] {
+            match precheck_launch(&args) {
+                Err((4, msg)) => assert!(msg.contains("no such workshop ws"), "flags parsed, ws captured: {msg}"),
+                Err((rc, msg)) => panic!("expected recipe-not-found (flags parsed), got Err({rc}, {msg})"),
+                Ok(_) => panic!("expected recipe-not-found (flags parsed), got Ok"),
+            }
+        }
+    }
+
+    #[test]
+    fn apt_base_name_strips_a_pin_only() {
+        assert_eq!(apt_base_name("sl"), "sl");
+        assert_eq!(apt_base_name("sl=3.03-17"), "sl"); // apt version pin stripped for dpkg-query
+        assert_eq!(apt_base_name("python3-dev"), "python3-dev"); // a dash in the NAME is kept
+    }
+
+    #[test]
+    fn pip_norm_name_normalizes_and_strips_version_markers() {
+        // Pairs a declared pip token with its `pip freeze` line: name only, lowercased, `_`→`-`.
+        assert_eq!(pip_norm_name("six==1.17.0"), "six");
+        assert_eq!(pip_norm_name("Flask>=2.0"), "flask");
+        assert_eq!(pip_norm_name("typing_extensions==4.9.0"), "typing-extensions");
+        assert_eq!(pip_norm_name("requests [security]"), "requests");
+        // The declared token and its freeze line normalize to the SAME key (so the filter pairs them).
+        assert_eq!(pip_norm_name("Typing_Extensions"), pip_norm_name("typing-extensions==4.9.0"));
     }
 
     #[test]
