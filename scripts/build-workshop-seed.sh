@@ -13,6 +13,21 @@
 # apt's built-in https method + ca-certificates are all it needs; /var/lib/apt/lists is PURGED (first-run
 # `apt-get update` in the bench is the point, and it saves ~40M).
 #
+# PYTHON/pip: the seed also bakes python3 + python3-venv + python3-pip so a bench can `pip install` over the
+# sealed `pypi-https` egress profile (a sibling of debian-apt; the repeatable `network` verb composes both
+# on one bench). --no-install-recommends means NO build toolchain rides along (wheels only; an sdist that
+# needs a compiler is `apt-get install gcc` first, in the same session — apt state is per-run since
+# containers are --rm). NOEXEC /work: the bench's writable /work pool is mounted noexec, so the blessed
+# durable install is `python3 -m venv /work/venv` + `/work/venv/bin/python3 -m pip install <pkg>` (invoke
+# via `python3 -m pip`, NEVER the `/work/venv/bin/pip` entry-point script — a script on a noexec mount
+# cannot execve; python3 itself is a symlink to the on-exec /usr/bin/python3). The persistent /work venv is
+# PURE-PYTHON only; native-extension wheels need PROT_EXEC to dlopen, so they belong in an ephemeral
+# in-overlay venv within one session. See docs/adr-003 (pip workshop) + shrek-policy egress `pypi-https`.
+#
+# The python stack (python3 + libpython3.x-stdlib + pip's vendored wheels + venv seeds) adds ~60-75M
+# uncompressed, so debian.tar lands ~115-125M (was ~56M). Whatever SNAPSHOT_TS you pin now also pins the
+# python packages (reproducibility applies to the whole install set, not just ca-certificates).
+#
 # REPRODUCIBILITY (before this seed is SIGNED): pin BOTH the base by digest (DEBIAN_DIGEST) AND build-time
 # apt at a snapshot.debian.org timestamp (SNAPSHOT_TS) — apt version pins rot (point releases drop old
 # versions from the live archive), so snapshot is the only reproducible source. snapshot is a BUILD-HOST
@@ -68,7 +83,7 @@ COPY debian.sources /work-ctx/debian.sources
 RUN rm -f /etc/apt/sources.list \\
  && printf 'Acquire::Check-Valid-Until "false";\\n' > /etc/apt/apt.conf.d/10snapshot \\
  && apt-get update -o Acquire::Retries=3 \\
- && apt-get install -y --no-install-recommends ca-certificates \\
+ && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv python3-pip \\
  && rm -f /etc/apt/apt.conf.d/10snapshot \\
  && cp /work-ctx/debian.sources /etc/apt/sources.list.d/debian.sources \\
  && grep -q 'https://deb.debian.org/debian' /etc/apt/sources.list.d/debian.sources \\
@@ -79,7 +94,7 @@ else
 FROM ${BASE}
 COPY debian.sources /work-ctx/debian.sources
 RUN apt-get update -o Acquire::Retries=3 \\
- && apt-get install -y --no-install-recommends ca-certificates \\
+ && apt-get install -y --no-install-recommends ca-certificates python3 python3-venv python3-pip \\
  && rm -f /etc/apt/sources.list \\
  && cp /work-ctx/debian.sources /etc/apt/sources.list.d/debian.sources \\
  && grep -q 'https://deb.debian.org/debian' /etc/apt/sources.list.d/debian.sources \\

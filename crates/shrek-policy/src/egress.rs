@@ -111,6 +111,22 @@ const DEBIAN_APT: &[EgressRule] = &[
     EgressRule { host: "deb.debian.org", proto: Proto::Tcp, port: 443 },
 ];
 
+// A pip/PyPI WORKSHOP bench (ADR-002/003, sibling of `debian-apt`): reach the Python Package Index to
+// `pip install`. TWO hosts by design — pypi.org fronts the Simple/JSON index (package metadata + which
+// files exist, incl. pip's own version self-check on pypi.org/pypi/…/json), and files.pythonhosted.org is
+// the SEPARATE CDN that serves the actual wheels/sdists (and PEP 658 `.metadata` sidecars). Both are
+// Fastly-fronted — the SAME shared-CDN aperture as `debian-apt`/`github-https` — so https/tcp:443 only: a
+// plaintext :80 to a shared-CDN IP allow-list would let a `Host:` header reach any Fastly customer. pip
+// validates the cert against the SNI name (never the spawn-time-pinned IP), and vendors its own certifi
+// bundle so there is no CA-fetch host. `pypi.python.org` (a 301 relic) and `test.pypi.org` are deliberately
+// NOT listed. SEALED-EGRESS INVARIANT (identical to debian-apt): a bench holding this (or any internet)
+// profile must NEVER receive a secret via grant/env/export — the shared-CDN aperture is contained only by
+// the no-secrets rule, not by the network layer.
+const PYPI_HTTPS: &[EgressRule] = &[
+    EgressRule { host: "pypi.org", proto: Proto::Tcp, port: 443 },
+    EgressRule { host: "files.pythonhosted.org", proto: Proto::Tcp, port: 443 },
+];
+
 const RUST_CRATES: &[EgressRule] = &[
     EgressRule { host: "crates.io", proto: Proto::Tcp, port: 443 },
     EgressRule { host: "static.crates.io", proto: Proto::Tcp, port: 443 },
@@ -193,6 +209,7 @@ pub const EGRESS_PROFILES: &[EgressProfile] = &[
     EgressProfile { name: "none", rules: &[] },
     EgressProfile { name: "github-https", rules: GITHUB_HTTPS },
     EgressProfile { name: "debian-apt", rules: DEBIAN_APT },
+    EgressProfile { name: "pypi-https", rules: PYPI_HTTPS },
     EgressProfile { name: "rust-crates", rules: RUST_CRATES },
     EgressProfile { name: "model-local", rules: MODEL_LOCAL },
     EgressProfile { name: "model-anthropic", rules: MODEL_ANTHROPIC },
@@ -232,6 +249,35 @@ mod tests {
         assert!(!d.allows("deb.debian.org", Proto::Tcp, 80));
         assert!(!d.allows("security.debian.org", Proto::Tcp, 443));
         assert!(!d.allows("snapshot.debian.org", Proto::Tcp, 443));
+    }
+
+    #[test]
+    fn pypi_https_is_two_https_hosts_deny_by_default() {
+        let p = resolve("pypi-https").unwrap();
+        // Exactly TWO hosts by design: the index (pypi.org) and the file CDN (files.pythonhosted.org).
+        assert_eq!(p.rules.len(), 2, "pypi-https must reach exactly the index + the file CDN");
+        assert!(p.allows("pypi.org", Proto::Tcp, 443));
+        assert!(p.allows("files.pythonhosted.org", Proto::Tcp, 443));
+        // Deny-by-default around them: no plaintext :80, no legacy relic host, no test index, no wildcard.
+        assert!(!p.allows("pypi.org", Proto::Tcp, 80));
+        assert!(!p.allows("files.pythonhosted.org", Proto::Tcp, 80));
+        assert!(!p.allows("pypi.python.org", Proto::Tcp, 443)); // 301 relic — deliberately unlisted
+        assert!(!p.allows("test.pypi.org", Proto::Tcp, 443));
+        assert!(!p.allows("files.pythonhosted.com", Proto::Tcp, 443)); // no suffix/typo matching
+    }
+
+    #[test]
+    fn pypi_and_debian_are_distinct_profiles_no_cross_reach() {
+        // The two workshop profiles that COMPOSE on one bench must stay distinct: neither reaches the
+        // other's hosts on its own (the union is built at run time from BOTH, never implied by EITHER).
+        let pypi = resolve("pypi-https").unwrap();
+        let deb = resolve("debian-apt").unwrap();
+        assert_ne!(pypi.name, deb.name);
+        assert!(!pypi.allows("deb.debian.org", Proto::Tcp, 443));
+        assert!(!deb.allows("pypi.org", Proto::Tcp, 443));
+        assert!(!deb.allows("files.pythonhosted.org", Proto::Tcp, 443));
+        // And pip's index is not a model/broker/swamp destination.
+        assert!(!pypi.grants_swamp_query());
     }
 
     #[test]

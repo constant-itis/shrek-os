@@ -63,9 +63,12 @@ struct Seed {
     tar: &'static str,
 }
 
-/// The sealed catalog. `scratch` = the tiny Alpine/media proof seed (musl); `debian` = the apt WORKSHOP
-/// seed (glibc + apt over the `debian-apt` egress profile). Extend HERE (a `pypi`/`workshop` sibling is a
-/// later slice); a user can never add a seed, only pick a shipped one.
+/// The sealed catalog. `scratch` = the tiny Alpine/media proof seed (musl); `debian` = the apt+pip WORKSHOP
+/// seed (glibc + apt over `debian-apt` + python3/pip/venv over `pypi-https`, composed via the repeatable
+/// `network` verb). Extend HERE; a user can never add a seed, only pick a shipped one. A dedicated python
+/// seed was considered and rejected: the debian seed already carries apt, so `apt` + `pip` in ONE bench is
+/// the natural workshop base (and the only way to `pip install` an sdist that needs an apt-installed
+/// compiler, since containers are `--rm` per run — apt state is per-session).
 const SEED_CATALOG: &[Seed] = &[
     Seed { name: "scratch", image: "localhost/scratch", tar: "scratch.tar" },
     Seed { name: "debian", image: "localhost/debian", tar: "debian.tar" },
@@ -350,12 +353,59 @@ fn remove_desktop_as_dev(file: &str) {
         .status();
 }
 
-/// The record's single egress policy, if any (MVP: one `net` grant per Bench).
-fn egress_profile(rec: &BenchRecord) -> Option<String> {
-    rec.grants.iter().find_map(|g| match Grant::parse(g) {
-        Some(Grant::Net { profile }) => Some(profile),
-        _ => None,
-    })
+/// The record's egress policy SET (may be empty). Multiple `net` grants COMPOSE — the bench reaches the
+/// UNION of their sealed destinations (resolved by [`net_plane::resolve_profiles_v4`]). Ordered as
+/// recorded. This replaces the old first-wins accessor: a first-wins reader on a multi-`net` record would
+/// inject only profile #1 while the record — and the human's consent — name several (Fable item-1 fix 3),
+/// a silent under-injection. Every call site now takes the whole set.
+fn egress_profiles(rec: &BenchRecord) -> Vec<String> {
+    rec.grants
+        .iter()
+        .filter_map(|g| match Grant::parse(g) {
+            Some(Grant::Net { profile }) => Some(profile),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Validate a declarative egress-profile SET (the argument list to the `network` verb). Returns the
+/// canonical set (input order preserved) or a human-facing error. Single source of truth shared by the
+/// root `cli()` path ([`network`]) and the consent path ([`precheck_network`]) so they can never drift.
+/// Rules: `none` ALONE ⇒ the empty set (revoke-all); `none` mixed with any real profile is REFUSED;
+/// every real name must resolve in sealed policy (fail-closed on the first unknown, changing nothing);
+/// duplicates are REFUSED (clear error, never a silent dedup); a `-`-prefixed token is refused (the set
+/// holds profile names, not flags). An empty input is a usage error (use `none` to revoke).
+fn validate_profile_set(profiles: &[String]) -> Result<Vec<String>, String> {
+    if profiles.is_empty() {
+        return Err("usage: network <name> <profile...|none>".into());
+    }
+    if profiles.iter().any(|p| p == "none") {
+        if profiles.len() != 1 {
+            return Err("`none` REVOKES all egress and cannot be combined with a profile".into());
+        }
+        return Ok(Vec::new());
+    }
+    let mut set: Vec<String> = Vec::with_capacity(profiles.len());
+    for p in profiles {
+        if p.starts_with('-') {
+            return Err(format!("{p:?} is not a profile name (no flags in the egress set)"));
+        }
+        if shrek_policy::egress::resolve(p).is_none() {
+            return Err(format!("{p:?} is not a sealed egress profile — refused (policy is default-deny)"));
+        }
+        if set.iter().any(|q| q == p) {
+            return Err(format!("duplicate profile {p:?} in the set"));
+        }
+        set.push(p.clone());
+    }
+    Ok(set)
+}
+
+/// The consent diff rows naming a network SET: ONE row per profile (never a single joined string — the
+/// consent renderer sanitizes per value, and a name buried mid-line in a joined string could be lost;
+/// Fable item-1 fix 4). The caller appends the I/O-derived endpoint count + any "Replaces egress" row. Pure.
+fn network_profile_rows(set: &[String]) -> Vec<(String, String)> {
+    set.iter().map(|p| ("Egress profile".to_string(), p.clone())).collect()
 }
 
 /// Default per-Bench block quota (KiB). Generous but bounded so one Bench cannot fill `/home`.
@@ -848,8 +898,9 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
     let data = data_dir(&pool_dir(), name);
     let wl = if interactive && workload.is_empty() { vec!["/bin/sh".to_string()] } else { workload.to_vec() };
 
-    if let Some(profile) = egress_profile(&rec) {
-        return run_networked(&mut rec, interactive, &data, &profile, &fs_binds, &wl);
+    let profiles = egress_profiles(&rec);
+    if !profiles.is_empty() {
+        return run_networked(&mut rec, interactive, &data, &profiles, &fs_binds, &wl);
     }
 
     let spec = RunSpec {
@@ -882,16 +933,26 @@ fn run(name: &str, interactive: bool, workload: &[String]) -> i32 {
 /// user-authority Bench (Fable step-5 ruling 3). Interactive `enter` holds the container with `sleep
 /// infinity` so the shell has egress from its first command; non-interactive `run` starts the workload
 /// and blocks on `podman wait`.
-fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profile: &str, fs_binds: &[FsBind], workload: &[String]) -> i32 {
+fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profiles: &[String], fs_binds: &[FsBind], workload: &[String]) -> i32 {
     let rdir = bench_record::records_dir();
     let name = rec.name.clone();
     let ctr = format!("shrek-bench-{name}");
 
-    let Some(profile_ref) = shrek_policy::egress::resolve(profile) else {
-        eprintln!("bench run: recorded egress profile {profile:?} is not in sealed policy — refusing (fail-closed)");
-        return 1;
-    };
-    let resolved = match net_plane::resolve_profiles_v4(&[profile_ref]) {
+    // Resolve EVERY recorded profile against sealed policy BEFORE any container start: a single unknown
+    // recorded name refuses the whole run (fail-closed), exactly the single-profile behavior generalized
+    // (Fable item-1 fix 3). The union itself is [`net_plane::resolve_profiles_v4`]'s job (endpoints deduped
+    // by (ip,proto,port), /etc/hosts by name) — a single-element set is byte-for-byte the legacy result.
+    let mut profile_refs = Vec::with_capacity(profiles.len());
+    for p in profiles {
+        match shrek_policy::egress::resolve(p) {
+            Some(r) => profile_refs.push(r),
+            None => {
+                eprintln!("bench run: recorded egress profile {p:?} is not in sealed policy — refusing (fail-closed)");
+                return 1;
+            }
+        }
+    }
+    let resolved = match net_plane::resolve_profiles_v4(&profile_refs) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("bench run: egress profile resolve failed (fail-closed, no network): {e}");
@@ -964,8 +1025,8 @@ fn run_networked(rec: &mut BenchRecord, interactive: bool, data: &Path, profile:
         return rc;
     }
     eprintln!(
-        "gatekeeperd/bench_plane: egress up bench={} profile={} ns={} cip={} dsts={}",
-        rec.id, profile, net.ns, net.cont_ip, resolved.endpoints.len()
+        "gatekeeperd/bench_plane: egress up bench={} profiles=[{}] ns={} cip={} dsts={}",
+        rec.id, profiles.join(","), net.ns, net.cont_ip, resolved.endpoints.len()
     );
 
     let code = if interactive {
@@ -1059,34 +1120,38 @@ fn grant(name: &str, path_str: &str, rw: bool) -> i32 {
     0
 }
 
-/// network <name> <profile>: attach a SEALED egress policy to a Bench (rule 3). The profile name is
-/// validated against the compiled-in `shrek_policy::egress` table (default-deny: an unknown name is
-/// refused, never "allow all"). `none` REVOKES egress. The policy is recorded and injected per container
-/// start (a rootless netns dies on every stop). No live container is touched here.
-fn network(name: &str, profile: &str) -> i32 {
+/// network <name> <profile...>: SET a Bench's sealed egress to EXACTLY the named set (rule 3). DECLARATIVE
+/// and REPEATABLE — this REPLACES whatever set was there, so `debian-apt pypi-https` composes apt + pip on
+/// one bench and the consent screen always shows the complete resulting reachability (Fable item-1). Each
+/// name is validated against the compiled-in `shrek_policy::egress` table (default-deny: any unknown name
+/// refuses the WHOLE call, changing nothing). `none` alone REVOKES all egress. The set is recorded and its
+/// UNION injected per container start (a rootless netns dies on every stop). No live container is touched.
+fn network(name: &str, profiles: &[String]) -> i32 {
     let rdir = bench_record::records_dir();
     let Some(mut rec) = bench_record::load_record(&rdir, name) else {
         eprintln!("bench: no such bench {name}");
         return 4;
     };
-    let revoke = profile == "none";
-    if !revoke && shrek_policy::egress::resolve(profile).is_none() {
-        eprintln!("bench network: {profile:?} is not a sealed egress profile — refused (policy is default-deny)");
-        return 2;
-    }
-    // One egress policy per Bench (MVP): drop any existing net grant, then add (unless revoking).
+    let set = match validate_profile_set(profiles) {
+        Ok(s) => s,
+        Err(msg) => {
+            eprintln!("bench network: {msg}");
+            return 2;
+        }
+    };
+    // Declarative replace: drop every existing net grant, then add the validated set (empty set = revoke).
     rec.grants.retain(|g| !matches!(Grant::parse(g), Some(Grant::Net { .. })));
-    if !revoke {
-        rec.grants.push(Grant::Net { profile: profile.to_string() }.encode());
+    for p in &set {
+        rec.grants.push(Grant::Net { profile: p.clone() }.encode());
     }
     if let Err(e) = bench_record::write_record(&rdir, &rec) {
         eprintln!("bench network: record write failed: {e}");
         return 1;
     }
-    if revoke {
+    if set.is_empty() {
         println!("bench: {name} egress revoked (runs offline)");
     } else {
-        println!("bench: {name} egress policy set to {profile} (injected per run)");
+        println!("bench: {name} egress policy set to [{}] (injected per run)", set.join(", "));
     }
     0
 }
@@ -1346,7 +1411,7 @@ impl AuthorityPlan {
     pub(crate) fn action(&self) -> String {
         match &self.kind {
             CommitKind::Grant { rw, .. } => format!("GRANT a host folder ({}) to bench '{}'", if *rw { "read-write" } else { "read-only" }, self.bench),
-            CommitKind::Network { .. } => format!("ATTACH a network egress policy to bench '{}'", self.bench),
+            CommitKind::Network { .. } => format!("SET the network egress on bench '{}'", self.bench),
             CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
         }
     }
@@ -1354,7 +1419,7 @@ impl AuthorityPlan {
 
 enum CommitKind {
     Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
-    Network { profile: String },
+    Network { profiles: Vec<String> },
     Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
 }
 
@@ -1370,7 +1435,7 @@ impl AuthorityPlan {
                 rw,
                 ident: Ident { dev_major: 0, dev_minor: 0, ino: 1 },
             },
-            "network" => CommitKind::Network { profile: "p".into() },
+            "network" => CommitKind::Network { profiles: vec!["p".into()] },
             _ => CommitKind::Export {
                 key: "k".into(),
                 file: "shrek-bench-media-k.desktop".into(),
@@ -1464,7 +1529,7 @@ fn precheck_grant(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
         return Err((2, "grant target must be a directory".to_string()));
     }
     let ident = pinned.ident;
-    let trifecta = trifecta_after(record_has_fs(&rec), egress_profile(&rec).is_some(), true, false);
+    let trifecta = trifecta_after(record_has_fs(&rec), !egress_profiles(&rec).is_empty(), true, false);
     let rows = vec![
         ("Grant path".to_string(), canonical.display().to_string()),
         ("Access".to_string(), if rw { "READ-WRITE".into() } else { "read-only".into() }),
@@ -1474,26 +1539,44 @@ fn precheck_grant(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
 }
 
 fn precheck_network(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
-    let (name, profile) = match (rest.first(), rest.get(1)) {
-        (Some(n), Some(p)) => (n.clone(), p.clone()),
-        _ => return Err((2, "usage: network <name> <profile>".into())),
+    let Some((name, profiles)) = rest.split_first() else {
+        return Err((2, "usage: network <name> <profile...>".into()));
     };
-    if profile == "none" {
-        return Err((2, "network none REVOKES egress (reducing) — ceremony-free, not a consent request".into()));
+    // `none` (revoke) is reducing — it is routed ceremony-free by the front ends and must never reach the
+    // consent path; if it does (e.g. mixed into a set), refuse before prompting any human.
+    if profiles.iter().any(|p| p == "none") {
+        return Err((2, "network none REVOKES egress (reducing) — ceremony-free, not a consent request; it cannot be mixed with a profile".into()));
     }
+    // Validate the WHOLE declarative set up front (dup/unknown/flag all fail here, before any VT is shown —
+    // consent invariant 1). `none` is already excluded, so the returned set is non-empty.
+    let set = validate_profile_set(profiles).map_err(|m| (2, m))?;
     let rdir = bench_record::records_dir();
-    let Some(rec) = bench_record::load_record(&rdir, &name) else {
+    let Some(rec) = bench_record::load_record(&rdir, name) else {
         return Err((4, format!("no such bench {name}")));
     };
-    let Some(pref) = shrek_policy::egress::resolve(&profile) else {
-        return Err((2, format!("{profile:?} is not a sealed egress profile (policy is default-deny)")));
-    };
-    let mut rows = vec![("Egress profile".to_string(), profile.clone())];
-    if let Ok(r) = net_plane::resolve_profiles_v4(&[pref]) {
+    // Resolve each name (validated Some, but re-resolve fail-closed rather than unwrap in a daemon).
+    let mut refs = Vec::with_capacity(set.len());
+    for p in &set {
+        match shrek_policy::egress::resolve(p) {
+            Some(r) => refs.push(r),
+            None => return Err((2, format!("{p:?} is not a sealed egress profile (policy is default-deny)"))),
+        }
+    }
+    // One row PER profile (never a joined string — the consent renderer sanitizes per value, and a name in
+    // the middle of a long joined line could be visually lost). The screen always shows the COMPLETE
+    // resulting set — the property that keeps declarative-replace consent-safe (Fable item-1 fix 4).
+    let mut rows = network_profile_rows(&set);
+    if let Ok(r) = net_plane::resolve_profiles_v4(&refs) {
         rows.push(("Allowed endpoints".to_string(), r.endpoints.len().to_string()));
     }
+    // Replace semantics: show the set being displaced when the bench already has egress (clarity — the
+    // human sees this is a REPLACE, not an add). Removal is reducing, so this is transparency, not a gate.
+    let prior = egress_profiles(&rec);
+    if !prior.is_empty() {
+        rows.push(("Replaces egress".to_string(), prior.join(", ")));
+    }
     let trifecta = trifecta_after(record_has_fs(&rec), false, false, true);
-    Ok(AuthorityPlan { bench: name, diff_rows: rows, trifecta, kind: CommitKind::Network { profile } })
+    Ok(AuthorityPlan { bench: name.clone(), diff_rows: rows, trifecta, kind: CommitKind::Network { profiles: set } })
 }
 
 fn precheck_export(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
@@ -1537,7 +1620,7 @@ fn precheck_export(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
     if !valid_desktop_file(&file) {
         return Err((2, format!("generated .desktop name {file:?} is unsafe")));
     }
-    let trifecta = trifecta_after(record_has_fs(&rec), egress_profile(&rec).is_some(), false, false);
+    let trifecta = trifecta_after(record_has_fs(&rec), !egress_profiles(&rec).is_empty(), false, false);
     let rows = vec![
         ("Launcher key".to_string(), key.clone()),
         ("Runs command".to_string(), workload.join(" ")),
@@ -1551,7 +1634,7 @@ fn precheck_export(rest: &[String]) -> Result<AuthorityPlan, (i32, String)> {
 pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
     match &plan.kind {
         CommitKind::Grant { canonical, leaf, rw, ident } => commit_grant(&plan.bench, canonical, leaf, *rw, *ident),
-        CommitKind::Network { profile } => commit_network(&plan.bench, profile),
+        CommitKind::Network { profiles } => commit_network(&plan.bench, profiles),
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
     }
 }
@@ -1601,23 +1684,32 @@ fn commit_grant(bench: &str, canonical: &Path, leaf: &str, rw: bool, expected: I
     0
 }
 
-fn commit_network(bench: &str, profile: &str) -> i32 {
+fn commit_network(bench: &str, profiles: &[String]) -> i32 {
     let rdir = bench_record::records_dir();
     let Some(mut rec) = bench_record::load_record(&rdir, bench) else {
         eprintln!("bench network: no such bench {bench}");
         return 4;
     };
-    if shrek_policy::egress::resolve(profile).is_none() {
-        eprintln!("bench network: {profile:?} not a sealed egress profile (re-check) — refused");
-        return 2;
+    // Re-validate the WHOLE set against sealed policy at apply time (fail-closed on any unknown). The plan
+    // could only have been built from valid names, but re-checking keeps commit self-sufficient — it never
+    // trusts the plan's strings for the policy decision (Fable item-1 fix 5).
+    for p in profiles {
+        if shrek_policy::egress::resolve(p).is_none() {
+            eprintln!("bench network: {p:?} not a sealed egress profile (re-check) — refused");
+            return 2;
+        }
     }
+    // Declarative replace: drop all existing net grants, then write the validated set in order. The record
+    // write is atomic (temp+rename) so no partial multi-`net` record is ever observable.
     rec.grants.retain(|g| !matches!(Grant::parse(g), Some(Grant::Net { .. })));
-    rec.grants.push(Grant::Net { profile: profile.to_string() }.encode());
+    for p in profiles {
+        rec.grants.push(Grant::Net { profile: p.clone() }.encode());
+    }
     if let Err(e) = bench_record::write_record(&rdir, &rec) {
         eprintln!("bench network: record write failed: {e}");
         return 1;
     }
-    println!("bench: {bench} egress policy set to {profile} (injected per run)");
+    println!("bench: {bench} egress policy set to [{}] (injected per run)", profiles.join(", "));
     0
 }
 
@@ -1725,9 +1817,11 @@ pub fn cli(args: &[String]) -> i32 {
             }
         }
         "network" => {
-            match (rest.first(), rest.get(1)) {
-                (Some(n), Some(p)) => network(n, p),
-                _ => { eprintln!("usage: gatekeeperd bench network <name> <profile|none>"); 2 }
+            // Declarative SET: `network <name> <profile...|none>`. `network` (root/cli) validates the whole
+            // list itself; an empty tail is a usage error inside `network` → validate_profile_set.
+            match rest.split_first() {
+                Some((name, profiles)) => network(name, profiles),
+                None => { eprintln!("usage: gatekeeperd bench network <name> <profile...|none>"); 2 }
             }
         }
         "export" => {
@@ -1880,11 +1974,13 @@ pub fn dispatch_socket(cred: Ucred, peer_fd: RawFd, argv: &[String]) -> (i32, Ve
         // none` REVOKES egress (reducing authority) → ceremony-free; a profile is authority-increasing.
         "grant" | "export" => crate::consent::run_socket_consent(cred, peer_fd, verb, rest),
         "network" => {
-            if rest.get(1).map(String::as_str) == Some("none") {
-                match rest.first() {
-                    Some(n) => { let rc = network(n, "none"); (rc, summ("network", n, rc)) }
-                    None => (2, vec!["RESULT bench-network - usage".into()]),
-                }
+            // Ceremony-free ONLY for the EXACT reducing request `<name> none` with nothing after it. Any
+            // other tail — including `<name> none <profile>` — is authority-bearing or malformed and must
+            // NOT silently drop args into a revoke (Fable item-1 fix 2). Route everything else through the
+            // ceremony, whose precheck rejects a mixed/dup/unknown set before any human is prompted.
+            if rest.len() == 2 && rest[1] == "none" {
+                let rc = network(&rest[0], std::slice::from_ref(&rest[1]));
+                (rc, summ("network", &rest[0], rc))
             } else {
                 crate::consent::run_socket_consent(cred, peer_fd, "network", rest)
             }
@@ -2088,16 +2184,78 @@ mod tests {
     }
 
     #[test]
-    fn egress_profile_reads_the_single_net_grant() {
+    fn egress_profiles_reads_the_net_grant_set_in_order() {
         let mut r = BenchRecord {
             name: "b".into(), id: "b".into(), project: 100_000, quota_kib: 1024,
             created: 0, state: "created".into(), seed: "scratch".into(),
-            grants: vec!["fs-ro /home/dev/in".into(), "net github-https".into()],
+            grants: vec!["fs-ro /home/dev/in".into(), "net debian-apt".into(), "net pypi-https".into()],
             exports: vec![],
         };
-        assert_eq!(egress_profile(&r), Some("github-https".to_string()));
+        // Multiple net grants COMPOSE, ordered as recorded (the union is resolved at run time).
+        assert_eq!(egress_profiles(&r), vec!["debian-apt".to_string(), "pypi-https".to_string()]);
         r.grants = vec!["fs-rw /home/dev/out".into()];
-        assert_eq!(egress_profile(&r), None);
+        assert!(egress_profiles(&r).is_empty());
+    }
+
+    #[test]
+    fn validate_profile_set_declarative_grammar() {
+        // Single profile: byte-for-byte the legacy single-arg behavior.
+        assert_eq!(validate_profile_set(&["debian-apt".into()]).unwrap(), vec!["debian-apt".to_string()]);
+        // Multiple profiles COMPOSE, input order preserved.
+        assert_eq!(
+            validate_profile_set(&["debian-apt".into(), "pypi-https".into()]).unwrap(),
+            vec!["debian-apt".to_string(), "pypi-https".to_string()]
+        );
+        // `none` ALONE = the empty set (revoke-all).
+        assert!(validate_profile_set(&["none".into()]).unwrap().is_empty());
+        // `none` mixed with a real profile is REFUSED — both orderings (no silent drop; Fable item-1 fix 2).
+        assert!(validate_profile_set(&["none".into(), "pypi-https".into()]).is_err());
+        assert!(validate_profile_set(&["debian-apt".into(), "none".into()]).is_err());
+        // An unknown name refuses the WHOLE call (fail-closed, default-deny).
+        assert!(validate_profile_set(&["debian-apt".into(), "evil-exfil".into()]).is_err());
+        // Duplicates are REFUSED (clear error, never a silent dedup).
+        assert!(validate_profile_set(&["pypi-https".into(), "pypi-https".into()]).is_err());
+        // A flag-looking token is refused (the set holds profile names, not flags).
+        assert!(validate_profile_set(&["--rw".into()]).is_err());
+        // Empty input is a usage error (use `none` to revoke).
+        assert!(validate_profile_set(&[]).is_err());
+    }
+
+    #[test]
+    fn precheck_network_rejects_bad_sets_before_any_record_io() {
+        // These all fail in validation — BEFORE load_record — so they need no fixture and prove the human
+        // is never prompted for a malformed/authority-laundering request (consent invariant 1). Covers both
+        // `none`-mixed orderings (the must-fix-2 contract on the ceremony path), dup, unknown, and flags.
+        for rest in [
+            vec!["b".to_string(), "none".into(), "pypi-https".into()], // none first
+            vec!["b".to_string(), "debian-apt".into(), "none".into()], // none last
+            vec!["b".to_string(), "pypi-https".into(), "pypi-https".into()], // dup
+            vec!["b".to_string(), "not-a-profile".into()], // unknown
+            vec!["b".to_string(), "--rw".into()], // flag token
+            vec!["b".to_string()], // empty set
+        ] {
+            assert!(precheck_network(&rest).is_err(), "precheck must reject {rest:?} pre-I/O");
+        }
+    }
+
+    #[test]
+    fn network_profile_rows_are_one_per_profile_never_joined() {
+        // must-fix 4: the consent screen shows the COMPLETE set as one row per name — not a single joined
+        // "debian-apt, pypi-https" line where a name could be visually lost.
+        let rows = network_profile_rows(&["debian-apt".to_string(), "pypi-https".to_string()]);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0], ("Egress profile".to_string(), "debian-apt".to_string()));
+        assert_eq!(rows[1], ("Egress profile".to_string(), "pypi-https".to_string()));
+        assert!(!rows.iter().any(|(_, v)| v.contains(',')), "no joined multi-name value");
+    }
+
+    #[test]
+    fn network_authority_action_says_set_not_attach() {
+        // Replace semantics: the ceremony header must say SET (the verb replaces the whole set), not ATTACH.
+        let plan = AuthorityPlan::test_plan("network", "media", false, false);
+        let action = plan.action();
+        assert!(action.contains("SET the network egress"), "truthful replace-semantics header: {action}");
+        assert!(!action.to_lowercase().contains("attach"));
     }
 
     #[test]
