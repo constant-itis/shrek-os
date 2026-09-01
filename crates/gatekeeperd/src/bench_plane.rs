@@ -346,6 +346,21 @@ fn dev_uid() -> u32 {
         .unwrap_or(1000)
 }
 
+/// `dev`'s PRIMARY gid (passwd field 4), NOT assumed equal to its uid. The grant-dir traverse story
+/// (mycelium #2982 hole 3) rests on group-owner == dev's real login group, so a bad guess would strip
+/// dev's group `--x` and brick every `podman -v` (fail-closed). Parsed from /etc/passwd like [`dev_uid`].
+fn dev_gid() -> u32 {
+    std::fs::read_to_string("/etc/passwd")
+        .ok()
+        .and_then(|p| {
+            p.lines().find_map(|l| {
+                let f: Vec<&str> = l.split(':').collect();
+                (f.len() >= 4 && f[0] == BENCH_USER).then(|| f[3].parse::<u32>().ok()).flatten()
+            })
+        })
+        .unwrap_or(1000)
+}
+
 // ---- pure argv builders (unit-tested; the exec side is proven in the oracle/VM) ------------------
 
 /// A materialized FS grant to bind into the container: the host path (under `grants_dir`) → `/grants/<leaf>`.
@@ -579,22 +594,38 @@ fn is_mountpoint(p: &Path) -> bool {
     mi.lines().any(|l| l.split(' ').nth(4).is_some_and(|mp| mp == want))
 }
 
-/// Create the per-Bench `/run` grant dir chain with the ProtectHome-safe perms (Fable step-5 fix 1): the
-/// `<id>` and `grants` dirs are `dev`-owned `0700` — `dev` traverses them for its `-v`, but no other
-/// unprivileged service can follow the bind back into `dev`'s home. The `/run/shrek/bench` container stays
-/// root `0755` (just a namespace for the per-bench dirs).
+/// Create the per-Bench `/run` grant dir chain, hardened against the FS-grant redirect (mycelium #2982
+/// hole 3). Both the `<id>` and `grants` dirs are `root:dev` mode `0710`: root OWNS them, so `dev` can
+/// neither plant a symlink leaf inside `grants` nor `rename(2)` `grants`/`<id>` aside to substitute a
+/// forged one — either would let `relocate_*`'s symlink-following `create_dir_all`+`mount` redirect the
+/// bind onto an ungranted system target (e.g. /etc). `dev` (primary group `dev`) still gets group `--x`
+/// to TRAVERSE both dirs for its rootless-podman `-v`, but NO write; `other ---` preserves Fable step-5
+/// fix-1 (no OTHER unprivileged service can follow the bind into `dev`'s home). The `/run/shrek/bench`
+/// container stays root `0755` (just a namespace; dev can't rename `<id>` out of it either).
 fn prepare_grant_dir(id: &str) -> io::Result<()> {
+    use std::fs::DirBuilder;
+    use std::os::unix::fs::DirBuilderExt;
     let bench = bench_run_dir(id);
     let grants = grants_dir(id);
     // parents: /run/shrek + /run/shrek/bench (root 0755).
     if let Some(container) = bench.parent() {
         std::fs::create_dir_all(container)?;
     }
-    std::fs::create_dir_all(&grants)?;
-    let uid = dev_uid();
+    let gid = dev_gid();
     for d in [&bench, &grants] {
-        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700))?;
-        let _ = chown(d, Some(uid), Some(uid));
+        // Create root-owned + mode 0710 FROM BIRTH (DirBuilder::mode, not create_dir_all + a later chmod):
+        // until the chown below the group is root's gid 0, so `other ---` gives `dev` ZERO access — there
+        // is no umask-0 window in which `dev` could plant a symlink leaf before the perms tighten. On
+        // reissue the dir already exists (AlreadyExists ⇒ ignore); the set_permissions + chown then
+        // re-harden it. Group-write is never set at any point (0710), so the chown ordering is race-safe.
+        match DirBuilder::new().mode(0o710).create(d) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o710))?;
+        // root owner, `dev` GROUP (dev's primary gid gets the `--x` traverse bit). NEVER dev-owned.
+        let _ = chown(d, Some(0), Some(gid));
     }
     Ok(())
 }
@@ -667,9 +698,10 @@ fn unmount_grants(rec: &BenchRecord) {
 }
 
 /// Write the bench-owned `/etc/hosts` from a resolved egress profile (localhost + one pinned line per
-/// sealed host). 0644 under the `dev`-owned `0700` bench dir. Written BEFORE `podman run` (fix 6).
+/// sealed host). 0644 under the `root:dev 0710` bench dir (root writes it; dev traverses to read it).
+/// Written BEFORE `podman run` (fix 6).
 fn write_hosts(id: &str, resolved: &net_plane::Resolved) -> io::Result<PathBuf> {
-    prepare_grant_dir(id)?; // ensures the (dev 0700) bench dir exists
+    prepare_grant_dir(id)?; // ensures the root:dev 0710 bench dir exists (dev cannot swap it)
     let path = hosts_file(id);
     std::fs::write(&path, net_plane::etc_hosts(&resolved.hosts))?;
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
@@ -951,8 +983,8 @@ fn grant(name: &str, path_str: &str, rw: bool) -> i32 {
         eprintln!("bench grant: {} has an unsafe basename (need alnum/._- , no leading dot)", canonical.display());
         return 2;
     };
-    // Ensure the per-bench /run grant dir exists with the ProtectHome-safe perms (dev-owned 0700) BEFORE
-    // relocate creates the leaf under it — else relocate's create_dir_all leaves the parent root-owned.
+    // Ensure the per-bench /run grant dir exists root:dev 0710 (mycelium #2982 hole 3) BEFORE relocate
+    // creates the leaf under it — so the grants dir dev cannot write is the parent of every bind target.
     if let Err(e) = prepare_grant_dir(&rec.id) {
         eprintln!("bench grant: could not prepare the grant dir: {e}");
         return 1;
