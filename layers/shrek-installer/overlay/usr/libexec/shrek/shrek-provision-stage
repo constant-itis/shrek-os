@@ -1,0 +1,156 @@
+#!/bin/sh
+# shrek-provision-stage — the LIVE-installer side of ADR-005 (docs/adr-005-provisioning.md), steps 1-3 of §6:
+#   collect (untrusted, Quickshell) -> schema-validate(live) -> root staging.
+#
+# It takes the non-secret install INTENT the Quickshell installer collected (locale, keymap, owner display
+# name) and writes the file-legible provisioning MANIFEST to a root-owned live-side staging path. That
+# manifest is what shrek-install-target later transplants onto the freshly-formatted target /home (the
+# trust-boundary crossing, §6.5), where a first-boot gate RE-validates it before anything touches sealed
+# config. This helper is the untrusted side: it bounds enums and sanitizes the name, but the target trusts
+# NOTHING here until it re-validates.
+#
+# WHAT MAY NOT CROSS (§3): any secret. No passphrase, no hash — the owner credential is established
+# target-side at first run (shrek-owner-provision). This helper never sees or writes a credential.
+#
+# FAILURE POSTURE (§2, §5): the non-secret plane fails OPEN-to-safe-default. A value that fails its bound is
+# DROPPED (not fatal) with a legible reason in the `fault` file; the target then delivers the baked default
+# for that key. Only a schema_version mismatch rejects the whole manifest (§5) -> all defaults. The helper
+# exits 0 on any bad-value input (structural errors like an uncreatable staging dir are the only nonzero).
+#
+# TEST SEAM (mirrors shrek-owner-provision's SHREK_PROVISION_SEED_ONLY): SHREK_PROVISION_STAGE_DIR redirects
+# the /run staging target into a scratch dir, and enum sources are env-overridable (SHREK_XKB_SYMBOLS_DIR,
+# SHREK_LOCALE_ALLOWLIST), so scripts/provision-manifest-proof.sh exercises the whole validate/stage core as
+# an ordinary non-root user with no VM. The root:root chowns are applied only when run as root (real boot).
+set -eu
+
+# ---- configuration (env-overridable; defaults are the real live-env paths) --------------------------
+SCHEMA_VERSION_EXPECTED="1"
+STAGE_DIR="${SHREK_PROVISION_STAGE_DIR:-/run/shrek/provisioning}"
+MANIFEST="$STAGE_DIR/manifest"
+FAULT="$STAGE_DIR/fault"
+COLLECT="${SHREK_PROVISION_COLLECT_FILE:-}"                       # optional key=value file from the UI
+XKB_SYMBOLS_DIR="${SHREK_XKB_SYMBOLS_DIR:-/usr/share/X11/xkb/symbols}"
+LOCALE_ALLOWLIST="${SHREK_LOCALE_ALLOWLIST:-}"                    # file of supported locales; else `locale -a`
+NAME_MAX="${SHREK_PROVISION_NAME_MAX:-64}"
+
+DEFAULT_LOCALE="en_US.UTF-8"
+DEFAULT_KEYMAP="us"
+
+log()  { echo "shrek-provision-stage: $*"; }
+fail() { echo "shrek-provision-stage: FATAL: $*" >&2; exit 1; }
+is_root() { [ "$(id -u)" = "0" ]; }
+
+# ---- collect the raw (untrusted) intent -------------------------------------------------------------
+# A collect file, when present, is authoritative (the UI's output); otherwise fall back to env. Only the
+# whitelisted keys are ever read; anything else in the file is ignored.
+getk() {  # getk KEY FILE  -> last value for KEY (value may contain '='), empty if absent
+    awk -F= -v k="$1" '$1==k { v=substr($0, length($1)+2); f=1 } END { if (f) print v }' "$2"
+}
+LOCALE_IN="${SHREK_PROV_LOCALE:-}"
+KEYMAP_IN="${SHREK_PROV_KEYMAP:-}"
+NAME_IN="${SHREK_PROV_OWNER_NAME:-}"
+SCHEMA_IN="${SHREK_PROV_SCHEMA_VERSION:-$SCHEMA_VERSION_EXPECTED}"
+if [ -n "$COLLECT" ] && [ -f "$COLLECT" ]; then
+    LOCALE_IN="$(getk locale "$COLLECT")"
+    KEYMAP_IN="$(getk keymap "$COLLECT")"
+    NAME_IN="$(getk owner_display_name "$COLLECT")"
+    _sv="$(getk schema_version "$COLLECT")"; [ -n "$_sv" ] && SCHEMA_IN="$_sv"
+fi
+
+# ---- validators -------------------------------------------------------------------------------------
+# locale: member of the installed/supported set. Compared case-insensitively with '-' removed so the
+# manifest's canonical `en_US.UTF-8` matches `locale -a`'s `en_US.utf8`.
+normloc() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-'; }
+valid_locale() {
+    [ -n "$1" ] || return 1
+    _n="$(normloc "$1")"
+    if [ -n "$LOCALE_ALLOWLIST" ] && [ -f "$LOCALE_ALLOWLIST" ]; then
+        _src="$(cat "$LOCALE_ALLOWLIST")"
+    else
+        _src="$(locale -a 2>/dev/null || true)"
+    fi
+    _hit="$(printf '%s\n' "$_src" | while IFS= read -r _l; do
+                [ "$(normloc "$_l")" = "$_n" ] && { printf 'y'; break; }
+            done)"
+    [ -n "$_hit" ]
+}
+
+# keymap: a shipped XKB LAYOUT name (§5a/§5b — the one canonical namespace). Valid iff it is a bare layout
+# token AND a symbols file of that name exists in the XKB data. M1 is layout-only (no XKBVARIANT).
+valid_keymap() {
+    case "$1" in
+        ''|*[!a-z0-9]*) return 1 ;;
+    esac
+    [ -f "$XKB_SYMBOLS_DIR/$1" ]
+}
+
+# owner_display_name: non-secret intent. Strip C0 controls + DEL (removes ESC 0x1b, so any CSI sequence is
+# broken), strip ':' (must never forge a shadow/passwd field wherever later rendered), cap length. Never
+# rejected — always sanitized. (Shell-safety does not depend on this: the name is rendered as inert text
+# only, never interpolated into a shell — ADR-005 §5. This is defense-in-depth.)
+sanitize_name() {
+    printf '%s' "$1" | tr -d '\000-\037\177' | tr -d ':' | cut -c1-"$NAME_MAX"
+}
+
+# ---- staging store ----------------------------------------------------------------------------------
+mkdir -p "$STAGE_DIR" || fail "cannot create staging dir $STAGE_DIR"
+chmod 0700 "$STAGE_DIR" 2>/dev/null || true
+if is_root; then chown 0:0 "$STAGE_DIR" 2>/dev/null || true; fi
+
+FAULTS=0
+: > "$FAULT.tmp"
+addfault() { printf '%s\n' "$1" >> "$FAULT.tmp"; FAULTS=$((FAULTS+1)); }
+
+TMPKV="$STAGE_DIR/.kv.$$"
+: > "$TMPKV"
+add() { printf '%s=%s\n' "$1" "$2" >> "$TMPKV"; }
+
+# schema_version gate (§5): exact match, else reject the WHOLE manifest -> all defaults. We still stage a
+# manifest carrying only the (expected) schema_version and no data keys, so the target sees a well-formed
+# empty intent and cleanly delivers baked defaults.
+add schema_version "$SCHEMA_VERSION_EXPECTED"
+if [ "$SCHEMA_IN" != "$SCHEMA_VERSION_EXPECTED" ]; then
+    addfault "schema_version: got '$SCHEMA_IN', expected '$SCHEMA_VERSION_EXPECTED' — whole manifest rejected; all values default"
+else
+    # locale
+    if [ -n "$LOCALE_IN" ]; then
+        if valid_locale "$LOCALE_IN"; then add locale "$LOCALE_IN"
+        else addfault "locale: '$LOCALE_IN' not in the installed locale set — using default $DEFAULT_LOCALE"; fi
+    fi
+    # keymap (XKB layout name)
+    if [ -n "$KEYMAP_IN" ]; then
+        if valid_keymap "$KEYMAP_IN"; then add keymap "$KEYMAP_IN"
+        else addfault "keymap: '$KEYMAP_IN' is not a shipped XKB layout — using default $DEFAULT_KEYMAP"; fi
+    fi
+    # owner_display_name (sanitize, never reject)
+    if [ -n "$NAME_IN" ]; then
+        _sn="$(sanitize_name "$NAME_IN")"
+        if [ -n "$_sn" ]; then
+            add owner_display_name "$_sn"
+            [ "$_sn" = "$NAME_IN" ] || addfault "owner_display_name: sanitized (control/CSI/colon stripped or length capped)"
+        else
+            addfault "owner_display_name: empty after sanitize — first run will prompt"
+        fi
+    fi
+fi
+
+# ---- write the manifest: sorted key=value, LF, root:root 0600, atomic (tmp+rename) ------------------
+LC_ALL=C sort "$TMPKV" > "$MANIFEST.tmp" || fail "cannot write $MANIFEST.tmp"
+rm -f "$TMPKV"
+chmod 0600 "$MANIFEST.tmp"
+if is_root; then chown 0:0 "$MANIFEST.tmp" 2>/dev/null || true; fi
+mv "$MANIFEST.tmp" "$MANIFEST"
+
+# ---- fault record: legible per-key reasons, or removed when clean ----------------------------------
+if [ "$FAULTS" -gt 0 ]; then
+    chmod 0600 "$FAULT.tmp"
+    if is_root; then chown 0:0 "$FAULT.tmp" 2>/dev/null || true; fi
+    mv "$FAULT.tmp" "$FAULT"
+    log "staged $MANIFEST with $FAULTS fault(s); see $FAULT"
+else
+    rm -f "$FAULT.tmp" "$FAULT"
+    log "staged $MANIFEST (clean)"
+fi
+
+sync 2>/dev/null || true
+exit 0
