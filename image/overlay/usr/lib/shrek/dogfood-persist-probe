@@ -402,6 +402,186 @@ if [ "$OWNER_PROVISIONED" = 1 ]; then
 fi
 set -e
 
+# --- ADR-005 provisioning plane (§11 sealed-VM dogfood): locale/keymap/timezone appliers + §5b VT closure --
+# This is the AUTHORITATIVE runtime proof of the installer-M1 provisioning items #1-4. The DOGFOOD image
+# bakes a test-manifest (locale=C.UTF-8, keymap=de, owner_display_name="Swamp Lord") whose values DELIBERATELY
+# DIFFER from the §5a baked defaults (en_US.UTF-8 / us / UTC) — so a green result proves the manifest actually
+# DELIVERED, not that a default happened to match. Running at boot>=2 also proves the store survived a reboot.
+# `set +e` so every leg reports its SHREK-DOGFOOD PROVISION line regardless of individual rc.
+PSTORE=/home/.shrek-system/provisioning
+PRUN=/run/shrek/provisioning/validated
+set +e
+if [ -d "$PSTORE" ]; then
+    say "PROVISION active=[yes]"
+
+    # (#5) the manifest survived the reboot on the persistent shrek-data /home (probe already rebooted once).
+    if [ -f "$PSTORE/manifest" ]; then
+        _mkeys=$(grep -cE '^(schema_version|locale|keymap|owner_display_name)=' "$PSTORE/manifest" 2>/dev/null)
+        [ "${_mkeys:-0}" -ge 3 ] && say "PROVISION manifest-persist=[ok boot=$n keys=$_mkeys]" \
+                                 || say "PROVISION manifest-persist=FAIL(boot=$n keys=${_mkeys:-0})"
+    else
+        say "PROVISION manifest-persist=FAIL(manifest absent at boot=$n)"
+    fi
+    # the re-validation gate ran to completion this boot (sentinel is written LAST).
+    [ -e "$PRUN/.gate-complete" ] && say "PROVISION gate-sentinel=[ok]" || say "PROVISION gate-sentinel=FAIL(no .gate-complete)"
+
+    # ---- (#1) LOCALE: manifest C.UTF-8 delivered over the baked en_US.UTF-8 --------------------------------
+    if [ -f "$PSTORE/state/locale.conf" ]; then say "PROVISION locale-state=[ok $(tr '\n' ';' < "$PSTORE/state/locale.conf")]"
+    else say "PROVISION locale-state=FAIL(no state/locale.conf)"; fi
+    [ -e "$PSTORE/.applied/locale" ] && say "PROVISION locale-stamp=[ok]" || say "PROVISION locale-stamp=FAIL(unstamped)"
+    if mountpoint -q /etc/locale.conf 2>/dev/null; then
+        _lc=$(grep -E '^LANG=' /etc/locale.conf 2>/dev/null | tail -n1)
+        case "$_lc" in LANG=C.UTF-8) say "PROVISION locale-delivered=[ok $_lc bound-over-baked-en_US]";;
+                       *) say "PROVISION locale-delivered=FAIL(bound but $_lc)";; esac
+    else
+        say "PROVISION locale-delivered=FAIL(/etc/locale.conf not a mountpoint — baked default stands)"
+    fi
+    # consumer-visible (INFO — the profile.d default also lands on C.UTF-8, so this cannot discriminate; the
+    # discriminating proof is locale-delivered above, which differs from the baked en_US).
+    say "PROVISION locale-session=[LANG=$(asdev sh -lc 'printf %s "$LANG"' 2>/dev/null)]"
+
+    # ---- (#2) KEYMAP: manifest de delivered over the baked us; §5b VT + compositor + clobber closure -------
+    if [ -f "$PSTORE/state/vconsole.conf" ]; then say "PROVISION keymap-state=[ok $(tr '\n' ';' < "$PSTORE/state/vconsole.conf")]"
+    else say "PROVISION keymap-state=FAIL(no state/vconsole.conf)"; fi
+    [ -e "$PSTORE/.applied/keymap" ] && say "PROVISION keymap-stamp=[ok]" || say "PROVISION keymap-stamp=FAIL(unstamped)"
+    if mountpoint -q /etc/vconsole.conf 2>/dev/null; then
+        _xk=$(grep -E '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null | tail -n1)
+        case "$_xk" in XKBLAYOUT=de) say "PROVISION keymap-delivered=[ok $_xk bound-over-baked-us]";;
+                       *) say "PROVISION keymap-delivered=FAIL(bound but $_xk)";; esac
+    else
+        say "PROVISION keymap-delivered=FAIL(/etc/vconsole.conf not a mountpoint)"
+    fi
+    # THE consumer-visible keymap proof: the LIVE kernel VT keymap (what the text-mode first-run wizard reads).
+    # de swaps y<->z vs us: keycode 21 (US-'y' position) yields 'z' on de, 'y' on us. dumpkeys reads the GLOBAL
+    # kernel translation table loadkeys wrote — compositor-independent (sway uses its own XKB, not this table).
+    _kc21() { dumpkeys 2>/dev/null | awk '/^keycode +21 =/{print $4; exit}'; }
+    _k=$(_kc21)
+    case "$_k" in
+        *z*) say "PROVISION vt-keymap-live=[ok de kc21=$_k — non-us layout live on the kernel VT]" ;;
+        *y*) say "PROVISION vt-keymap-live=FAIL(us kc21=$_k — baked layout, provisioned de NOT applied)" ;;
+        *)   say "PROVISION vt-keymap-live=FAIL(unexpected kc21=[$_k])" ;;
+    esac
+    # console FONT survives: the §5b closure ships XKBLAYOUT/KEYMAP only and leaves FONT to console-setup, so
+    # our vconsole.conf must carry NO FONT= (a FONT clobber would blank the console glyphs).
+    if grep -qE '^FONT=' /etc/vconsole.conf 2>/dev/null; then
+        say "PROVISION console-font=FAIL(vconsole.conf clobbers $(grep -E '^FONT=' /etc/vconsole.conf | tail -1))"
+    else
+        say "PROVISION console-font=[ok no FONT clobber — console-setup font authority intact]"
+    fi
+    # §5b CLOSURE (the load-bearing guard): prove console-setup.service is the REAL clobber (systemd-vconsole-
+    # setup is absent on trixie — the ADR §5b correction) AND the credential-boundary re-assert wins after it.
+    # NON-DESTRUCTIVE: we do NOT restart getty@tty1 (that would kill the live tty1 desktop). We invoke the SAME
+    # re-assert the getty + owner-provision ExecStartPre run. Changing the kernel VT keymap does not disturb the
+    # running sway session (it uses its own XKB layer), so this is safe against the end-of-run screenshot.
+    if systemctl list-unit-files console-setup.service >/dev/null 2>&1; then
+        systemctl restart console-setup.service >/dev/null 2>&1 || setupcon --force >/dev/null 2>&1 || true
+        _kc=$(_kc21)
+        env SHREK_KICK_DOMAIN=keymap /usr/lib/shrek/shrek-provision-kick >/dev/null 2>&1 || true
+        _kr=$(_kc21)
+        case "$_kc" in
+            *y*) say "PROVISION clobber-confirmed=[ok console-setup reset kc21=$_kc to us — §5b correction verified]" ;;
+            *)   say "PROVISION clobber-confirmed=[info console-setup left kc21=$_kc — no clobber this run]" ;;
+        esac
+        case "$_kr" in
+            *z*) say "PROVISION reassert-restores=[ok kc21=$_kr — re-assert wins after console-setup (§5b closure)]" ;;
+            *)   say "PROVISION reassert-restores=FAIL(kc21=$_kr — re-assert did NOT restore de)" ;;
+        esac
+    else
+        say "PROVISION clobber-confirmed=[info console-setup.service absent]"
+        say "PROVISION reassert-restores=[info console-setup.service absent — closure not exercised]"
+    fi
+    # (#3) compositor adapter: zz-shrek-desktop.sh exports XKB_DEFAULT_LAYOUT from XKBLAYOUT before exec sway.
+    # Read it straight off the running sway process environ (root can read any /proc/<pid>/environ). Poll
+    # briefly — the desktop may still be settling when the probe reaches here.
+    _swpid=""; _t=0
+    while [ "$_t" -lt 30 ]; do
+        for _p in $(ls /proc 2>/dev/null | grep -E '^[0-9]+$'); do
+            [ "$(cat "/proc/$_p/comm" 2>/dev/null)" = sway ] && { _swpid="$_p"; break; }
+        done
+        [ -n "$_swpid" ] && break
+        sleep 1; _t=$((_t + 1))
+    done
+    if [ -n "$_swpid" ] && [ -r "/proc/$_swpid/environ" ]; then
+        _xe=$(tr '\0' '\n' < "/proc/$_swpid/environ" 2>/dev/null | grep -E '^XKB_DEFAULT_LAYOUT=' | tail -n1)
+        case "$_xe" in XKB_DEFAULT_LAYOUT=de) say "PROVISION compositor-xkb=[ok $_xe — sway/libxkbcommon sees de]";;
+                       *) say "PROVISION compositor-xkb=FAIL(sway env=[$_xe])";; esac
+    else
+        say "PROVISION compositor-xkb=FAIL(no sway process found after ${_t}s)"
+    fi
+
+    # ---- (#4) TIMEZONE: NOT a provisioned domain in installer-M1. Only locale + keymap have seed units; the
+    # gate WHITELISTS timezone (forward-compat, and shrek-provision-seed handles a `timezone` domain) but no
+    # unit wires it yet and the DOGFOOD manifest sets no timezone key — so nothing consumes it. The baked
+    # regular-file UTC /etc/localtime is therefore authoritative. Prove that clean M1 state, consumer-visible
+    # via `date +%Z` (NOT timedatectl — the probe avoids a dbus round-trip): no applier stamp (no applier
+    # ran), no state file, /etc/localtime unbound, a valid zone reported. -----------------------------------
+    _tzsvc=$(systemctl list-unit-files shrek-timezone-seed.service --no-legend 2>/dev/null | grep -c 'shrek-timezone-seed')
+    _tzdate=$(date +%Z 2>/dev/null)
+    if [ "${_tzsvc:-0}" -eq 0 ] && [ ! -e "$PSTORE/.applied/timezone" ] && [ ! -f "$PSTORE/state/localtime" ] \
+       && ! mountpoint -q /etc/localtime 2>/dev/null && [ -n "$_tzdate" ]; then
+        say "PROVISION tz-baked-default=[ok date=$_tzdate unbound no-applier — timezone not a provisioned domain in M1]"
+    else
+        say "PROVISION tz-baked-default=FAIL(svc=${_tzsvc:-?} stamp=$([ -e "$PSTORE/.applied/timezone" ] && echo y || echo n) state=$([ -f "$PSTORE/state/localtime" ] && echo y || echo n) bound=$(mountpoint -q /etc/localtime 2>/dev/null && echo y || echo n) date=[$_tzdate])"
+    fi
+    say "PROVISION tz-date=[$_tzdate]"
+
+    # ---- Negative legs via the documented test seam (SHREK_PROVISION_STORE/RUN) — the REAL store is never
+    # touched. Proves the structural "never emergency mode" property (§6) at RUNTIME on the sealed image. -----
+    _seam=$(mktemp -d /run/shrek-prov-seam.XXXXXX 2>/dev/null || printf '/run/shrek-prov-seam')
+    # (#7) CORRUPT MANIFEST (unknown key) -> whole-reject -> gate rc=0 + sentinel fires + manifest.rejected +
+    # NO per-key files (the target cleanly defaults instead of trusting a crafted manifest).
+    mkdir -p "$_seam/store"
+    printf 'schema_version=1\nbogus_key=nope\n' > "$_seam/store/manifest"
+    SHREK_PROVISION_STORE="$_seam/store" SHREK_PROVISION_RUN="$_seam/run" SHREK_PROVISION_SKIP_OWNER=1 \
+        /usr/lib/shrek/shrek-provision-validate >/dev/null 2>&1; _grc=$?
+    if [ "$_grc" -eq 0 ] && [ -e "$_seam/run/.gate-complete" ] && [ -f "$_seam/store/manifest.rejected" ] \
+       && [ ! -e "$_seam/run/locale" ] && [ ! -e "$_seam/run/keymap" ]; then
+        say "PROVISION corrupt-defaults=[ok gate rc=0 + sentinel + manifest.rejected + no per-key files]"
+    else
+        say "PROVISION corrupt-defaults=FAIL(rc=$_grc sentinel=$([ -e "$_seam/run/.gate-complete" ] && echo y || echo n) rejected=$([ -f "$_seam/store/manifest.rejected" ] && echo y || echo n))"
+    fi
+    # the applier over that rejected (gate-complete, no key) manifest -> terminal default, rc=0, never fails.
+    SHREK_PROVISION_STORE="$_seam/store" SHREK_PROVISION_RUN="$_seam/run" SHREK_PROVISION_DOMAIN=locale \
+        SHREK_PROVISION_DELIVER=0 /usr/lib/shrek/shrek-provision-seed >/dev/null 2>&1; _arc=$?
+    if [ "$_arc" -eq 0 ] && [ -e "$_seam/store/.applied/locale" ] && [ ! -f "$_seam/store/state/locale.conf" ]; then
+        say "PROVISION corrupt-applier-default=[ok applier rc=0 terminal-default no-state — no emergency]"
+    else
+        say "PROVISION corrupt-applier-default=FAIL(rc=$_arc)"
+    fi
+    # (#8) GATE-CRASH RETRY: sentinel ABSENT (gate crashed mid-run) but a key file present -> the applier must
+    # NOT seed/stamp and must exit 0 (retry next boot). A transient crash never default-locks a manifest.
+    mkdir -p "$_seam/store2/state" "$_seam/run2"    # run2 deliberately has NO .gate-complete
+    printf 'C.UTF-8' > "$_seam/run2/locale"
+    SHREK_PROVISION_STORE="$_seam/store2" SHREK_PROVISION_RUN="$_seam/run2" SHREK_PROVISION_DOMAIN=locale \
+        SHREK_PROVISION_DELIVER=0 /usr/lib/shrek/shrek-provision-seed >/dev/null 2>&1; _crc=$?
+    if [ "$_crc" -eq 0 ] && [ ! -e "$_seam/store2/.applied/locale" ] && [ ! -f "$_seam/store2/state/locale.conf" ]; then
+        say "PROVISION gate-crash-retry=[ok no sentinel -> no seed/stamp, rc=0 -> retries next boot]"
+    else
+        say "PROVISION gate-crash-retry=FAIL(rc=$_crc stamped=$([ -e "$_seam/store2/.applied/locale" ] && echo y || echo n))"
+    fi
+    rm -rf "$_seam"
+    # structural: NO provisioning unit is in failed/emergency (the non-secret plane cannot cascade a failure).
+    _pf=$(systemctl --failed --no-legend 2>/dev/null | grep -E 'shrek-(provision|locale|keymap)' | tr '\n' '|')
+    [ -z "$_pf" ] && say "PROVISION no-emergency=[ok no failed provisioning units]" || say "PROVISION no-emergency=FAIL(failed=[$_pf])"
+
+    # ---- (#4b/#4c) owner display-name PRE-FILL from the manifest + PS1 injection cleanup -------------------
+    # The wizard pre-fills the display name from the gate's VALIDATED owner_display_name (§5); on DOGFOOD that
+    # is "Swamp Lord" (from the test-manifest). The PS1 injection file was git-rm'd (#4c) — the name must never
+    # reach a shell prompt (Quickshell-only; a $ / backtick in a name would otherwise be a command-subst vector).
+    _vn=$(cat "$PRUN/owner_display_name" 2>/dev/null)
+    [ "$_vn" = "Swamp Lord" ] && say "PROVISION owner-prefill=[ok validated name pre-filled from manifest]" \
+                              || say "PROVISION owner-prefill=FAIL(validated=[$_vn])"
+    [ ! -e /etc/profile.d/50-shrek-owner.sh ] && say "PROVISION ps1-file-gone=[ok 50-shrek-owner.sh removed]" \
+                                              || say "PROVISION ps1-file-gone=FAIL(injection file still present)"
+    case "$(asdev bash -ic 'printf %s "$PS1"' 2>/dev/null)" in
+        *"Swamp Lord"*) say "PROVISION ps1-no-name=FAIL(owner name leaked into PS1)" ;;
+        *)              say "PROVISION ps1-no-name=[ok owner name never in PS1 — Quickshell-only]" ;;
+    esac
+else
+    say "PROVISION active=[no] — no store at $PSTORE (provisioning plane did not run)"
+fi
+set -e
+
 # --- Sprint S5: Dynamic theming (matugen) — the vendored binary is present, runs under the image's glibc,
 # and turns the wallpaper into a Material palette. matugen has no Debian package, so the pinned upstream
 # release binary is staged into /usr/bin (see third_party/matugen). DMS drives it via `dms matugen queue`

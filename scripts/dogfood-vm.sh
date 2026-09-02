@@ -283,6 +283,50 @@ else
   bad "owner provisioning did NOT run (#2939) — no 'OWNER provisioned=[yes]' ($(grep -a 'SHREK-DOGFOOD OWNER provisioned=' "$LOG" | tail -1 | tr -d '\r'))"
 fi
 
+# --- ADR-005 provisioning plane (installer M1 §11): the AUTHORITATIVE runtime proof of provisioning items
+# #1-4. The DOGFOOD image bakes a test-manifest (locale=C.UTF-8, keymap=de, owner_display_name="Swamp Lord")
+# whose values DIFFER from the §5a baked defaults (en_US.UTF-8 / us / UTC), so a green PROVISION stage proves
+# the manifest actually DELIVERED (not a default coincidence) and — running at boot>=2 — that the store
+# SURVIVED the reboot. DOGFOOD always provisions, so the stage must be present (a missing stage is a real
+# regression, scored like OWNER above).
+if grep -qa 'SHREK-DOGFOOD PROVISION active=\[yes\]' "$LOG"; then
+  ok "provisioning plane active (ADR-005 gate + appliers ran)"
+  provleg() { # $1 = PROVISION key regex, $2 = human label
+    if grep -qa "SHREK-DOGFOOD PROVISION $1" "$LOG"; then ok "$2"
+    else bad "$2 ($(grep -a 'SHREK-DOGFOOD PROVISION ' "$LOG" | grep -a "$(echo "$1" | cut -d= -f1)" | tail -1 | tr -d '\r'))"; fi
+  }
+  provleg 'manifest-persist=\[ok'    "the provisioning manifest survived the reboot on the persistent /home (item #5)"
+  provleg 'gate-sentinel=\[ok\]'     "the target-side re-validation gate ran to completion (.gate-complete)"
+  # (#1) locale
+  provleg 'locale-state=\[ok'        "locale seeded into the store (state/locale.conf materialized)"
+  provleg 'locale-stamp=\[ok\]'      "locale seed-once stamp written (.applied/locale)"
+  provleg 'locale-delivered=\[ok'    "manifest locale C.UTF-8 bind-delivered over the baked en_US /etc/locale.conf (#1)"
+  # (#2) keymap + §5b VT closure
+  provleg 'keymap-state=\[ok'        "keymap seeded into the store (state/vconsole.conf, XKBLAYOUT=de)"
+  provleg 'keymap-stamp=\[ok\]'      "keymap seed-once stamp written (.applied/keymap)"
+  provleg 'keymap-delivered=\[ok'    "manifest keymap de bind-delivered over the baked us /etc/vconsole.conf (#2)"
+  provleg 'vt-keymap-live=\[ok'      "the LIVE kernel VT keymap is de (non-us test char kc21->z) — what the first-run wizard reads (#2)"
+  provleg 'console-font=\[ok'        "the console FONT is left to console-setup (no FONT clobber) — font survives (#2)"
+  provleg 'reassert-restores=\[ok'   "after a console-setup.service re-trigger the credential-boundary re-assert restores de (§5b closure)"
+  provleg 'compositor-xkb=\[ok'      "the compositor sees XKB_DEFAULT_LAYOUT=de off the live sway process (#3)"
+  # (#4) timezone — NOT a provisioned domain in M1 (no seed unit, no tz key); baked UTC stands (date +%Z)
+  provleg 'tz-baked-default=\[ok'    "timezone (not wired in M1) leaves the baked UTC /etc/localtime authoritative, unbound (date +%Z) (#4)"
+  # negative legs — the structural "never emergency mode" (§6), proven at runtime via the test seam
+  provleg 'corrupt-defaults=\[ok'    "a CORRUPT manifest is whole-rejected: gate rc=0 + sentinel + no per-key files (defaults, not emergency)"
+  provleg 'corrupt-applier-default=\[ok' "the applier over a rejected manifest takes the terminal default (rc=0, no emergency)"
+  provleg 'gate-crash-retry=\[ok'    "a MISSING gate sentinel makes the applier neither seed nor stamp (retry next boot), rc=0"
+  provleg 'no-emergency=\[ok'        "no provisioning unit entered failed/emergency (the non-secret plane never cascades)"
+  # (#4b/#4c) owner display-name pre-fill + PS1 injection cleanup
+  provleg 'owner-prefill=\[ok'       "the owner display name was pre-filled from the manifest's validated owner_display_name (§5)"
+  provleg 'ps1-file-gone=\[ok'       "the PS1 display-name injection file was removed (#4c injection-vector cleanup)"
+  provleg 'ps1-no-name=\[ok'         "the owner name never appears in the dev PS1 — Quickshell-only"
+  echo "  INFO $(grep -a 'SHREK-DOGFOOD PROVISION locale-session=' "$LOG" | tail -1 | sed 's/.*PROVISION //' | tr -d '\r') (profile.d default also lands on C.UTF-8; locale-delivered is the discriminating proof)"
+  echo "  INFO $(grep -a 'SHREK-DOGFOOD PROVISION tz-date=' "$LOG" | tail -1 | sed 's/.*PROVISION //' | tr -d '\r')"
+  echo "  INFO clobber: $(grep -a 'SHREK-DOGFOOD PROVISION clobber-confirmed=' "$LOG" | tail -1 | sed 's/.*PROVISION //' | tr -d '\r')"
+else
+  bad "provisioning plane did NOT run (ADR-005 §11) — no 'PROVISION active=[yes]' ($(grep -a 'SHREK-DOGFOOD PROVISION active=' "$LOG" | tail -1 | tr -d '\r'))"
+fi
+
 # --- Sprint S6: Brightness + power-profiles — sealed-image PACKAGING + AUTHORIZATION (the hardware-
 # independent half; the live brightness-set / profile-switch is a no-op in the VM and is INFO-only). --------
 grep -qa 'SHREK-DOGFOOD S6 brightnessctl-present=\[yes\]' "$LOG" \
