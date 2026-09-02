@@ -83,6 +83,14 @@
 # DOGFOOD-only root debug-shell enable is staged the same way. Both gitignored so the tree stays byte-clean.
 /image/overlay/etc/sudoers.d/dev-nopasswd
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/debug-shell.service
+# Owner-account provisioning (#2939): the first-boot wizard's ENABLEMENT is a build input staged ONLY for
+# INSTALLABLE/DOGFOOD (source of truth: image/owner-provision/getty-owner-provision.conf + the env/seed
+# written inline by build-in-container.sh). The oneshot unit + helper under image/overlay are tracked; only
+# these generated copies are gitignored so LIVE_INSTALLER/plain-CI trees stay byte-clean. The DOGFOOD seed
+# is a fixed PUBLIC test credential — it must NEVER be committed.
+/image/overlay/etc/systemd/system/getty@tty1.service.d/50-owner-provision.conf
+/image/overlay/etc/shrek/owner-provision.env
+/image/overlay/etc/shrek/owner-seed
 # Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;
 # the daily persistent /home disk out/shrek-data.raw is also under out/ and never committed).
 /out/dogfood-shrek.xml

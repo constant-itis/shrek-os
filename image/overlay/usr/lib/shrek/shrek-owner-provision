@@ -1,0 +1,186 @@
+#!/bin/sh
+# shrek-os owner-account provisioning — first-boot seed of the OWNER credential + display name (#2939).
+#
+# WHAT THIS IS (identity FOUNDATION, phase-0 — the lock-screen-scope slice, ADR-locked in mem #3011):
+#   The sealed base ships `dev` (uid 1000) with a UNIVERSAL PUBLIC password (`shrek`) so the S3 DMS lock
+#   screen has *something* to authenticate against. That credential is public — the lock screen means
+#   nothing. This oneshot runs ONCE on the first boot of an INSTALLABLE/DOGFOOD box and replaces ONLY the
+#   `dev` credential (and adds a display name) with an owner-chosen one, so the lock/idle re-entry gate —
+#   and transitively the uid-1000 session's authority — now MEANS something.
+#
+# IDENTITY MODEL (A): we KEEP the baked `dev`/uid-1000 slot untouched — the whole authority plane resolves
+#   the owner via dev_uid()/dev_gid() parsing the sealed /etc/passwd, so uid 1000 must stay 1000. We make
+#   ONLY the CREDENTIAL (the /etc/shadow `dev:` hash) and the DISPLAY NAME mutable. We do NOT rename the
+#   account, do NOT touch /etc/passwd (its GECOS stays sealed), and do NOT allocate a new uid.
+#
+# DELIVERY = BIND-MOUNT, not an /etc rewrite (must-fix 2): the sealed /etc is read-only dm-verity, and
+#   stock passwd/chsh rename() inside /etc (impossible on a sealed fs) — so we NEVER edit /etc/shadow in
+#   place. Instead the provisioned shadow lives in a WRITABLE store on /home and is bind-mounted OVER
+#   /etc/shadow (nosuid,nodev) before any auth runs. The baked /etc/shadow (public `shrek`) is the
+#   lower/fallback: if provisioning never ran, it shows through; once we mount, PAM reads the owner hash.
+#   The bind-mount is done HERE, inside the oneshot, immediately after the seed — one atomic provision
+#   step — so the getty@tty1 login (which Requires= this unit on provisioned variants) is FAIL-CLOSED: if
+#   the seed or the mount fails, the unit fails, getty refuses to start, and the public `shrek` credential
+#   never guards a real field session.
+#
+# STORE OWNERSHIP (must-fix 1 — THE load-bearing security property): the store dir /home/.shrek-identity
+#   is root:root 0700 and is NEVER chowned to uid 1000. This is UNLIKE the hosts-seed store (which IS
+#   chowned to the owner so shrek-connect can edit it): if uid 1000 owned this dir it could unlink the
+#   shadow file and drop in an empty-root-password replacement, then that store bind-mounts over
+#   /etc/shadow => trivial root (the #2982-class escalation). root:root 0700 means uid 1000 has no write
+#   on the dir and cannot swap the file. The shadow file itself is root:shadow 0640 (Debian-canonical, so
+#   unix_chkpwd reads it via the shadow group without a capability), same shape as image/mkosi.postinst.
+#
+# SEED-ONCE + PERSISTENCE: the store is on the persistent shrek-data /home, so it survives reboot AND the
+#   A/B sysupdate base swap by construction. We seed ONLY if the store is absent, so a base placeholder can
+#   never clobber a provisioned credential on a later boot.
+#
+# VARIANTS (selected by /etc/shrek/owner-provision.env, staged per-variant by build-in-container.sh):
+#   INSTALLABLE -> interactive: block on the console (tty1) for the owner to type a passphrase twice + a
+#                  display name, before the desktop comes up.
+#   DOGFOOD     -> noninteractive: read a baked fixed seed file (headless — a blocking TUI would deadlock
+#                  the automated oracle). DOGFOOD-only, gitignored; never ships in the product.
+#
+# TEST SEAM (SHREK_PROVISION_SEED_ONLY=1, mirrors build-in-container.sh's SHREK_STAGE_ONLY): seed the store
+#   into a scratch dir and STOP before the bind-mount + the root-only chowns, so scripts/owner-provision-
+#   proof.sh can exercise the whole seed core (crypt, byte-preservation, perms, idempotence) as an
+#   ordinary non-root user with no VM. The bind-mount + the real chowns are proven only by the sealed-VM
+#   dogfood.
+set -eu
+
+# ---- configuration (env-overridable; defaults are the real runtime paths) --------------------------
+IDENT_DIR="${SHREK_IDENTITY_DIR:-/home/.shrek-identity}"
+STORE="$IDENT_DIR/shadow"                                 # the provisioned shadow (bind-mount SOURCE)
+OWNER_FILE="$IDENT_DIR/owner"                             # display name (GECOS in /etc/passwd stays sealed)
+MARKER="$IDENT_DIR/provisioned"                           # written LAST, on success; the login gate reads it
+SOURCE_SHADOW="${SHREK_SOURCE_SHADOW:-/etc/shadow}"       # baked placeholder = splice source / fallback
+TARGET_SHADOW="${SHREK_TARGET_SHADOW:-/etc/shadow}"       # bind-mount target
+MODE="${SHREK_PROVISION_MODE:-interactive}"              # interactive (INSTALLABLE) | noninteractive (DOGFOOD)
+SEED_FILE="${SHREK_PROVISION_SEED_FILE:-/etc/shrek/owner-seed}"   # noninteractive input (line1=pass, line2=name)
+SEED_ONLY="${SHREK_PROVISION_SEED_ONLY:-0}"              # oracle seam: seed the store, skip mount + root chowns
+DEV_USER="${SHREK_OWNER_USER:-dev}"                      # the baked uid-1000 slot whose credential we mutate
+MIN_LEN="${SHREK_PROVISION_MIN_LEN:-8}"
+CONSOLE="${SHREK_PROVISION_CONSOLE:-/dev/tty1}"
+
+log()  { echo "shrek-owner-provision: $*"; }
+fail() { echo "shrek-owner-provision: FATAL: $*" >&2; exit 1; }
+
+is_root() { [ "$(id -u)" = "0" ]; }
+
+# ---- bind-mount delivery (real boot only; no-op under the oracle seam / non-root) ------------------
+deliver() {
+    if [ "$SEED_ONLY" = "1" ] || ! is_root; then
+        log "seed-only/non-root: skipping bind-mount delivery of $STORE -> $TARGET_SHADOW"
+        return 0
+    fi
+    if mountpoint -q "$TARGET_SHADOW" 2>/dev/null; then
+        log "delivery: $TARGET_SHADOW is already a bind-mount — leaving it"
+        return 0
+    fi
+    # Bind the provisioned store over /etc/shadow, then remount to actually apply nosuid,nodev (Linux
+    # ignores mount options on the initial --bind; they take on a second remount,bind pass).
+    mount --bind "$STORE" "$TARGET_SHADOW"       || fail "bind-mount $STORE -> $TARGET_SHADOW failed"
+    mount -o remount,bind,nosuid,nodev "$TARGET_SHADOW" 2>/dev/null || true
+    log "delivered: $STORE bind-mounted over $TARGET_SHADOW (nosuid,nodev)"
+}
+
+# ---- credential + display-name collection ----------------------------------------------------------
+read_secret() {   # read_secret PROMPT VARNAME  (echo off, from the console)
+    printf '%s' "$1" > "$CONSOLE"
+    _old=$(stty -g < "$CONSOLE"); stty -echo < "$CONSOLE"
+    read _s < "$CONSOLE" || { stty "$_old" < "$CONSOLE"; printf '\n' > "$CONSOLE"; fail "console input closed"; }
+    stty "$_old" < "$CONSOLE"; printf '\n' > "$CONSOLE"
+    eval "$2=\$_s"
+}
+
+collect() {
+    case "$MODE" in
+    noninteractive)
+        [ -r "$SEED_FILE" ] || fail "noninteractive mode: seed file $SEED_FILE is missing/unreadable"
+        PASSPHRASE=$(sed -n '1p' "$SEED_FILE")
+        DISPLAY_NAME=$(sed -n '2p' "$SEED_FILE")
+        [ -n "$PASSPHRASE" ] || fail "noninteractive mode: empty passphrase in $SEED_FILE"
+        ;;
+    interactive)
+        printf '\n=== Shrek OS — set up your account ===\n' > "$CONSOLE"
+        while :; do
+            read_secret "Choose a passphrase (min ${MIN_LEN} chars): " PASSPHRASE
+            if [ "${#PASSPHRASE}" -lt "$MIN_LEN" ]; then
+                printf 'Too short — at least %s characters.\n' "$MIN_LEN" > "$CONSOLE"; continue
+            fi
+            read_secret "Confirm passphrase: " _confirm
+            [ "$PASSPHRASE" = "$_confirm" ] && break
+            printf 'Passphrases did not match — try again.\n' > "$CONSOLE"
+        done
+        printf 'Display name (shown on the lock screen and prompt) [%s]: ' "$DEV_USER" > "$CONSOLE"
+        read DISPLAY_NAME < "$CONSOLE" || DISPLAY_NAME=""
+        ;;
+    *) fail "unknown SHREK_PROVISION_MODE=$MODE (want interactive|noninteractive)" ;;
+    esac
+    # Display name never contains a colon (it must not be able to forge extra shadow/passwd fields anywhere
+    # it is later rendered) and defaults to the account name.
+    [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$DEV_USER"
+    case "$DISPLAY_NAME" in *:*) fail "display name must not contain ':'";; esac
+}
+
+# ---- idempotence: seed ONLY if absent; on a provisioned box just re-assert the bind-mount ----------
+if [ -f "$STORE" ] && [ -f "$MARKER" ]; then
+    log "already provisioned ($STORE + marker present) — re-asserting delivery only, no re-seed"
+    deliver
+    exit 0
+fi
+
+command -v openssl >/dev/null 2>&1 || fail "openssl not found (required to compute the \$6\$ crypt)"
+[ -r "$SOURCE_SHADOW" ] || fail "source shadow $SOURCE_SHADOW is unreadable"
+grep -q "^${DEV_USER}:" "$SOURCE_SHADOW" || fail "no ${DEV_USER}: line in $SOURCE_SHADOW to splice"
+
+collect
+
+# Compute a fresh SHA-512 crypt from the passphrase (openssl generates its own random salt). Feed the
+# passphrase on stdin, never argv (argv is world-visible via /proc).
+HASH=$(printf '%s' "$PASSPHRASE" | openssl passwd -6 -stdin) || fail "openssl passwd failed"
+case "$HASH" in
+    '$6$'*) : ;;
+    *) fail "computed crypt is not a \$6\$ (SHA-512) hash" ;;
+esac
+
+# Splice ONLY the dev: line's hash field; EVERY other line (root/shrek/swamp/polkitd) is emitted by a bare
+# `print` of the untouched $0 => byte-for-byte preserved (must-fix 5). awk reads the hash from the
+# environment (not -v) so its `$`/`.`/`/` characters are never touched by -v escape processing.
+CONTENT=$(SHREK_HASH="$HASH" SHREK_DEV="$DEV_USER" awk -F: 'BEGIN{OFS=":"}
+    $1==ENVIRON["SHREK_DEV"]{$2=ENVIRON["SHREK_HASH"]; seen=1}
+    {print}
+    END{ if(!seen) exit 3 }' "$SOURCE_SHADOW") || fail "splice failed (no ${DEV_USER}: line?)"
+
+# Store dir: root:root 0700 — NEVER chowned to uid 1000 (must-fix 1). umask keeps the create-window tight.
+umask 077
+mkdir -p "$IDENT_DIR"
+chmod 0700 "$IDENT_DIR"
+if is_root; then chown 0:0 "$IDENT_DIR" || fail "cannot chown $IDENT_DIR to root:root"; fi
+
+# Write the store IN PLACE under an exclusive lock (must-fix 3): open the existing inode, flock it, and
+# truncate+rewrite the SAME inode — never tmp+rename. Once this file is bind-mounted over /etc/shadow, a
+# rename would detach the mount from the new inode, so in-place is required for future credential edits
+# too. CONTENT is computed above, before truncation, so a splice failure leaves any prior store intact.
+[ -e "$STORE" ] || : > "$STORE"
+{
+    flock 9 || fail "cannot lock $STORE"
+    printf '%s\n' "$CONTENT" > "$STORE"
+} 9<> "$STORE"
+chmod 0640 "$STORE"
+if is_root; then chown 0:42 "$STORE" || fail "cannot chown $STORE to root:shadow"; fi   # gid 42 = shadow
+
+# Display name: 0644 root:root so the dev session's PS1/greeter can read it (not a secret; /etc/passwd
+# GECOS stays sealed — must-fix 7).
+printf '%s\n' "$DISPLAY_NAME" > "$OWNER_FILE"
+chmod 0644 "$OWNER_FILE"
+if is_root; then chown 0:0 "$OWNER_FILE" || fail "cannot chown $OWNER_FILE to root:root"; fi
+
+deliver
+
+# Marker LAST — its presence means the whole seed+deliver succeeded; the login gate keys on it.
+printf 'provisioned user=%s name=%s\n' "$DEV_USER" "$DISPLAY_NAME" > "$MARKER"
+chmod 0644 "$MARKER"
+if is_root; then chown 0:0 "$MARKER" || true; fi
+
+log "owner provisioning complete (user=$DEV_USER, display=$DISPLAY_NAME, mode=$MODE)"

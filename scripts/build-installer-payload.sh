@@ -36,6 +36,12 @@ fail=""
 [ -e "$mnt/etc/sudoers.d/dev-nopasswd" ] && fail="$fail dev-nopasswd-PRESENT"
 [ "$(readlink "$mnt/etc/systemd/system/var-lib-swamp.mount" 2>/dev/null || true)" = "/dev/null" ] && fail="$fail swamp-masked(live-installer-base?)"
 [ -e "$mnt/usr/lib/systemd/system/local-fs.target.wants/home.mount" ] || fail="$fail home.mount-not-enabled(not-installable?)"
+# Owner-provisioning (#2939): the product MUST ship the first-boot owner wizard enabled (getty@tty1
+# Requires it, via the drop-in) in INTERACTIVE mode, and MUST NOT carry the DOGFOOD baked test seed — else
+# a real box would either boot on the public `shrek` credential or provision itself from a public passphrase.
+[ -e "$mnt/etc/systemd/system/getty@tty1.service.d/50-owner-provision.conf" ] || fail="$fail owner-provision-not-enabled(not-installable?)"
+grep -q '^SHREK_PROVISION_MODE=interactive' "$mnt/etc/shrek/owner-provision.env" 2>/dev/null || fail="$fail owner-provision-not-interactive"
+[ -e "$mnt/etc/shrek/owner-seed" ] && fail="$fail dogfood-owner-seed-PRESENT(dogfood-base?)"
 if [ -n "$fail" ]; then
   echo "!!! $base is NOT a clean INSTALLABLE product base:$fail" >&2
   echo "!!! Rebuild with: INSTALLABLE=1 scripts/build-in-container.sh 1  then cp out/shrek_1_x86-64.raw $base" >&2

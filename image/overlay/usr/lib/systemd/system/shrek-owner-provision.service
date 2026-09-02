@@ -1,0 +1,40 @@
+# Shrek OS — owner-account provisioning oneshot (#2939, identity foundation / lock-screen scope).
+#
+# Runs ONCE on first boot of an INSTALLABLE/DOGFOOD box to replace the public `shrek` credential baked
+# into the sealed base with an owner-chosen one, and to record a display name. See the helper
+# /usr/lib/shrek/shrek-owner-provision for the full design (Identity-Model-A, bind-mount delivery, the
+# root:root 0700 store, seed-once persistence).
+#
+# ENABLEMENT is variant-gated, and lives ENTIRELY in a getty@tty1 drop-in (Requires= + After= this unit),
+# staged by build-in-container.sh ONLY for INSTALLABLE/DOGFOOD. This unit FILE ships in the sealed overlay
+# unconditionally but stays inert on LIVE_INSTALLER/plain-CI (nothing pulls it in) — the same "ship the
+# unit, gate the enablement" split as home.mount. There is deliberately no [Install] section.
+#
+# ORDERING: After=home.mount (the store lives on the persistent shrek-data /home) and After the login-
+# readiness barrier (so the Onion merge is settled and openssl + the shadow tooling are resolvable), and
+# Before=getty@tty1.service so the interactive wizard owns tty1 before the autologin grabs it. Because the
+# getty drop-in Requires= this unit, a FAILED provisioning (bad seed, failed bind-mount) FAILS getty too —
+# fail-closed: the public `shrek` credential can never guard a real login session.
+[Unit]
+Description=Provision the Shrek owner account credential + display name (first boot)
+Documentation=file:///usr/share/doc/shrek/owner-provisioning.md
+After=home.mount shrek-desktop-ready.service
+Wants=home.mount
+Before=getty@tty1.service
+ConditionPathExists=/home
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/shrek/owner-provision.env
+ExecStart=/usr/lib/shrek/shrek-owner-provision
+# The interactive (INSTALLABLE) wizard reads the passphrase from the console; give the service tty1 and a
+# clean terminal. Ordered Before=getty@tty1.service, so no getty is contending for it yet.
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=journal+console
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+# Do NOT isolate the mount namespace: the bind-mount of the store over /etc/shadow must be visible to the
+# host namespace where login/PAM later run (PrivateMounts/MountFlags=slave would hide it).

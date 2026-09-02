@@ -185,6 +185,42 @@ else
   fi
 fi
 
+# ── Owner-account provisioning (#2939) — variant-gated exactly like home.mount above ─────────────────
+# The first-boot owner wizard is enabled ONLY where a credential is actually provisioned onto a writable
+# /home: the INSTALLABLE product and the DOGFOOD proof. Enablement lives ENTIRELY in a getty@tty1 drop-in
+# that Requires= the oneshot (fail-closed: a failed provision fails the login). The unit FILE + helper ship
+# in the overlay unconditionally (tracked); only these generated artifacts are variant-gated + gitignored,
+# so LIVE_INSTALLER (keeps the public `shrek` for its ownerless live session) and plain-CI (no writable
+# /home) stay byte-clean.
+OP_DROPIN_DIR="image/overlay/etc/systemd/system/getty@tty1.service.d"
+OP_DROPIN="$OP_DROPIN_DIR/50-owner-provision.conf"
+OP_TEMPLATE="image/owner-provision/getty-owner-provision.conf"
+OP_ETC="image/overlay/etc/shrek"
+OP_ENV="$OP_ETC/owner-provision.env"
+OP_SEED="$OP_ETC/owner-seed"
+# Clear any prior build's generated copies (all gitignored) so each variant starts clean.
+rm -f "$OP_DROPIN" "$OP_ENV" "$OP_SEED"
+if [ "${DOGFOOD:-0}" = "1" ] || [ "$INSTALLABLE" = "1" ]; then
+  install -d "$OP_DROPIN_DIR" "$OP_ETC"
+  install -m0644 "$OP_TEMPLATE" "$OP_DROPIN"
+  if [ "${DOGFOOD:-0}" = "1" ]; then
+    echo "!!! DOGFOOD=1: owner-provisioning = NON-INTERACTIVE (baked fixed seed; a blocking TUI would deadlock the headless oracle) !!!"
+    printf 'SHREK_PROVISION_MODE=noninteractive\nSHREK_PROVISION_SEED_FILE=/etc/shrek/owner-seed\n' > "$OP_ENV"
+    # Fixed PUBLIC test credential — DOGFOOD-only, gitignored, NEVER ships in the product. line1=passphrase
+    # line2=display name. The dogfood identity probe knows this to prove the new passphrase unlocks the DMS
+    # lock and the old public `shrek` no longer does.
+    printf 'swamp-dogfood-owner-pass\nSwamp Lord\n' > "$OP_SEED"
+    chmod 0600 "$OP_SEED"
+    echo "!!! DOGFOOD=1: enabling first-boot owner-provisioning wizard (getty@tty1 Requires it) !!!"
+  else
+    echo "!!! INSTALLABLE=1: owner-provisioning = INTERACTIVE (blocking first-boot wizard on tty1) !!!"
+    printf 'SHREK_PROVISION_MODE=interactive\n' > "$OP_ENV"
+  fi
+else
+  # LIVE_INSTALLER + plain-CI: no owner provisioning (rm above already dropped any stale generated copies).
+  :
+fi
+
 # Test seam (scripts/nopasswd-variant-proof.sh): the variant-gated overlay staging above is complete, so a
 # proof can inspect image/overlay for each build flag without the mkosi/docker build. No effect on real builds.
 if [ "${SHREK_STAGE_ONLY:-0}" = "1" ]; then
