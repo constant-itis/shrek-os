@@ -1,0 +1,36 @@
+shrek-ai — model-as-data digest contract (ADR-006 §3, §9c)
+==========================================================
+
+This directory is the SEALED side of model-as-data delivery: it ships inside the signed shrek-ai
+Onion (dm-verity), and carries ONLY the baked digest that authenticates a per-box model — never the
+multi-GB GGUF itself. "Only the runtime + digest ship sealed."
+
+WHY no GGUF here
+  A 3-8B Q4 GGUF is ~2-5 GB. Baking it into the Onion would put that size into verity-sign time,
+  sysext staging, and every OS update download. Instead the GGUF is a digest-keyed artifact DELIVERED
+  to /home out-of-band (provisioning / operator download) and VERIFIED against the baked digest below,
+  loaded on demand — decoupling multi-GB model updates from Onion signing.
+
+THE DESCRIPTOR (what a per-box build bakes here)
+  A single sidecar names the expected model and its authenticated content hash:
+
+      /usr/share/shrek/ai/model/<name>.gguf.digest
+          line 1:  <64-hex-sha256>  <name>.gguf
+
+  The two-field shape is exactly `sha256sum`'s output over the GGUF bytes, so a per-box build produces
+  it with:  sha256sum <name>.gguf > <name>.gguf.digest   (the bench-seed `.digest` sidecar discipline).
+
+  M1 targets the small tier — a 3-4B Q4 GGUF (~2-3 GB, ~8 GB-RAM floor, ADR-006 §9c). The EXACT GGUF is
+  a per-box choice, so this skeleton Onion ships NO descriptor: an unconfigured box has no baked digest,
+  shrek-ai-model-verify reports "no model configured" (exit 1), and shrek-ai-model.service stays dormant.
+
+DELIVERY + VERIFY (runtime)
+  1. shrek-ai-store        creates the landing dir  /home/.shrek/ai/model  (root:root 0755, world-readable).
+  2. (provisioning)        delivers  /home/.shrek/ai/model/<name>.gguf.
+  3. shrek-ai-model-verify sha256s the delivered GGUF and compares to the baked digest here:
+                             0 READY | 1 no model configured | 2 GGUF not yet delivered | 3 digest MISMATCH.
+  4. shrek-ai-model.service runs the verify as ExecStartPre — a non-zero pre keeps the inference server
+     from starting, so an unverified / undelivered box stays cleanly dormant (absent-tolerant).
+
+To configure a box for a chosen model: bake its `<name>.gguf.digest` into this directory (Onion rebuild),
+deliver the matching GGUF to /home/.shrek/ai/model/, and the model service authenticates it on next start.

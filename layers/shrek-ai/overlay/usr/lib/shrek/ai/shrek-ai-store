@@ -1,0 +1,52 @@
+#!/bin/sh
+# shrek-ai-store — materialize the ADR-006 §4 SPLIT STORE on the persistent /home, every boot.
+#
+# /usr is a sealed dm-verity closure (read-only), so — the ADR-005 discipline — all mutable AI state lives
+# on the shrek-data /home and is (re)delivered on EVERY boot. This helper stands up the two halves of the
+# split store, whose whole point (Fable fix 2, ADR-006 §4) is a permission model that survives the shell
+# running as dev/uid-1000:
+#
+#   SYSTEM SELF-KNOWLEDGE  — /home/.shrek/ai/seed   root:root 0755 dir, 0644 files. The workshop-recipe
+#     "group/other-readable" shape: dev can READ the OS's self-description (so /recall answers), never
+#     REWRITE it. The deterministic three-body seed (slice 4) is delivered INTO this surface.
+#   MODEL-AS-DATA LANDING  — /home/.shrek/ai/model  root:root 0755 dir. Where a per-box GGUF is delivered
+#     (out-of-band / provisioning) and authenticated against the sealed baked digest by shrek-ai-model-verify
+#     (ADR-006 §3). World-readable model data, no secret — a DynamicUser inference server reads it.
+#   RUNTIME BRAIN + CHAT   — /home/dev/.mycolink/{brain,sessions}  dev:dev 0700. The assistant's OWN mycelium
+#     brain (what it writes as it learns) + session JSONL — dev-owned, the shell's native layout. The on-box
+#     mycelium (shrek-ai-mycelium.service) serves THIS brain and mounts the system-seed set read-only.
+#
+# Idempotent + first-boot-safe: directory CONTENT is never touched (operator/runtime memories are the
+# never-clobber namespace, ADR-006 §5b); only the dir skeleton + ownership/mode are (re)asserted each boot.
+# A plain helper (not an inline ExecStart) so there is no systemd-escape ambiguity — same idiom as
+# hosts-seed / shrek-bench-pool. Run by shrek-ai-store.service, ordered after home.mount, gated on the
+# shrek-ai Onion marker so a box without the AI layer runs nothing.
+set -eu
+
+is_root() { [ "$(id -u)" = "0" ]; }
+
+DEV_UID=1000
+DEV_GID=1000
+
+# --- anchor: /home/.shrek is the root-owned records/state anchor shared with the Bench pool (dev cannot
+#     forge records under it). shrek-bench-pool asserts the same root:root 0755 — consistent, no conflict. ---
+mkdir -p /home/.shrek
+if is_root; then chown root:root /home/.shrek 2>/dev/null || true; fi
+chmod 0755 /home/.shrek 2>/dev/null || true
+
+# --- system self-knowledge + model-as-data landing: root-owned, readable to dev, NEVER dev-writable ---
+for d in /home/.shrek/ai /home/.shrek/ai/seed /home/.shrek/ai/model; do
+    mkdir -p "$d"
+    if is_root; then chown root:root "$d" 2>/dev/null || true; fi
+    chmod 0755 "$d" 2>/dev/null || true
+done
+
+# --- runtime brain + chat memories: dev-owned, private (0700), the shell's ~/.mycolink native layout.
+#     /home/dev itself is created 0700 dev:dev by tmpfiles (shrek-home.conf); create the subtree under it. ---
+for d in /home/dev/.mycolink /home/dev/.mycolink/brain /home/dev/.mycolink/sessions; do
+    mkdir -p "$d"
+    if is_root; then chown "$DEV_UID:$DEV_GID" "$d" 2>/dev/null || true; fi
+    chmod 0700 "$d" 2>/dev/null || true
+done
+
+echo "shrek-ai-store: split store ready (seed/model root:root 0755; ~/.mycolink dev:dev 0700)"

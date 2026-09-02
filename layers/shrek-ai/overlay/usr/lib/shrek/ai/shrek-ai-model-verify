@@ -1,0 +1,51 @@
+#!/bin/sh
+# shrek-ai-model-verify — authenticate the per-box model-as-data GGUF against the sealed baked digest.
+# ADR-006 §3: the GGUF is a digest-keyed artifact DELIVERED to /home (out-of-band / provisioning — a
+# multi-GB blob never rides the signed Onion) and VERIFIED against a baked digest so multi-GB model
+# updates decouple from Onion signing. "Only the runtime + digest ship sealed."
+#
+# Mirrors the proven bench-seed `.digest` sidecar discipline (scripts/build-bench-seed.sh writes a sidecar;
+# gatekeeperd bench_plane.rs verifies before use) — here the digest is a lowercase-hex sha256 over the GGUF
+# bytes, computed by the sealed `sha256sum`.
+#
+# CONTRACT (sealed side, in the shrek-ai Onion): exactly one baked descriptor
+#     /usr/share/shrek/ai/model/<name>.gguf.digest   -- first line: <64-hex-sha256>  <name>.gguf
+# names the expected model basename and its authenticated digest. The GGUF itself is delivered to
+#     /home/.shrek/ai/model/<name>.gguf              -- world-readable model data (shrek-ai-store landing).
+#
+# EXIT STATUS (consumed by shrek-ai-model.service ExecStartPre — a non-zero pre keeps the unit from
+# starting the inference server, so an unconfigured / unverified box stays cleanly dormant):
+#     0  model configured AND present AND digest matches   -> READY
+#     1  no baked descriptor (no model configured for this box)
+#     2  descriptor present but the GGUF is absent on /home (awaiting delivery)
+#     3  GGUF present but digest MISMATCH (corrupt / wrong / tampered artifact) -> REFUSE
+set -eu
+
+SEAL_DIR="${SHREK_AI_MODEL_SEAL_DIR:-/usr/share/shrek/ai/model}"   # sealed baked digest (overridable for test)
+DATA_DIR="${SHREK_AI_MODEL_DATA_DIR:-/home/.shrek/ai/model}"       # delivered GGUF landing (overridable for test)
+
+# --- locate the single baked descriptor. Absent ⇒ no model configured for this box (not an error). ---
+desc="$(ls "$SEAL_DIR"/*.gguf.digest 2>/dev/null | head -n1 || true)"
+[ -n "$desc" ] && [ -f "$desc" ] || { echo "shrek-ai-model-verify: no model configured (no baked digest in $SEAL_DIR)"; exit 1; }
+
+# first field = expected sha256, second field = expected GGUF basename (the sha256sum sidecar shape).
+want_hex="$(awk 'NR==1{print $1}' "$desc")"
+want_name="$(awk 'NR==1{print $2}' "$desc")"
+# default the basename from the descriptor filename if the sidecar omits it (<name>.gguf.digest -> <name>.gguf).
+[ -n "$want_name" ] || want_name="$(basename "$desc" .digest)"
+
+case "$want_hex" in
+    [0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) : ;;   # a plausible lowercase-hex digest
+    *) echo "shrek-ai-model-verify: baked descriptor $desc has no valid sha256 on line 1" >&2; exit 3 ;;
+esac
+
+gguf="$DATA_DIR/$want_name"
+[ -f "$gguf" ] || { echo "shrek-ai-model-verify: $want_name not yet delivered to $DATA_DIR (awaiting model delivery)"; exit 2; }
+
+got_hex="$(sha256sum "$gguf" | awk '{print $1}')"
+if [ "$got_hex" = "$want_hex" ]; then
+    echo "shrek-ai-model-verify: READY — $want_name matches baked digest ($want_hex)"
+    exit 0
+fi
+echo "shrek-ai-model-verify: DIGEST MISMATCH for $want_name — refusing (baked=$want_hex got=$got_hex)" >&2
+exit 3

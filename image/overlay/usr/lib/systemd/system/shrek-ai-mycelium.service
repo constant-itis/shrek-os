@@ -19,9 +19,10 @@ Description=Shrek AI — on-box mycelium serving the dev-owned self-knowledge br
 Documentation=file:///usr/share/doc/shrek/adr-006-optional-ai-layer.md
 # Start after the Onion merge so the shrek-ai marker/runtime (if enabled+staged) is present on /usr; Wants
 # (not Requires) — a box without the AI layer must still boot cleanly. Ordered after the persistent /home is
-# mounted so the dev-owned brain directory exists.
-After=shrek-onion.service home.mount
-Wants=shrek-onion.service
+# mounted AND after shrek-ai-store.service, which materializes the dev-owned ~/.mycolink brain this unit's
+# ReadWritePaths= binds (a non-existent ReadWritePaths path fails namespace setup).
+After=shrek-onion.service shrek-ai-store.service home.mount
+Wants=shrek-onion.service shrek-ai-store.service
 # Dormant unless BOTH hold: the AI Onion merged (its marker), AND the on-box mycelium runtime is present
 # (its launcher, delivered by a later slice). Either absent ⇒ condition-skip, no failure. ADR-006 §8.
 ConditionPathExists=/usr/lib/shrek/layers/ai

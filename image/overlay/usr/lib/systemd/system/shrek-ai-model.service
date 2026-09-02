@@ -1,0 +1,55 @@
+# shrek-ai-model.service — the on-box inference server of the optional AI layer (ADR-006 §3, Mode A).
+# Serves a small quantized model (3-4B Q4 GGUF, M1) on 127.0.0.1 ONLY. docs/adr-006-slice2-state-model.md.
+#
+# LAZY-START, NOT boot-enabled: there is deliberately NO [Install]/WantedBy. A resident multi-GB RSS on
+# modest hardware is a real cost (ADR-006 §3), so the model is started ON DEMAND — the `shrek ai` front-door
+# (slice 5) issues `systemctl start shrek-ai-model.service` on the first model-needing turn — not at boot,
+# and NOT via a LISTEN_FDS socket unit (the inference server has no native socket activation — Fable's
+# pipewire-precedent correction). IDLE-UNLOAD is the launcher's contract: it self-exits after an idle
+# window; Restart=no keeps it down until the next on-demand start. Net effect = lazy-start + idle-unload
+# without socket activation.
+#
+# Base-baked + Condition-gated (slice-1 discipline): in the boot transaction at sysinit, but structurally
+# dormant unless the AI Onion merged AND shipped the launcher. GGUF readiness is a START-time gate, not a
+# Condition, so an on-demand start that finds no verified model FAILS WITH A LOGGED REASON (the verify
+# helper's exit codes) rather than skipping silently.
+[Unit]
+Description=Shrek AI — on-box inference server on 127.0.0.1 (small Q4 GGUF, ADR-006 Mode A)
+Documentation=file:///usr/share/doc/shrek/adr-006-optional-ai-layer.md
+After=shrek-onion.service shrek-ai-store.service home.mount
+Wants=shrek-ai-store.service
+# Structural dormancy: the Onion merged AND carried the inference launcher. Either absent ⇒ clean skip.
+ConditionPathExists=/usr/lib/shrek/layers/ai
+ConditionPathExists=/usr/lib/shrek/ai/shrek-ai-model
+
+[Service]
+# No ambient authority (ADR-006 §7: the AI layer never holds its own credential authority). A fresh
+# DynamicUser reads the WORLD-READABLE GGUF from the root-owned model landing and holds nothing else — it
+# cannot reach dev's home, ~/.ssh, or config.json. ProtectHome=read-only (implied by DynamicUser) still
+# lets it read /home/.shrek/ai/model; the model only mmaps the GGUF read-only.
+DynamicUser=yes
+Type=simple
+# Model-as-data gate: refuse to start unless a delivered GGUF matches the sealed baked digest (exit 0).
+# A non-zero pre (no model configured / not delivered / digest mismatch) keeps the server down, logged.
+ExecStartPre=/usr/lib/shrek/ai/shrek-ai-model-verify
+# --host 127.0.0.1 is the load-bearing invariant (ADR-006 §7: every AI-layer listener binds loopback only).
+# The launcher's remaining contract (port, GGUF path under /home/.shrek/ai/model, idle-unload window) is
+# finalized with the inference-runtime substrate; it defaults the model dir to the shrek-ai-store landing.
+ExecStart=/usr/lib/shrek/ai/shrek-ai-model --host 127.0.0.1
+# Idle-unload is the launcher's job (it exits when idle); do NOT auto-restart, so it stays unloaded until
+# the next on-demand start. Generous start timeout — loading a multi-GB GGUF off /home is slow.
+Restart=no
+TimeoutStartSec=180
+# Zero-egress, enforced by the kernel not just the bind (ADR-006 §7 "egress stays zero with AI on"): the
+# service may talk to loopback ONLY. Combined with the 127.0.0.1 bind and ADR-003's veth input-drop (which
+# stops benches reaching the localhost model port), an unauthenticated localhost model server is acceptable.
+IPAddressDeny=any
+IPAddressAllow=localhost
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+StandardOutput=journal
+StandardError=journal

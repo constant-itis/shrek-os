@@ -1,0 +1,33 @@
+# shrek-ai-store.service — materialize the ADR-006 §4 split store on /home every boot (deliver-every-boot,
+# since /usr is a sealed read-only closure). Stands up the root-owned readable-to-dev system-seed + model
+# landing surfaces and the dev-owned ~/.mycolink runtime brain. docs/adr-006-slice2-state-model.md.
+#
+# Base-baked + Condition-gated (the slice-1 discipline): the unit file ships in the sealed base so it is in
+# the boot transaction at sysinit, but runs ONLY when the shrek-ai Onion actually merged (its marker) and
+# delivered the store helper. A box without the AI layer runs nothing — no new failure. Ordered like
+# hosts-seed / shrek-bench-pool: after /home is mounted, before the rest of userspace (local-fs.target).
+[Unit]
+Description=Shrek AI — materialize the split store on /home (system-seed ro-to-dev + dev-owned brain) — ADR-006 §4
+Documentation=file:///usr/share/doc/shrek/adr-006-optional-ai-layer.md
+DefaultDependencies=no
+Requires=home.mount
+After=home.mount
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+# Dormant unless the AI Onion merged AND carried the store helper. Either absent ⇒ clean skip. ADR-006 §8.
+ConditionPathExists=/usr/lib/shrek/layers/ai
+ConditionPathExists=/usr/lib/shrek/ai/shrek-ai-store
+
+[Service]
+# Runs as root — it is the privileged deliverer that creates the root-owned system-seed surface (dev must
+# not be able to forge it) and chowns the runtime brain to dev. The split-store permission model IS the
+# point (ADR-006 §4), so the deliverer must hold the authority to set both ownerships.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/ai/shrek-ai-store
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=local-fs.target
