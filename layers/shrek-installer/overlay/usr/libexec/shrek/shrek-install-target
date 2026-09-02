@@ -2,20 +2,64 @@
 set -eu
 
 usage() {
-    echo "usage: shrek-install-target --target-disk DISK --username USER --fullname NAME --hostname HOST" >&2
+    echo "usage: shrek-install-target --target-disk DISK --username USER --fullname NAME --hostname HOST [--provisioning-manifest PATH]" >&2
     exit 64
 }
+
+# ADR-005 §6.5 — the trust-boundary crossing. Transplant the live-staged provisioning manifest onto the
+# freshly-formatted target /home, atomically and with the ADR-004 write discipline: mkdir -m0700 the store
+# -> write manifest.tmp -> fsync file -> rename -> fsync dir. The manifest is non-secret (no credential ever
+# crosses, §3) but is written root:root 0600 because the first-boot gate requires a root-owned regular file.
+# A missing/empty staged manifest is NOT an error: the target simply first-boot-defaults every key. Runs in
+# the same root context that just mkfs'd the partition — no second mount cycle, no inter-unit partial state.
+#   $1 staged manifest src · $2 mount point · $3 device to mount ("" => $2 is already a mounted dir, test seam)
+transplant_provisioning_manifest() {
+    _src="$1"; _mnt="$2"; _dev="${3:-}"
+    [ -n "$_src" ] && [ -f "$_src" ] || { echo "no staged provisioning manifest ('$_src') — target will first-boot default"; return 0; }
+    _did_mount=0
+    if [ -n "$_dev" ]; then
+        mkdir -m0700 -p "$_mnt"
+        mount "$_dev" "$_mnt" || { echo "WARNING: could not mount $_dev at $_mnt for provisioning transplant; first boot will default" >&2; return 0; }
+        _did_mount=1
+    fi
+    _store="$_mnt/.shrek-system/provisioning"
+    if ( set -e
+         mkdir -m0700 -p "$_mnt/.shrek-system" "$_store"
+         chown 0:0 "$_mnt/.shrek-system" "$_store" 2>/dev/null || true
+         _tmp="$_store/manifest.tmp"
+         cp "$_src" "$_tmp"
+         chmod 0600 "$_tmp"; chown 0:0 "$_tmp" 2>/dev/null || true
+         sync "$_tmp" 2>/dev/null || sync           # fsync file data before the rename makes it visible
+         mv "$_tmp" "$_store/manifest"
+         sync "$_store" 2>/dev/null || sync ); then  # fsync dir so the rename is durable
+        echo "transplanted provisioning manifest -> $_store/manifest (root:root 0600)"
+    else
+        echo "WARNING: provisioning manifest transplant failed; first boot will default" >&2
+    fi
+    [ "$_did_mount" = 1 ] && { umount "$_mnt" 2>/dev/null || true; rmdir "$_mnt" 2>/dev/null || true; }
+    return 0
+}
+
+# Test seam (scripts/install0-transplant-proof.sh): exercise ONLY the transplant against a caller-provided,
+# already-mounted /home dir, non-root, with no target disk / mkfs / mount. The root:root chowns no-op under
+# a non-root uid (guarded), so the write-discipline core is provable without a VM or loop device.
+if [ "${SHREK_INSTALL_TRANSPLANT_SEAM:-0}" = 1 ]; then
+    transplant_provisioning_manifest "${SHREK_PROV_MANIFEST_SRC:-}" "${SHREK_INSTALL_HOME_MNT:?seam requires SHREK_INSTALL_HOME_MNT}" ""
+    exit 0
+fi
 
 TARGET_DISK=
 USERNAME=
 FULLNAME=
 HOSTNAME=
+PROV_MANIFEST=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --target-disk) TARGET_DISK="${2:-}"; shift 2 ;;
         --username) USERNAME="${2:-}"; shift 2 ;;
         --fullname) FULLNAME="${2:-}"; shift 2 ;;
         --hostname) HOSTNAME="${2:-}"; shift 2 ;;
+        --provisioning-manifest) PROV_MANIFEST="${2:-}"; shift 2 ;;
         *) usage ;;
     esac
 done
@@ -141,6 +185,10 @@ echo "formatting persistent owner state"
 # plane can cap each Bench's disk use on the growable /home (home.mount adds the `prjquota` option). The
 # noexec Bench pool sub-mount (shrek-bench-pool.service) lives on this same fs.
 mkfs.ext4 -F -O quota,project -L shrek-data "$home_part"
+
+# ADR-005 §6.5: transplant the staged provisioning manifest onto the just-formatted /home, in this same
+# root context (no second mount cycle). Best-effort by design — a missing manifest first-boot-defaults.
+transplant_provisioning_manifest "$PROV_MANIFEST" /run/shrek-target-home "$home_part"
 
 # Apple-firmware boot enablement (best-effort, Apple-ONLY on purpose):
 # 2012-era Apple firmware hangs on systemd-boot and never delivers the UKI's embedded initrd, so on

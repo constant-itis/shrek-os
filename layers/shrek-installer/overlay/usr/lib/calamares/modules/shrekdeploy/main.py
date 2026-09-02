@@ -87,6 +87,10 @@ def run():
         )
 
     libcalamares.job.setprogress(0.08)
+    # ADR-005 §6.5: the live installer stages the validated (non-secret) provisioning manifest at
+    # /run/shrek/provisioning/manifest (shrek-provision-stage). Hand its path to the writer so it can
+    # transplant it onto the target /home. A missing file is not fatal — the target first-boot-defaults.
+    prov_manifest = os.environ.get("SHREK_PROVISION_MANIFEST", "/run/shrek/provisioning/manifest")
     cmd = [
         "/usr/libexec/shrek/shrek-install-target",
         "--target-disk",
@@ -97,6 +101,8 @@ def run():
         fullname,
         "--hostname",
         hostname,
+        "--provisioning-manifest",
+        prov_manifest,
     ]
     try:
         libcalamares.utils.debug("shrekdeploy: running {}".format(" ".join(cmd)))
