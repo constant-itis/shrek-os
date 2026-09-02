@@ -166,7 +166,11 @@ oneshot (§8) with content-hash dedup:
   `shrek bench run`** against a designated AI bench; direct host exec is not a cartridge the OS
   build includes. **Invariant + dogfood negative:** the shipped shell cannot spawn a host
   subprocess, and a seeded memory containing an instruction-shaped payload produces no host-side
-  effect.
+  effect. **Scope clarification (2026-09-02):** "exclusively through `shrek bench run`" governs
+  **arbitrary code / dependency execution**. Trusted OS operations (Onion install, authenticated
+  model-data update) stay owned by their narrow **signed-input services** (oniond/gatekeeperd, the
+  model-as-data verify+deliver path) and are **not** generalized into Bench — else Bench would become a
+  privilege path (sudo with extra steps). See the dispatch tiers in `adr-006-shrek-tool-contract.md` §5.
 - **The Shrek Tool Contract — one chokepoint (owner refinement 2026-09-02, `adr-006-shrek-tool-contract.md`).**
   The generic tool vocabulary the front-door exposes to the model (`system.status`,
   `system.explain_denial`, `apps.search`/`install`/`launch`, `files.search`, `settings.read`/`change`,

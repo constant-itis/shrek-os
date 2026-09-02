@@ -68,3 +68,26 @@ the substrate, gatekeeperd decides legality, Mycelium supplies user context:
 Naming rule: it is the **Shrek Tool Contract**, never "Slinkd tools" — the abstraction is load-bearing
 and outlives any one client. Authority-raising verbs (grants, installs, settings writes) route to the
 §7 consent/ceremony path; read-only verbs do not.
+
+## 5. Dispatch tiers — and why Bench is not sudo (owner refinement 2026-09-02)
+
+The Tool Contract is not one executor — it **dispatches each verb to the narrow service that owns that
+capability**. The model chooses **intent** (which verb); it never chooses the execution path or the
+privilege mechanism. The OS decides which of three tiers carries the intent:
+
+1. **Read-only service verbs** (`system.status`, `system.explain_denial`, `files.search`,
+   `network.status`, `memory.search`) — the owning service answers; no privilege, no side effect.
+2. **Trusted OS operations** (`apps.install`/Onion install, authenticated model-data update,
+   `settings.change`) — handled by the **narrow, signed-input service that owns the capability**
+   (oniond/gatekeeperd for Onions; the model-as-data verify+deliver path — `shrek-ai-model-verify` — for
+   model updates), operating **only on signed / digest-verified inputs**, with the §7 consent ceremony
+   where authority-raising. **These do NOT go through Bench.**
+3. **Arbitrary / untrusted code + dependency execution** ("run this workload", pull arbitrary crates) —
+   **Bench** + the ADR-003 egress plane: sandboxed, empty-net by default, per-invocation consent for any
+   egress.
+
+**Bench only ever runs untrusted compute.** If trusted OS operations were "routed through Bench", Bench
+would need OS privilege and would become a general escalation path — sudo with extra steps. Keeping
+privileged ops in purpose-built signed-input services keeps Bench a pure sandbox, and keeps the model
+choosing *intent* while the OS owns *mechanism and privilege*. The AI's own runtime deps are sealed in
+the Onion (no broker, no egress); only its *proposed actions* dispatch through these tiers.
