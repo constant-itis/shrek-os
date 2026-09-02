@@ -34,3 +34,9 @@ enable shrek-bench
 # build); a listed-but-absent layer is simply not merged (no error), same as shrek-dev/shrek-bench.
 enable shrek-browser
 enable shrek-apps
+# ADR-006 M1 — the optional on-device AI layer (shrek-ai): an on-box small model + on-box mycelium
+# self-knowledge brain hooked to the sealed skeleton (Mode A — offline, zero egress). Delivered as a signed
+# sysext Onion (scripts/build-ai-layer.sh). Sealed-enabled so oniond merges it when the store carries it
+# (INCLUDE_AI=1 build); a listed-but-absent layer is simply not merged (no error), same tolerance as
+# shrek-dev/shrek-bench/shrek-browser/shrek-apps. Slice 1 is the skeleton. docs/adr-006-optional-ai-layer.md.
+enable shrek-ai

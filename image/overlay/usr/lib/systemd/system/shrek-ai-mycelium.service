@@ -1,0 +1,55 @@
+# shrek-ai-mycelium.service — the on-box mycelium of the optional AI layer (ADR-006 §3/§4/§7, Mode A).
+# Serves the dev-owned self-knowledge brain under /home/dev/.mycolink/brain, bound to 127.0.0.1 ONLY, so
+# `mycolink-shell`'s /recall answers from a brain that never leaves the box — the property that keeps
+# Mode A "offline, zero egress" (ADR-006 §7). docs/adr-006-slice1-onion-skeleton.md.
+#
+# WHY BASE-BAKED (not shipped inside the shrek-ai sysext): a unit that lives inside a late-merging Onion is
+# invisible when systemd computes the boot transaction (the #2904/#2795 timing class ADR-005 round-3 closed;
+# ADR-006 §8 names it). Baking the unit into the sealed base — as shrek-desktop-polkit.service does for a
+# desktop-layer capability — puts it in the transaction at sysinit, and the two Conditions below make it a
+# clean no-op until the AI layer AND its runtime are actually present. This is ADR-006 §8's option (1)
+# (a base-carried dormant applier), the bounded base<->layer coupling recorded as the answer to §9e.
+#
+# SLICE 1 = WIRING ONLY. The launcher /usr/lib/shrek/ai/shrek-ai-mycelium ships with the on-box mycelium
+# RUNTIME in a later slice; until it exists the second Condition is false and the unit skips cleanly. So on
+# a box without the AI Onion (or on this skeleton slice) it takes NO new failure — the absent-tolerance the
+# skeleton exists to prove. When the runtime lands, this unit already binds it to loopback as dev.
+[Unit]
+Description=Shrek AI — on-box mycelium serving the dev-owned self-knowledge brain on 127.0.0.1 (ADR-006 Mode A)
+Documentation=file:///usr/share/doc/shrek/adr-006-optional-ai-layer.md
+# Start after the Onion merge so the shrek-ai marker/runtime (if enabled+staged) is present on /usr; Wants
+# (not Requires) — a box without the AI layer must still boot cleanly. Ordered after the persistent /home is
+# mounted so the dev-owned brain directory exists.
+After=shrek-onion.service home.mount
+Wants=shrek-onion.service
+# Dormant unless BOTH hold: the AI Onion merged (its marker), AND the on-box mycelium runtime is present
+# (its launcher, delivered by a later slice). Either absent ⇒ condition-skip, no failure. ADR-006 §8.
+ConditionPathExists=/usr/lib/shrek/layers/ai
+ConditionPathExists=/usr/lib/shrek/ai/shrek-ai-mycelium
+
+[Service]
+# Runs as the interactive human (dev, uid 1000) because the brain is dev-owned under ~/.mycolink (ADR-006
+# §4 split store: the runtime brain is dev-owned; only the read-only system seed is root-delivered). A
+# root-owned mycelium could not read/write the dev brain without breaking that permission model.
+User=dev
+Group=dev
+Type=simple
+# --host 127.0.0.1 is the load-bearing invariant this unit exists to lock (ADR-006 §7: every AI-layer
+# listener binds loopback only, egress stays zero with AI on). The launcher's remaining contract (port,
+# brain path, read-only system-seed mount) is finalized with the runtime slice; it defaults the brain to
+# ~/.mycolink/brain for the dev user. If a later slice renames a flag it updates this line — the loopback
+# bind is the invariant, not the flag spelling.
+ExecStart=/usr/lib/shrek/ai/shrek-ai-mycelium --host 127.0.0.1
+Restart=on-failure
+RestartSec=2
+# Hardening: no new privileges, private tmp, and the brain is the only writable home surface it needs.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/dev/.mycolink
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -21,6 +21,7 @@ INCLUDE_DEV="${INCLUDE_DEV:-0}"
 INCLUDE_BENCH="${INCLUDE_BENCH:-0}"
 INCLUDE_BROWSER="${INCLUDE_BROWSER:-0}"
 INCLUDE_APPS="${INCLUDE_APPS:-0}"
+INCLUDE_AI="${INCLUDE_AI:-0}"
 MODE="${1:-good}"
 case "$MODE" in good|select|inject|unsigned|tamper|desktop|installer) ;; *) echo "usage: $0 [good|select|inject|unsigned|tamper|desktop|installer]" >&2; exit 1 ;; esac
 # Desktop Bootstrap-0: the signed shrek-desktop sysext is a SEPARATE, heavier build (DMS + Qt runtime)
@@ -42,7 +43,7 @@ echo "=== building layer DDIs + store (mode=${MODE}) in debian:trixie ==="
 mkdir -p out/layers
 docker run --rm --privileged \
   -v "${REPO_ROOT}:/work" -w /work \
-  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" -e INCLUDE_DEV="${INCLUDE_DEV}" -e INCLUDE_BENCH="${INCLUDE_BENCH}" -e INCLUDE_BROWSER="${INCLUDE_BROWSER}" -e INCLUDE_APPS="${INCLUDE_APPS}" \
+  -e HOST_UID="${HOST_UID}" -e HOST_GID="${HOST_GID}" -e MODE="${MODE}" -e INCLUDE_DEV="${INCLUDE_DEV}" -e INCLUDE_BENCH="${INCLUDE_BENCH}" -e INCLUDE_BROWSER="${INCLUDE_BROWSER}" -e INCLUDE_APPS="${INCLUDE_APPS}" -e INCLUDE_AI="${INCLUDE_AI}" \
   debian:trixie \
   bash -euo pipefail -c '
     apt-get update -qq >/dev/null
@@ -137,6 +138,14 @@ docker run --rm --privileged \
       if ls out/layers/shrek-apps*.raw >/dev/null 2>&1; then
         cp "$(ls out/layers/shrek-apps*.raw | head -1)" out/store-stage/extensions/shrek-apps.raw
         echo "--- staged shrek-apps sysext into the store ---"
+      fi
+    fi
+    if [ "$MODE" = "desktop" ] && [ "${INCLUDE_AI:-0}" = "1" ]; then
+      # ADR-006 M1: stage the shrek-ai optional AI-layer Onion when it was built (scripts/build-ai-layer.sh).
+      # Slice 1 is the marker-only skeleton. Same listed-but-absent tolerance as shrek-dev/shrek-bench.
+      if ls out/layers/shrek-ai*.raw >/dev/null 2>&1; then
+        cp "$(ls out/layers/shrek-ai*.raw | head -1)" out/store-stage/extensions/shrek-ai.raw
+        echo "--- staged shrek-ai AI-layer sysext into the store ---"
       fi
     fi
     if [ "$MODE" = "installer" ]; then
