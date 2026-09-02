@@ -257,6 +257,32 @@ grep -qa 'SHREK-DOGFOOD S3 lock-settings=\[externally-managed' "$LOG" \
   && ok "DMS lock configured: external PAM + idle-lock timeout + lock-on-suspend ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | sed 's/.*lock-settings=//'))" \
   || bad "DMS lock settings not seeded ($(grep -a 'SHREK-DOGFOOD S3 lock-settings=' "$LOG" | tail -1 | tr -d '\r'))"
 
+# --- Owner provisioning (#2939): the first-boot wizard replaced the public `shrek` credential ----------
+# DOGFOOD always provisions (non-interactive baked seed), so the OWNER lines must be present. Because the
+# probe runs these at boot>=2, a green OWNER stage also proves the credential SURVIVED the reboot. The
+# acceptance is the two auth legs: the old public `shrek` is rejected and the new owner passphrase unlocks.
+if grep -qa 'SHREK-DOGFOOD OWNER provisioned=\[yes\]' "$LOG"; then
+  ok "owner provisioning ran on first boot (#2939)"
+  ownerleg() { # $1 = OWNER key regex, $2 = human label
+    if grep -qa "SHREK-DOGFOOD OWNER $1" "$LOG"; then ok "$2"
+    else bad "$2 ($(grep -a 'SHREK-DOGFOOD OWNER ' "$LOG" | grep -a "$(echo "$1" | cut -d= -f1)" | tail -1 | tr -d '\r'))"; fi
+  }
+  ownerleg 'store-present=ok'               "owner shadow store seeded on the persistent /home"
+  ownerleg 'store-dir=\[ok 700 root:root\]' "store dir is root:root 0700 (NEVER uid-1000 — the anti-escalation invariant, must-fix 1)"
+  ownerleg 'store-file=\[ok 640 root:shadow\]' "store shadow file is root:shadow 0640"
+  ownerleg 'shadow-bind=ok'                 "the store is bind-mounted over /etc/shadow (must-fix 2)"
+  ownerleg 'dev-hash=\[ok'                  "the live dev: credential is a \$6\$ (SHA-512) crypt"
+  ownerleg 'old-shrek-rejected=ok'          "the old public \`shrek\` password NO LONGER unlocks (the lock now means something)"
+  ownerleg 'new-pass-unlocks=ok'            "the new owner passphrase unlocks the DMS lock (survived the reboot)"
+  ownerleg 'dev-uid=\[ok 1000'              "dev is still uid 1000 — /etc/passwd sealed, authority plane intact (zero regression, must-fix 7)"
+  ownerleg 'display-name=\[ok'              "the owner display name is recorded outside /etc/passwd"
+  for u in root shrek swamp polkitd; do
+    ownerleg "preserved-$u=ok" "the $u shadow line was preserved byte-for-byte across the splice (must-fix 5)"
+  done
+else
+  bad "owner provisioning did NOT run (#2939) — no 'OWNER provisioned=[yes]' ($(grep -a 'SHREK-DOGFOOD OWNER provisioned=' "$LOG" | tail -1 | tr -d '\r'))"
+fi
+
 # --- Sprint S6: Brightness + power-profiles — sealed-image PACKAGING + AUTHORIZATION (the hardware-
 # independent half; the live brightness-set / profile-switch is a no-op in the VM and is INFO-only). --------
 grep -qa 'SHREK-DOGFOOD S6 brightnessctl-present=\[yes\]' "$LOG" \

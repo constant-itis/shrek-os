@@ -325,6 +325,24 @@ fi
 s6prof=$(powerprofilesctl list 2>&1 | sed -n 's/^[* ]*\([a-z][a-z-]*\):.*/\1/p' | tr '\n' ',' || true)
 say "S6 ppd-profiles=[${s6prof:-none(vm-no-cpufreq-driver)}]"
 
+# --- Owner provisioning (#2939): resolve the CURRENT seat credential ----------------------------------
+# On a provisioned box (DOGFOOD bakes a fixed non-interactive seed) the first-boot wizard has replaced the
+# public `shrek` password with the owner's, so the "correct password" for the S3 lock check below is the
+# owner passphrase — and `shrek` must now be REJECTED (asserted in the OWNER stage after S3). The probe
+# reads the same baked seed the wizard used (/etc/shrek/owner-seed, root-only, sealed). On an unprovisioned
+# box it falls back to the legacy `shrek`.
+OWNER_MARK=/home/.shrek-identity/provisioned
+OWNER_SEED=/etc/shrek/owner-seed
+if [ -f "$OWNER_MARK" ] && [ -r "$OWNER_SEED" ]; then
+    OWNER_PROVISIONED=1
+    OWNER_PW=$(sed -n '1p' "$OWNER_SEED")
+    OWNER_NAME=$(sed -n '2p' "$OWNER_SEED")
+else
+    OWNER_PROVISIONED=0
+    OWNER_PW=shrek
+    OWNER_NAME=""
+fi
+
 # --- Sprint S3: Lock + idle — the DMS lock screen authenticates the dev user via PAM -------------------
 # DMS's lock screen (ext-session-lock-v1 via Quickshell) authenticates dev through PAM. With
 # SettingsData.lockPamExternallyManaged=true (seeded in the DMS defaults) it uses the STOCK /etc/pam.d/login
@@ -336,7 +354,7 @@ say "S6 ppd-profiles=[${s6prof:-none(vm-no-cpufreq-driver)}]"
 # the seeded settings and manual lock via loginctl lock-session (loginctlLockIntegration).
 say "S3 quickshell-pam=[$(ldd /usr/bin/quickshell 2>/dev/null | grep -qi libpam && echo linked || echo MISSING)]"
 say "S3 pam-login-service=[$([ -f /etc/pam.d/login ] && echo present || echo MISSING)]"
-rc=0; printf 'shrek\n' | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
+rc=0; printf '%s\n' "$OWNER_PW" | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 0 ] && say "S3 pam-auth-correct=ok" || say "S3 pam-auth-correct=FAIL(rc=$rc)"
 rc=0; printf 'not-the-password\n' | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
 [ "$rc" -ne 0 ] && say "S3 pam-auth-wrong-rejected=ok" || say "S3 pam-auth-wrong-rejected=FAIL(accepted-bad-pw)"
@@ -346,6 +364,43 @@ if grep -q '"lockPamExternallyManaged": *true' "$DSET" 2>/dev/null; then
 else
     say "S3 lock-settings=[MISSING in $DSET]"
 fi
+
+# --- Owner provisioning (#2939): the first-boot wizard replaced the public `shrek` credential ----------
+# This runs at boot>=2 (the probe already rebooted once), so a green result also proves the provisioned
+# credential SURVIVED a reboot on the persistent shrek-data /home. `set +e` so every leg reports its
+# SHREK-DOGFOOD OWNER line regardless of individual rc.
+set +e
+say "OWNER provisioned=[$([ "$OWNER_PROVISIONED" = 1 ] && echo yes || echo no)]"
+if [ "$OWNER_PROVISIONED" = 1 ]; then
+    # Store present on the persistent /home (bind-mount SOURCE).
+    [ -f /home/.shrek-identity/shadow ] && say "OWNER store-present=ok" || say "OWNER store-present=FAIL"
+    # must-fix 1 — the RUNTIME ownership the host oracle could not assert (non-root): dir root:root 0700
+    # (NEVER 1000 — the anti-escalation invariant), file root:shadow 0640.
+    dperm=$(stat -c '%a %U:%G' /home/.shrek-identity 2>/dev/null)
+    [ "$dperm" = "700 root:root" ] && say "OWNER store-dir=[ok 700 root:root]" || say "OWNER store-dir=FAIL([$dperm] want 700 root:root)"
+    fperm=$(stat -c '%a %U:%G' /home/.shrek-identity/shadow 2>/dev/null)
+    [ "$fperm" = "640 root:shadow" ] && say "OWNER store-file=[ok 640 root:shadow]" || say "OWNER store-file=FAIL([$fperm] want 640 root:shadow)"
+    # must-fix 2 — delivered as a bind-mount over /etc/shadow (not a symlink), and the live dev: hash is a $6$.
+    mountpoint -q /etc/shadow && say "OWNER shadow-bind=ok" || say "OWNER shadow-bind=FAIL(/etc/shadow not a mountpoint)"
+    devhash=$(getent shadow dev | cut -d: -f2)
+    case "$devhash" in '$6$'*) say "OWNER dev-hash=[ok \$6\$…]";; *) say "OWNER dev-hash=FAIL(not-a-\$6\$-crypt)";; esac
+    # THE ACCEPTANCE: the OLD public `shrek` no longer authenticates; the NEW owner passphrase does.
+    rc=0; printf 'shrek\n'         | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
+    [ "$rc" -ne 0 ] && say "OWNER old-shrek-rejected=ok" || say "OWNER old-shrek-rejected=FAIL(public pw still unlocks)"
+    rc=0; printf '%s\n' "$OWNER_PW" | timeout 15 pamtester login dev authenticate >/dev/null 2>&1 || rc=$?
+    [ "$rc" -eq 0 ] && say "OWNER new-pass-unlocks=ok" || say "OWNER new-pass-unlocks=FAIL(rc=$rc)"
+    # must-fix 7 — /etc/passwd stays SEALED: dev is still uid 1000 (the whole authority plane resolves the
+    # owner via this — zero regression), GECOS unchanged, display name lives OUTSIDE /etc/passwd.
+    duid=$(getent passwd dev | cut -d: -f3)
+    [ "$duid" = "1000" ] && say "OWNER dev-uid=[ok 1000 — authority plane intact]" || say "OWNER dev-uid=FAIL([$duid] not 1000)"
+    [ "$(head -n1 /home/.shrek-identity/owner 2>/dev/null)" = "$OWNER_NAME" ] && say "OWNER display-name=[ok $OWNER_NAME]" || say "OWNER display-name=FAIL(store!=seed)"
+    # byte-preservation of the OTHER accounts across the splice (root/shrek/swamp/polkitd still valid lines).
+    for u in root shrek swamp polkitd; do
+        getent shadow "$u" >/dev/null 2>&1 || { say "OWNER preserved-$u=FAIL(missing)"; continue; }
+        say "OWNER preserved-$u=ok"
+    done
+fi
+set -e
 
 # --- Sprint S5: Dynamic theming (matugen) — the vendored binary is present, runs under the image's glibc,
 # and turns the wallpaper into a Material palette. matugen has no Debian package, so the pinned upstream
