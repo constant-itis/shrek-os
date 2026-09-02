@@ -1,0 +1,332 @@
+#!/usr/bin/env python3
+# shrek-ai-mycelium — the on-box memory service of the AI layer (ADR-006 §3/§4, Mode A). A minimal,
+# stdlib-only implementation of the SHREK MEMORY API (docs/adr-006-shrek-memory-api.md): recall + save
+# over an FTS5 SQLite brain, plus replace-on-update ingestion of the read-only seed set. Bound to
+# 127.0.0.1 ONLY — the property that keeps Mode A offline / zero-egress (§7).
+#
+# WHY NOT the full mycelium (owner decision 2026-09-02): the real mycelium needs the FastMCP/pydantic/
+# uvicorn pip closure and hardcodes 0.0.0.0 — both wrong for a sealed offline appliance. This ships the
+# recall/save SUBSET on Python stdlib (sqlite3 + http.server) with a native loopback bind and no pip
+# closure. Crucially it is OUT-OF-PROCESS behind a stable wire API, so the full mycelium can replace or
+# augment this later WITHOUT changing Donkey or the `shrek ai` front door.
+#
+# TWO NAMESPACES on one dev-owned brain DB (the real mycelium can't mount a read-only store either):
+#   - source_type='seed'  : the OS self-knowledge, INGESTED from the root-owned read-only seed set
+#     (/home/.shrek/ai/seed) and REPLACED wholesale when the seed manifest changes (§5b). Dev cannot edit
+#     the authoritative source; the ingested copy is refreshed from it on every version change.
+#   - source_type!='seed' : the runtime brain the assistant writes as it learns — the never-clobber
+#     namespace; seed replacement never touches it.
+#
+# stdlib only. Runs as dev (uid 1000): reads the 0644 seed set, writes ~/.mycolink/brain.
+import argparse
+import hashlib
+import json
+import math
+import os
+import re
+import sqlite3
+import sys
+import threading
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+API_VERSION = "shrek-memory/1"
+
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "is", "are", "how", "does", "do", "what",
+    "why", "for", "it", "this", "that", "with", "as", "at", "by", "be", "can", "i", "my", "me",
+}
+
+
+def _now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _connect(path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=15000")
+    return conn
+
+
+def _init_schema(conn):
+    # A mycelium-COMPATIBLE subset, so a future real-mycelium swap reads the same shape.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS memories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            content TEXT NOT NULL,
+            project TEXT DEFAULT '',
+            created TEXT NOT NULL,
+            last_accessed TEXT NOT NULL,
+            access_count INTEGER DEFAULT 0,
+            pinned INTEGER DEFAULT 0,
+            confidence REAL DEFAULT 0.3,
+            source_type TEXT DEFAULT 'agent_observation',
+            mtype TEXT DEFAULT NULL,
+            content_hash TEXT DEFAULT ''
+        );
+        CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
+            content, content='memories', content_rowid='id'
+        );
+        CREATE TRIGGER IF NOT EXISTS memories_ai AFTER INSERT ON memories BEGIN
+            INSERT INTO memories_fts(rowid, content) VALUES (new.id, new.content);
+        END;
+        CREATE TRIGGER IF NOT EXISTS memories_ad AFTER DELETE ON memories BEGIN
+            INSERT INTO memories_fts(memories_fts, rowid, content) VALUES ('delete', old.id, old.content);
+        END;
+        CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
+        """
+    )
+    conn.commit()
+
+
+def _insert(conn, content, project="", mtype=None, source_type="agent_observation",
+            pinned=False, confidence=0.3):
+    now = _now()
+    chash = hashlib.sha256(content.encode("utf-8")).hexdigest()
+    cur = conn.execute(
+        "INSERT INTO memories (content, project, created, last_accessed, access_count, pinned, "
+        "confidence, source_type, mtype, content_hash) VALUES (?,?,?,?,0,?,?,?,?,?)",
+        (content, project, now, now, 1 if pinned else 0,
+         0.8 if pinned else confidence, source_type, mtype, chash),
+    )
+    return cur.lastrowid
+
+
+# ---- seed ingest: replace-on-update (ADR-006 §5b) --------------------------------------------------
+def ingest_seed(conn, seed_jsonl, manifest_path):
+    """Ingest the read-only seed set as source_type='seed', wholesale-replacing the prior seed rows only
+    when the delivered manifest differs from what was last ingested. Runtime memories are untouched."""
+    if not seed_jsonl or not os.path.exists(seed_jsonl):
+        return {"seed": "absent"}
+    delivered_sig = ""
+    if manifest_path and os.path.exists(manifest_path):
+        with open(manifest_path, "r", encoding="utf-8") as f:
+            delivered_sig = f.read().strip()
+    else:
+        with open(seed_jsonl, "rb") as f:
+            delivered_sig = hashlib.sha256(f.read()).hexdigest()
+    row = conn.execute("SELECT value FROM meta WHERE key='seed_sig'").fetchone()
+    if row and row[0] == delivered_sig:
+        n = conn.execute("SELECT COUNT(*) FROM memories WHERE source_type='seed'").fetchone()[0]
+        return {"seed": "current", "records": n}
+    # replace the seed namespace, preserve everything else
+    conn.execute("DELETE FROM memories WHERE source_type='seed'")
+    n = 0
+    with open(seed_jsonl, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            _insert(conn, rec["content"], project=rec.get("source", ""),
+                    mtype=rec.get("mtype"), source_type="seed", confidence=0.8)
+            n += 1
+    conn.execute("INSERT INTO meta(key,value) VALUES('seed_sig',?) "
+                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (delivered_sig,))
+    conn.commit()
+    return {"seed": "reingested", "records": n}
+
+
+def seed_version(manifest_path):
+    if manifest_path and os.path.exists(manifest_path):
+        for ln in open(manifest_path, "r", encoding="utf-8"):
+            if ln.startswith("SEED_VERSION="):
+                return ln.split("=", 1)[1].strip()
+    return None
+
+
+# ---- recall: FTS5 + a light re-rank (a subset of mycelium's ranking) -------------------------------
+def _tokens(query):
+    return [t for t in re.findall(r"[a-zA-Z0-9]+", query.lower()) if len(t) > 1 and t not in _STOPWORDS]
+
+
+def _fts_query(query):
+    toks = _tokens(query)
+    if not toks:
+        return None
+    # OR-join for recall breadth; quote each token so FTS5 treats it literally (no operator injection).
+    return " OR ".join('"%s"' % t for t in toks)
+
+
+def _relevance(row, score_tokens):
+    content_low = row["content"].lower()
+    hits = sum(1 for t in score_tokens if t in content_low)
+    coverage = hits / len(score_tokens) if score_tokens else 0.0
+    access_boost = math.log1p(row["access_count"] or 0) * 0.05
+    try:
+        days_old = (datetime.now(timezone.utc) - datetime.fromisoformat(row["last_accessed"])).days
+    except Exception:
+        days_old = 0
+    recency = 0.3 * math.exp(-max(days_old, 0) / 3.0)
+    quality = 0.1 if (row["pinned"] or 0) else 0.0
+    quality += 0.05 * (row["confidence"] or 0.0)
+    return coverage + access_boost + recency + quality
+
+
+def recall(conn, query, limit=5, project="", mtype=""):
+    ftsq = _fts_query(query)
+    rows = []
+    if ftsq:
+        try:
+            rows = conn.execute(
+                "SELECT m.* FROM memories_fts f JOIN memories m ON m.id=f.rowid "
+                "WHERE memories_fts MATCH ? ORDER BY bm25(memories_fts) LIMIT ?",
+                (ftsq, max(limit * 4, 20)),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            rows = []
+    if not rows:  # LIKE fallback
+        like = "%" + query.strip() + "%"
+        rows = conn.execute(
+            "SELECT * FROM memories WHERE content LIKE ? ORDER BY last_accessed DESC LIMIT ?",
+            (like, max(limit * 4, 20)),
+        ).fetchall()
+    score_tokens = _tokens(query)
+    scored = []
+    for r in rows:
+        if project and r["project"] != project:
+            continue
+        if mtype and (r["mtype"] or "") != mtype:
+            continue
+        scored.append((_relevance(r, score_tokens), r))
+    scored.sort(key=lambda x: x[0], reverse=True)
+    out = []
+    for sc, r in scored[:limit]:
+        out.append({
+            "id": r["id"], "content": r["content"], "mtype": r["mtype"] or "",
+            "project": r["project"] or "", "source_type": r["source_type"] or "",
+            "score": round(sc, 4),
+        })
+    # touch access on returned rows (best-effort)
+    ids = [m["id"] for m in out]
+    if ids:
+        conn.executemany("UPDATE memories SET access_count=access_count+1, last_accessed=? WHERE id=?",
+                         [(_now(), i) for i in ids])
+        conn.commit()
+    return out
+
+
+# ---- HTTP: the Shrek Memory API --------------------------------------------------------------------
+class Handler(BaseHTTPRequestHandler):
+    server_version = "shrek-ai-mycelium"
+
+    def _send(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _body(self):
+        n = int(self.headers.get("Content-Length", 0) or 0)
+        return json.loads(self.rfile.read(n) or b"{}") if n else {}
+
+    def log_message(self, *a):  # quiet; journal captures stderr only on error
+        pass
+
+    def do_GET(self):
+        if self.path.rstrip("/") == "/healthz":
+            conn = self.server.pool()
+            total = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            seed = conn.execute("SELECT COUNT(*) FROM memories WHERE source_type='seed'").fetchone()[0]
+            self._send(200, {"ok": True, "api": API_VERSION, "seed_version": self.server.seed_ver,
+                             "counts": {"total": total, "seed": seed, "runtime": total - seed}})
+            return
+        self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        try:
+            path = self.path.rstrip("/")
+            conn = self.server.pool()
+            if path == "/recall":
+                b = self._body()
+                q = b.get("query", "")
+                if not isinstance(q, str) or not q.strip():
+                    self._send(400, {"error": "query required"})
+                    return
+                mems = recall(conn, q, limit=int(b.get("limit", 5) or 5),
+                              project=b.get("project", "") or "", mtype=b.get("mtype", "") or "")
+                self._send(200, {"api": API_VERSION, "query": q, "memories": mems})
+                return
+            if path == "/save":
+                b = self._body()
+                content = b.get("content", "")
+                if not isinstance(content, str) or not content.strip():
+                    self._send(400, {"error": "content required"})
+                    return
+                if len(content) > 8000:
+                    self._send(400, {"error": "content too long (max 8000)"})
+                    return
+                st = b.get("source_type", "agent_observation") or "agent_observation"
+                if st == "seed":
+                    self._send(403, {"error": "source_type=seed is reserved for the OS seed set"})
+                    return
+                with self.server.wlock:
+                    mid = _insert(conn, content, project=b.get("project", "") or "",
+                                  mtype=b.get("mtype") or None, source_type=st,
+                                  pinned=bool(b.get("pinned", False)),
+                                  confidence=float(b.get("confidence", 0.3)))
+                    conn.commit()
+                self._send(200, {"api": API_VERSION, "id": mid})
+                return
+            self._send(404, {"error": "not found"})
+        except Exception as e:  # never leak a stack to the client; log to stderr for the journal
+            sys.stderr.write("shrek-ai-mycelium: request error: %r\n" % e)
+            self._send(500, {"error": "internal error"})
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, addr, brain, seed_ver):
+        super().__init__(addr, Handler)
+        self.brain = brain
+        self.seed_ver = seed_ver
+        self.wlock = threading.Lock()
+        self._local = threading.local()
+
+    def pool(self):
+        # one connection per worker thread (sqlite connections are not shareable across threads)
+        c = getattr(self._local, "conn", None)
+        if c is None:
+            c = _connect(self.brain)
+            self._local.conn = c
+        return c
+
+
+def main():
+    ap = argparse.ArgumentParser(description="shrek-ai on-box memory service (Shrek Memory API)")
+    ap.add_argument("--host", default="127.0.0.1")   # §7: loopback ONLY
+    ap.add_argument("--port", type=int, default=8199)
+    ap.add_argument("--brain", default=os.path.expanduser("~/.mycolink/brain/brain.db"))
+    ap.add_argument("--seed", default="/home/.shrek/ai/seed/memories.jsonl")
+    ap.add_argument("--seed-manifest", default="/home/.shrek/ai/seed/SEED-MANIFEST")
+    args = ap.parse_args()
+
+    if args.host not in ("127.0.0.1", "::1", "localhost"):
+        sys.stderr.write("shrek-ai-mycelium: refusing non-loopback host %r (ADR-006 §7)\n" % args.host)
+        return 2
+
+    conn = _connect(args.brain)
+    _init_schema(conn)
+    status = ingest_seed(conn, args.seed, args.seed_manifest)
+    conn.close()
+    ver = seed_version(args.seed_manifest)
+    sys.stderr.write("shrek-ai-mycelium: brain=%s seed=%s v=%s\n" % (args.brain, status, ver))
+
+    srv = Server((args.host, args.port), args.brain, ver)
+    sys.stderr.write("shrek-ai-mycelium: %s serving on %s:%d\n" % (API_VERSION, args.host, args.port))
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
