@@ -225,6 +225,43 @@ The exact `ckbcomp` flag set for model/variant edge layouts is validated by the 
 proof (§11), but the **invocation shape above is fixed by this ADR** — the VT layout is
 not left to implementation discretion.
 
+#### 5b-correction — the clobber source is console-setup, not `systemd-vconsole-setup` (verified at build)
+
+The §5b text above names `systemd-vconsole-setup` as the monolithic font+keymap
+retrigger to neutralize. That is **wrong for our actual image**, verified against
+`debian:trixie` with the §5a package set (systemd 257.13):
+
+- **`systemd-vconsole-setup.service` is absent** — trixie's `systemd` ships no such unit
+  at all. It is not the actor and there is no `90-vconsole.rules` to override.
+- The console is owned by **console-setup** (installed for `ckbcomp`, §5a). Its keymap is
+  applied by two *services* reading **`/etc/default/keyboard`** (baked `XKBLAYOUT=us`) —
+  **not** our bound `/etc/vconsole.conf`:
+  - `keyboard-setup.service` (enabled, `sysinit`, `Before=local-fs-pre.target`) → early `loadkeys us`;
+  - `console-setup.service` (enabled, `WantedBy=multi-user.target`) → `setupcon --save`,
+    which re-applies `us` in the **same phase** as our applier — **this is the real clobber.**
+- The vtconsole udev rule is console-setup's `90-console-setup.rules`, whose device-add
+  action (`cached_setup_font.sh`) is **already font-only**. So guard (ii) as written (ship
+  a font-only `90-vconsole.rules` override) is **moot** — there is nothing to override, and
+  we deliberately ship **no** udev rule.
+
+**Corrected closure (implemented):**
+1. **Guard (i) — credential-boundary re-assert (load-bearing, behavior-independent):**
+   `/usr/lib/shrek/shrek-provision-kick` runs `ckbcomp "$XKBLAYOUT" | loadkeys -` as an
+   `ExecStartPre=-` on **`shrek-owner-provision.service`** (the first-boot passphrase wizard —
+   the true credential-entry VT, which runs *before* `getty@tty1`) **and** on `getty@tty1`.
+   It writes the intended layout *last*, so it does not depend on suppressing the clobber.
+2. **Guard (ii) — win the race instead of overriding udev:** `shrek-keymap-seed` is ordered
+   `After=console-setup.service keyboard-setup.service` and `Before=shrek-owner-provision.service`.
+3. Because console-setup reads `/etc/default/keyboard` and ignores our bound
+   `/etc/vconsole.conf`, the `ckbcomp | loadkeys` kick is the **only** thing that puts the
+   provisioned layout on the VT; the bound `vconsole.conf` remains the canonical `XKBLAYOUT`
+   source that the kick and the compositor adapter read. (Rejected alternative: also binding
+   `/etc/default/keyboard` to make console-setup an ally — it violates the single-canonical-
+   source rule and adds a second bind target for no gain over the re-assert.)
+
+The §3/§6 trust-boundary and the seed/deliver three-state model are unchanged; only the
+keymap *consumer-kick* mechanism is corrected here.
+
 ### 5a. Base-image prerequisites (land in this slice)
 
 The enum sets and bind targets the schema depends on do **not** all exist in the base
