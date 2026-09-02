@@ -185,6 +185,9 @@ present "$OP_SEED" && bad "plain: no seed expected" || ok "plain: no seed"
 echo
 echo "=== C. structural + regression guards ==="
 sh -n "$HELPER" && ok "helper parses (sh -n)" || bad "helper failed sh -n"
+# The helper is a systemd ExecStart target — a non-executable mode fails the unit at start (getty then
+# fails its Requires= and the whole dev session cascade fails). Guard the exec bit here, cheaply.
+[ -x "$HELPER" ] && ok "helper is executable (ExecStart can run it)" || bad "helper is NOT executable — ExecStart will fail the unit"
 
 # Service: shipped, inert-by-default (no [Install]), ordered before getty, mount ns NOT isolated.
 present "$SERVICE" && ok "oneshot unit ships in the overlay" || bad "oneshot unit missing"
