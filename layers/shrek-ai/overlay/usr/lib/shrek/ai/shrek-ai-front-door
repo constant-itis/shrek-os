@@ -1,0 +1,56 @@
+#!/bin/sh
+# shrek-ai-front-door — the `shrek ai` front door (ADR-006 §6, Mode A). Configures the hardened
+# mycolink-shell derivative to talk ONLY to on-box loopback services and drops the operator into it.
+# docs/adr-006-slice5-front-door.md. Runs as dev (uid 1000).
+#
+# Wiring (all loopback, zero egress):
+#   - model  : the on-box llama.cpp server (shrek-ai-model.service, 127.0.0.1:8198) via the RETAINED
+#              agent-harness tier2 env config — started ON DEMAND here (lazy; idle-unloads later).
+#   - memory : the Shrek Memory API (shrek-ai-mycelium.service, 127.0.0.1:8199) via ~/.mycolink/config.json
+#              + the recall adapter baked into the vendored tree.
+#   - prompt : /usr/share/shrek/ai/system-prompt.md (sealed default), operator-overridable on /home.
+# The shipped shell has NO host-exec surface (removed at vendor time; scripts/shrek-ai-noexec-check.sh).
+set -eu
+
+SHELL_DIR=/usr/lib/shrek/ai/mycolink-shell          # the vendored, hardened agent_harness tree
+MODEL_PORT=8198
+MEM_PORT=8199
+MARKER=/run/shrek-ai/model.active
+SEAL_PROMPT=/usr/share/shrek/ai/system-prompt.md
+OP_PROMPT="$HOME/.mycolink/system-prompt.md"        # operator override (never clobbered)
+
+[ -d "$SHELL_DIR/agent_harness" ] || { echo "shrek ai: AI layer shell not present (is the shrek-ai Onion merged?)" >&2; exit 1; }
+
+# --- model endpoint (RETAINED agent-harness config; just point tier2 at the loopback llama.cpp) ---
+model_basename="$(awk -F= '/^MODEL_BASENAME=/{print $2}' /usr/share/shrek/ai/model/reference-model 2>/dev/null | awk '{print $1}')"
+export AGENT_HARNESS_TIER2_URL="http://127.0.0.1:${MODEL_PORT}/v1"
+export AGENT_HARNESS_TIER2_MODEL="${model_basename:-local-model.gguf}"
+export AGENT_HARNESS_TIER2_CHAT_TEMPLATE_KWARGS=1   # Granite supports enable_thinking/low_effort
+export AGENT_HARNESS_TIER2_N_CTX=16384              # operational context (§9c), not the model's 128K
+
+# --- system prompt: operator override on /home wins, else the sealed default ---
+if [ -f "$OP_PROMPT" ]; then export MYCOLINK_SYSTEM_PROMPT_FILE="$OP_PROMPT"
+elif [ -f "$SEAL_PROMPT" ]; then export MYCOLINK_SYSTEM_PROMPT_FILE="$SEAL_PROMPT"; fi
+
+# --- memory: point the shell's mycelium client at the on-box Shrek Memory API (first run only) ---
+cfg="$HOME/.mycolink/config.json"
+if [ ! -f "$cfg" ]; then
+    mkdir -p "$HOME/.mycolink"
+    cat > "$cfg" <<JSON
+{"mcp_servers":{"shrek_memory":{"transport":"http","url":"http://127.0.0.1:${MEM_PORT}","type":"mycelium","enabled":true}}}
+JSON
+fi
+
+# --- start the model ON DEMAND (lazy) and keep it warm via the activity marker ---
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+: > "$MARKER" 2>/dev/null || true
+systemctl start shrek-ai-model.service 2>/dev/null || true   # polkit-authorized for dev; best-effort
+# brief readiness wait so the first turn doesn't race the model load (non-fatal on timeout)
+i=0; while [ "$i" -lt 60 ]; do
+    if command -v curl >/dev/null 2>&1 && curl -sf "http://127.0.0.1:${MODEL_PORT}/health" >/dev/null 2>&1; then break; fi
+    i=$((i+1)); sleep 1
+done
+
+export PYTHONPATH="$SHELL_DIR${PYTHONPATH:+:$PYTHONPATH}"
+echo "shrek ai — Donkey (Mode A, offline). model=127.0.0.1:${MODEL_PORT} memory=127.0.0.1:${MEM_PORT}" >&2
+exec python3 -c 'import sys; from agent_harness.cli import main; sys.exit(main(sys.argv[1:]))' shell "$@"

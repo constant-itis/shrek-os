@@ -156,9 +156,13 @@ oneshot (§8) with content-hash dedup:
 
 ## 6. Surfaces & confinement
 
-- **CLI first (M1):** `shrek ai` drops into `mycolink-shell`. `/recall` works against the on-box
-  brain; `/cartridge`, `/escalate` (via §7 broker) work; **`/tail` degrades cleanly** (no on-box
-  slinkd — Fable §6/§8 correction; the M1 claim is *not* "`/tail` works").
+- **CLI first (M1):** `shrek ai` drops into a **hardened derivative** of `mycolink-shell` — vendored from a
+  digest-pinned snapshot and **capability-reduced at build time** (host-exec/escalation/agent-dispatch/
+  process-spawn primitives removed from the source tree; a no-exec gate fails the build if any survive —
+  `adr-006-slice5-front-door.md`). `/recall` works against the on-box brain via the **Shrek Memory API**
+  adapter; the model endpoint is the retained loopback config; **`/tail` degrades cleanly** (no on-box
+  slinkd); `/escalate` and every exec/dispatch tool are **absent from the sealed artifact** (not "via a
+  broker" — removed). The patchset + hardened-source digest are reproducible Onion provenance.
 - **Confinement is structural, not aspirational (Fable fix 4).** The brain is an **injection
   channel** (seeded/recalled content can carry instruction-shaped payloads), and the REPL runs as
   dev with full ambient authority (`~/.ssh`, `config.json`, all of `/home/dev`). So M1 ships the

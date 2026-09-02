@@ -19,6 +19,16 @@ HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 [ -s keys/secureboot.key ] && [ -s keys/secureboot.crt ] || {
   echo "missing keys/secureboot.{key,crt} — run scripts/build-in-container.sh once first" >&2; exit 1; }
 
+# Assemble the hardened mycolink-shell derivative into the (git-ignored) Onion overlay BEFORE mkosi, so
+# ExtraTrees=overlay ships it. Vendors the pinned commit, removes every host-exec/escalation/dispatch/
+# process-spawn primitive, adds the Shrek adapters, and fails the build on any surviving exec site or a
+# hardened-tree digest mismatch (ADR-006 §3/§6). Skippable for a shell-less spike via SKIP_SHELL=1.
+if [ "${SKIP_SHELL:-0}" != "1" ]; then
+  scripts/vendor-agent-harness.sh
+else
+  echo "=== SKIP_SHELL=1 — not vendoring mycolink-shell (shell-less shrek-ai build) ==="
+fi
+
 echo "=== building shrek-ai sysext (python3 runtime + AI overlay) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 # Bind-mount a host ext4 dir OVER /var/tmp so mkosi's overlayfs workspace lands on real ext4, not docker's

@@ -1,0 +1,18 @@
+# ShrekOS AI front-door shell — provenance pin (ADR-006 §3, docs/adr-006-slice5-front-door.md).
+#
+# The `shrek ai` shell is DERIVED from a digest-pinned mycolink-shell snapshot, capability-reduced at build
+# time: host-execution, escalation, external-agent dispatch, and generic process-spawn surfaces are REMOVED
+# from the shipped source tree (scripts/harden-mycolink-shell.py), then narrow Shrek adapters are added
+# (scripts/shrek-shell-adapters.py: Shrek Memory API recall transport + file-backed system prompt). A
+# sealed reproducible image cannot float on a sibling repo's HEAD, so both the source commit and the
+# resulting hardened-tree digest are pinned here; scripts/vendor-agent-harness.sh reproduces the derivative
+# and FAILS THE BUILD on any digest mismatch or any surviving exec primitive (the no-exec gate).
+#
+# The vendored tree is assembled into the Onion at build time and is NOT committed to this repo (it is
+# git-ignored); this pin + the harden/adapter patchset + the no-exec gate ARE the committed provenance.
+SOURCE_REPO=BuberryWorldwide/agent-harness
+SOURCE_COMMIT=99e22569963c3df6c476adf08b1f8c144ce7960d
+# sha256 over sorted "<relpath>:<file-sha256>" of the hardened+adapted *.py tree (deterministic — the
+# harden/adapt steps use no timestamps or model). Regenerate + update on any patchset or source-pin change.
+HARDENED_TREE_SHA256=9fcddc1edcf0fd6da4d54166265b6d4bd4d93ebfccca0b2d9a7a4fbd313eca4f
+HARDENED_PY_FILES=56

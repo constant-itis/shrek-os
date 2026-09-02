@@ -112,3 +112,9 @@
 
 # Vendored rEFInd loader staged by scripts/stage-refind.sh (build input, not source)
 /layers/shrek-installer/overlay/usr/share/refind/
+
+# ADR-006 §3: the hardened mycolink-shell derivative is assembled into the shrek-ai Onion overlay at build
+# time by scripts/vendor-agent-harness.sh (from the pinned agent-harness commit). It is a build product,
+# not tracked source — the pin (layers/shrek-ai/agent-harness.pin) + the harden/adapt patchset + the
+# no-exec gate ARE the committed provenance.
+/layers/shrek-ai/overlay/usr/lib/shrek/ai/mycolink-shell/

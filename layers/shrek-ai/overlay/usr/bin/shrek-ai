@@ -1,0 +1,4 @@
+#!/bin/sh
+# shrek-ai — user-facing entry to the ShrekOS AI front door (ADR-006 §6). Thin wrapper; the logic lives in
+# /usr/lib/shrek/ai/shrek-ai-front-door. (`shrek ai` dispatch from the Rust CLI is a small follow-up.)
+exec /usr/lib/shrek/ai/shrek-ai-front-door "$@"

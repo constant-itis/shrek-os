@@ -1,0 +1,86 @@
+#!/bin/sh
+# shrek-ai-model — the on-box inference-server launcher of the AI layer (ADR-006 §3, Mode A). Verifies the
+# delivered GGUF against the sealed baked digest, then runs the llama.cpp server bound to 127.0.0.1 ONLY,
+# with a decoupled idle-unload watchdog. Started ON DEMAND by shrek-ai-model.service (lazy; the `shrek ai`
+# front door issues `systemctl start`). docs/adr-006-slice5-front-door.md.
+#
+# IDLE-UNLOAD (llama.cpp has no native idle-exit): the front door touches an activity marker on every
+# model turn; this launcher terminates the server and exits once the marker is older than --idle seconds
+# (a resident multi-GB RSS on modest hardware is a real cost — ADR-006 §3). Decoupled via a file mtime, so
+# no cross-process wiring. Restart=no on the unit keeps it down until the next on-demand start.
+#
+# The llama.cpp `llama-server` binary is the sealed RUNTIME (ADR-006 §3: "only the runtime + digest ship
+# sealed") — vendored into the Onion at /usr/lib/shrek/ai/llama-server (digest-pinned). The multi-GB GGUF
+# is model-as-data on /home, authenticated by shrek-ai-model-verify. No pip, no network.
+set -eu
+
+HOST=127.0.0.1
+PORT=8198
+MODEL_DIR="${SHREK_AI_MODEL_DATA_DIR:-/home/.shrek/ai/model}"
+LLAMA_BIN="${SHREK_AI_LLAMA_BIN:-/usr/lib/shrek/ai/llama-server}"
+CTX=16384                                  # operational context 8-16K (§9c), NOT the model's 128K
+IDLE=600
+MARKER="${SHREK_AI_MODEL_MARKER:-/run/shrek-ai/model.active}"
+VERIFY="${SHREK_AI_MODEL_VERIFY:-/usr/lib/shrek/ai/shrek-ai-model-verify}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --host) HOST="$2"; shift 2 ;;
+        --port) PORT="$2"; shift 2 ;;
+        --model-dir) MODEL_DIR="$2"; shift 2 ;;
+        --llama-bin) LLAMA_BIN="$2"; shift 2 ;;
+        --ctx) CTX="$2"; shift 2 ;;
+        --idle) IDLE="$2"; shift 2 ;;
+        --marker) MARKER="$2"; shift 2 ;;
+        *) echo "shrek-ai-model: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+# §7: loopback ONLY. Refuse to ever bind a routable address.
+case "$HOST" in
+    127.0.0.1|::1|localhost) : ;;
+    *) echo "shrek-ai-model: refusing non-loopback host '$HOST' (ADR-006 §7)" >&2; exit 2 ;;
+esac
+
+# Model-as-data gate: refuse to start unless a delivered GGUF matches the baked digest (exit 0 = READY).
+# shrek-ai-model.service also runs this as ExecStartPre; re-checking here keeps the launcher safe standalone.
+if [ -x "$VERIFY" ]; then
+    "$VERIFY" || { echo "shrek-ai-model: model-as-data verify failed — not starting the server" >&2; exit 1; }
+fi
+
+# Resolve the GGUF basename from the baked descriptor (the one *.gguf.digest); the verify already proved it.
+desc="$(ls /usr/share/shrek/ai/model/*.gguf.digest 2>/dev/null | head -n1 || true)"
+[ -n "$desc" ] || { echo "shrek-ai-model: no baked model descriptor — nothing to serve" >&2; exit 1; }
+gguf_name="$(awk 'NR==1{print $2}' "$desc")"; [ -n "$gguf_name" ] || gguf_name="$(basename "$desc" .digest)"
+GGUF="$MODEL_DIR/$gguf_name"
+[ -f "$GGUF" ] || { echo "shrek-ai-model: GGUF $GGUF not present" >&2; exit 1; }
+[ -x "$LLAMA_BIN" ] || { echo "shrek-ai-model: inference runtime $LLAMA_BIN missing (vendored in a later build)" >&2; exit 1; }
+
+# Start the server on loopback. --no-webui keeps it a bare OpenAI-compatible API (no browser surface).
+echo "shrek-ai-model: starting $LLAMA_BIN on $HOST:$PORT (ctx=$CTX) model=$gguf_name" >&2
+"$LLAMA_BIN" --host "$HOST" --port "$PORT" --ctx-size "$CTX" --model "$GGUF" --no-webui &
+srv_pid=$!
+
+# Grace: seed the marker at start so a just-started server isn't reaped before its first turn.
+mkdir -p "$(dirname "$MARKER")" 2>/dev/null || true
+: > "$MARKER" 2>/dev/null || true
+
+cleanup() { kill "$srv_pid" 2>/dev/null || true; }
+trap cleanup INT TERM EXIT
+
+# Idle-unload watchdog: exit (killing the server) once the activity marker is older than IDLE seconds.
+while kill -0 "$srv_pid" 2>/dev/null; do
+    sleep 15
+    if [ -f "$MARKER" ]; then
+        age=$(( $(date +%s) - $(stat -c %Y "$MARKER" 2>/dev/null || echo 0) ))
+    else
+        age=$IDLE
+    fi
+    if [ "$age" -ge "$IDLE" ]; then
+        echo "shrek-ai-model: idle ${age}s >= ${IDLE}s — unloading the model" >&2
+        cleanup
+        wait "$srv_pid" 2>/dev/null || true
+        exit 0
+    fi
+done
+wait "$srv_pid" 2>/dev/null || true
