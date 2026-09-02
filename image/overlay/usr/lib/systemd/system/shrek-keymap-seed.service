@@ -1,0 +1,31 @@
+# Shrek OS — provisioning domain applier: KEYMAP (ADR-005 §6.7-6.8 + §5b, docs/adr-005-provisioning.md).
+#
+# One parameterized helper (/usr/lib/shrek/shrek-provision-seed) serves every domain; this unit selects it
+# with SHREK_PROVISION_DOMAIN=keymap. Three-state resolution + seed-once + deliver-every-boot exactly as
+# the locale applier (see shrek-locale-seed.service). The keymap store state file is /etc/vconsole.conf
+# with the SINGLE canonical source XKBLAYOUT (the XKB layout name, e.g. `de`); KEYMAP stays the baked `us`
+# console fallback (a non-us console KEYMAP would need console-data we do not ship). Nothing implicitly
+# converts XKBLAYOUT — the two explicit §5b adapters do: the VT adapter (`ckbcomp "$XKBLAYOUT" | loadkeys -`)
+# and the compositor adapter (XKBLAYOUT -> XKB_DEFAULT_LAYOUT). Deliver bind-mounts vconsole.conf over the
+# sealed /etc every boot and kicks the consumer via /usr/lib/shrek/shrek-provision-kick if present; that
+# kick + the adapters are wired in the §5b slice (this slice lands the unit + the bind delivery).
+#
+# ORDERING (§6, §9): After=shrek-provision-validate.service is ordering ONLY — NO Requires=/Wants= on the
+# gate or any sibling (no failure cascade in the non-secret plane). Ordered Before=getty@tty1.service +
+# graphical.target so the active-VT keymap is correct while the first-run wizard owns tty1 and before the
+# first graphical session. NO mount-namespace isolation (the /etc bind must be visible to PID1 consumers).
+#
+# ENABLEMENT is variant-gated (§8): the FILE ships unconditionally; the multi-user.target.wants/ enable
+# symlink is staged by build-in-container.sh only for INSTALLABLE + DOGFOOD. No [Install] section.
+[Unit]
+Description=Seed & deliver the provisioned keymap (ADR-005 §6.7, §5b)
+Documentation=file:///usr/share/doc/shrek/adr-005-provisioning.md
+After=home.mount shrek-provision-validate.service
+Before=getty@tty1.service graphical.target
+ConditionPathExists=/home
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=SHREK_PROVISION_DOMAIN=keymap
+ExecStart=/usr/lib/shrek/shrek-provision-seed

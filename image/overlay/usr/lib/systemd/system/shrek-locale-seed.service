@@ -1,0 +1,31 @@
+# Shrek OS — provisioning domain applier: LOCALE (ADR-005 §6.7-6.8, docs/adr-005-provisioning.md).
+#
+# One parameterized helper (/usr/lib/shrek/shrek-provision-seed) serves every domain; this unit selects it
+# with SHREK_PROVISION_DOMAIN=locale. It consumes ONLY the gate's /run output (never the raw manifest) and
+# resolves exactly one of three states: gate-complete + valid value -> seed-once into the store + deliver;
+# gate-complete + no value -> terminal default; gate sentinel absent (crash) -> do nothing, retry next boot.
+# Deliver bind-mounts the store state file (LANG=…) over the sealed /etc/locale.conf every boot (binds are
+# not persistent); 10-shrek-env.sh sources /etc/locale.conf so the session LANG reflects it.
+#
+# ORDERING (§6, §9): After=shrek-provision-validate.service is ordering ONLY — deliberately NO Requires=/
+# Wants= on the gate (or any sibling applier). In this non-secret plane a gate/applier failure must never
+# cascade another unit into failed/emergency; that "never emergency mode" property is structural, not hoped
+# for. Ordered Before=getty@tty1.service + graphical.target so locale delivery completes before the first
+# graphical session is instantiated (else it comes up in the baked default and only corrects on re-login).
+# The unit carries NO mount-namespace isolation — PrivateMounts/MountFlags=slave would hide the /etc bind
+# from PID1/PAM/session consumers.
+#
+# ENABLEMENT is variant-gated (§8): the FILE ships unconditionally; the multi-user.target.wants/ enable
+# symlink is staged by build-in-container.sh only for INSTALLABLE + DOGFOOD. No [Install] section.
+[Unit]
+Description=Seed & deliver the provisioned locale (ADR-005 §6.7)
+Documentation=file:///usr/share/doc/shrek/adr-005-provisioning.md
+After=home.mount shrek-provision-validate.service
+Before=getty@tty1.service graphical.target
+ConditionPathExists=/home
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=SHREK_PROVISION_DOMAIN=locale
+ExecStart=/usr/lib/shrek/shrek-provision-seed

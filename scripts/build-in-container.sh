@@ -221,6 +221,39 @@ else
   :
 fi
 
+# ── ADR-005 provisioning plane (gate + locale/keymap appliers) — variant-gated like home.mount above ───
+# The re-validation gate + domain appliers are enabled ONLY where a manifest is provisioned onto a writable
+# /home: the INSTALLABLE product and the DOGFOOD proof. The unit FILES ship in the overlay unconditionally
+# (tracked, no [Install]); only these enable symlinks + the DOGFOOD test-manifest/env are variant-gated +
+# gitignored, so LIVE_INSTALLER (its live session has no persistent /home) and plain-CI stay byte-clean.
+# Enablement is a target Wants= (not a Requires=): §6's non-secret plane forbids failure-propagating deps,
+# so the units are merely PULLED into the boot transaction here and ordered via their own After=/Before=.
+PROV_WANTS_UNITS="shrek-provision-validate.service shrek-locale-seed.service shrek-keymap-seed.service"
+PROV_ENV="$OP_ETC/provisioning.env"
+PROV_TESTMANIFEST="$OP_ETC/test-manifest"
+# Clear any prior build's generated copies (all gitignored) so each variant starts clean.
+for _u in $PROV_WANTS_UNITS; do rm -f "$MU_WANTS/$_u"; done
+rm -f "$PROV_ENV" "$PROV_TESTMANIFEST"
+if [ "${DOGFOOD:-0}" = "1" ] || [ "$INSTALLABLE" = "1" ]; then
+  echo "!!! provisioning: enabling target-side validate gate + locale/keymap appliers (ADR-005) !!!"
+  install -d "$MU_WANTS"
+  for _u in $PROV_WANTS_UNITS; do ln -sf "../$_u" "$MU_WANTS/$_u"; done
+  if [ "${DOGFOOD:-0}" = "1" ]; then
+    # DOGFOOD has no installer to transplant a store manifest, so bake a non-interactive test-manifest and
+    # point the gate at it via provisioning.env (the gate's ExecStartPre seeds it into the store on first
+    # boot). Values deliberately DIFFER from the §5a baked defaults (locale en_US.UTF-8, keymap us) so the
+    # sealed-VM dogfood (§11) can prove delivery took effect, not just that the default happened to match:
+    # locale=C.UTF-8 (the other installed locale) shifts session LANG; keymap=de yields a non-us VT layout.
+    echo "!!! DOGFOOD=1: baking provisioning test-manifest (locale=C.UTF-8, keymap=de) + gate seed env !!!"
+    install -d "$OP_ETC"
+    printf 'SHREK_PROVISION_SEED_MANIFEST=/etc/shrek/test-manifest\n' > "$PROV_ENV"
+    printf 'schema_version=1\nlocale=C.UTF-8\nkeymap=de\nowner_display_name=Swamp Lord\n' > "$PROV_TESTMANIFEST"
+    chmod 0644 "$PROV_ENV" "$PROV_TESTMANIFEST"
+  fi
+  # INSTALLABLE: no test-manifest/env — the gate validates the manifest the installer genuinely transplanted
+  # (EnvironmentFile=- tolerates the absent provisioning.env; the ExecStartPre no-ops with the var unset).
+fi
+
 # Test seam (scripts/nopasswd-variant-proof.sh): the variant-gated overlay staging above is complete, so a
 # proof can inspect image/overlay for each build flag without the mkosi/docker build. No effect on real builds.
 if [ "${SHREK_STAGE_ONLY:-0}" = "1" ]; then

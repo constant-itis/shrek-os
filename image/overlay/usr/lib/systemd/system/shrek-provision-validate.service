@@ -1,0 +1,41 @@
+# Shrek OS — target-side provisioning re-validation gate (ADR-005 §6.6, docs/adr-005-provisioning.md).
+#
+# The provisioning manifest crossed the install-time trust boundary (staged live, transplanted onto the
+# target /home by shrek-install-target). NOTHING on the target trusts it until this first-boot gate
+# re-validates on the sealed side. The gate ALWAYS exits 0 and emits its result — one validated per-key
+# file per accepted key plus a completion sentinel written LAST — to /run/shrek/provisioning/validated/.
+# The domain appliers (shrek-{locale,keymap}-seed) consume that /run output, NEVER the raw manifest.
+#
+# ORDERING: After=home.mount (the store + manifest live on the persistent shrek-data /home). Ordered
+# Before=getty@tty1.service + graphical.target so the validated /run output exists before the appliers
+# deliver locale/keymap ahead of the first-run wizard VT and the first graphical session (§9).
+#
+# ENABLEMENT is variant-gated (§8): the unit FILE ships in the sealed overlay unconditionally, but the
+# enable symlink (multi-user.target.wants/) is staged by build-in-container.sh ONLY for INSTALLABLE +
+# DOGFOOD — the two variants with a writable /home to provision onto. There is deliberately NO [Install]
+# section, so systemd presets can never enable it on plain-CI / LIVE_INSTALLER (same "ship the unit, gate
+# the enablement" split as home.mount + shrek-owner-provision).
+#
+# DOGFOOD SEAM (§8): DOGFOOD never runs the installer that would transplant a store manifest, so a
+# gitignored /etc/shrek/provisioning.env points SHREK_PROVISION_SEED_MANIFEST at a baked
+# /etc/shrek/test-manifest; the ExecStartPre below installs it into the store (root:root 0600) exactly
+# once — simulating the transplant — so the gate then validates it like any real install. On INSTALLABLE
+# the env file is absent (EnvironmentFile=- tolerates that), the var is unset, and the ExecStartPre no-ops
+# so the gate validates the genuinely transplanted manifest.
+[Unit]
+Description=Re-validate the provisioning manifest on the trusted target side (ADR-005 §6.6)
+Documentation=file:///usr/share/doc/shrek/adr-005-provisioning.md
+After=home.mount
+Wants=home.mount
+Before=getty@tty1.service graphical.target
+ConditionPathExists=/home
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/shrek/provisioning.env
+# DOGFOOD-only transplant simulation: seed the store manifest from the baked test-manifest if one is named
+# and the store has no manifest yet. Guarded + `; true` so it is a hard no-op (exit 0) on every variant
+# that does not set SHREK_PROVISION_SEED_MANIFEST (INSTALLABLE, plain-CI).
+ExecStartPre=/bin/sh -c 'm="${SHREK_PROVISION_SEED_MANIFEST:-}"; s="${SHREK_PROVISION_STORE:-/home/.shrek-system/provisioning}"; [ -n "$m" ] && [ -f "$m" ] && [ ! -e "$s/manifest" ] && { mkdir -p -m0700 "$s" && install -m0600 -o root -g root "$m" "$s/manifest"; }; true'
+ExecStart=/usr/lib/shrek/shrek-provision-validate
