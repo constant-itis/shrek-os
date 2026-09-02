@@ -50,11 +50,18 @@ docker run --rm --privileged \
     mkdir -p /dev/disk/by-label
     ln -sf "$payload_loop" /dev/disk/by-label/shrek-payload
 
+    # ADR-005 §6.5: stage a provisioning manifest as the live installer would, so the writer transplants it
+    # onto the target /home. Non-default values (keymap=de) prove it is the transplanted file, not a default.
+    mkdir -p /run/shrek/provisioning
+    printf "schema_version=1\nkeymap=de\nlocale=C.UTF-8\n" > /run/shrek/provisioning/manifest
+    chmod 0600 /run/shrek/provisioning/manifest
+
     SHREK_INSTALL_ALLOW_LOOP=1 /work/layers/shrek-installer/overlay/usr/libexec/shrek/shrek-install-target \
       --target-disk "$target_loop" \
       --username dev \
       --fullname "Shrek Dev" \
-      --hostname shrek-proof
+      --hostname shrek-proof \
+      --provisioning-manifest /run/shrek/provisioning/manifest
 
     old_loop="$target_loop"
     losetup -d "$target_loop"
@@ -91,8 +98,20 @@ docker run --rm --privileged \
     [ ! -f /mnt/shrek-proof-layers/extensions/shrek-installer.raw ] || { echo "FAIL installed store still contains shrek-installer.raw" >&2; exit 2; }
     umount /mnt/shrek-proof-layers
 
+    # ADR-005 §6.5: the staged manifest must have crossed onto the target /home (p8), root:root 0600, intact.
+    mkdir -p /mnt/shrek-proof-data
+    mount "$data_part" /mnt/shrek-proof-data
+    dm=/mnt/shrek-proof-data/.shrek-system/provisioning/manifest
+    [ -f "$dm" ] || { echo "FAIL transplanted provisioning manifest missing on target /home" >&2; exit 2; }
+    [ "$(stat -c %a "$dm")" = 600 ] || { echo "FAIL manifest mode=$(stat -c %a "$dm") (want 600)" >&2; exit 2; }
+    [ "$(stat -c %u "$dm")" = 0 ]   || { echo "FAIL manifest not root-owned (uid=$(stat -c %u "$dm"))" >&2; exit 2; }
+    grep -qx "keymap=de" "$dm" || { echo "FAIL transplanted manifest content missing keymap=de" >&2; exit 2; }
+    [ ! -e /mnt/shrek-proof-data/.shrek-system/provisioning/manifest.tmp ] || { echo "FAIL manifest.tmp left on target (non-atomic)" >&2; exit 2; }
+    umount /mnt/shrek-proof-data
+
     echo "PASS target layout contains shrek-layers p7 and shrek-data p8"
     echo "PASS installed layer store omits installer layer"
+    echo "PASS provisioning manifest transplanted to target /home (root:root 0600, keymap=de intact)"
   ' 2>&1 | tee -a "$LOG"
 
 echo "=== INSTALL-0 writer proof GREEN: $TARGET ===" | tee -a "$LOG"
