@@ -5,7 +5,17 @@ zero-egress) ratified as the north-star**; B/C are operator-selectable capabilit
 **M1 resident model class fixed: small 3–4B Q4 (~2–3 GB GGUF, ~8 GB-RAM hardware floor)** — the
 widest-reach tier so the assistant is a promise on almost any Shrek box (larger models remain a
 per-box opt-in via the model-as-data mechanism, §3). All §9 decisions closed. Design frozen for
-M1. Nothing is built yet. This ADR locks the *shape* of hooking a language model to the Shrek OS
+M1.
+
+**M1 reference model ratified (owner, 2026-09-02):** IBM **Granite 4.2 3B Q4_K_M** (~2.24 GB,
+Apache-2, native tool-calling + switchable reasoning) via **llama.cpp**; **8 GB RAM supported /
+16 GB recommended**; operational context **8–16K** (Mycelium retrieval feeds the window, NOT the
+model's 128K). Reference, not a lock — the exact GGUF stays per-box via the model-as-data digest
+(§3/§9c), so swapping it is a per-box config change, never an OS redesign. Build status is tracked
+in the slice docs (the Onion skeleton + /home state model have landed; see
+`adr-006-slice1-onion-skeleton.md`, `adr-006-slice2-state-model.md`).
+
+This ADR locks the *shape* of hooking a language model to the Shrek OS
 skeleton before any code lands, per the project rule "design-lock an OS slice before building
 it." It reuses two proven patterns — the **writable-`/home` state store beside the sealed
 `/usr`** (ADR-005) and the **first-boot seed-once/deliver oneshot** (ADR-005 §6) — with the
@@ -157,6 +167,16 @@ oneshot (§8) with content-hash dedup:
   build includes. **Invariant + dogfood negative:** the shipped shell cannot spawn a host
   subprocess, and a seeded memory containing an instruction-shaped payload produces no host-side
   effect.
+- **The Shrek Tool Contract — one chokepoint (owner refinement 2026-09-02, `adr-006-shrek-tool-contract.md`).**
+  The generic tool vocabulary the front-door exposes to the model (`system.status`,
+  `system.explain_denial`, `apps.search`/`install`/`launch`, `files.search`, `settings.read`/`change`,
+  `network.status`, `workshop.create`, `memory.search`/`remember`, …) is the **single**
+  authority-bearing surface. **Every** principal proposes through the *same* contract → Bench + service
+  APIs → gatekeeperd/consent → effect: the local Granite assistant AND any optional Slinkd-coordinated
+  agent. No principal gets a second tool API or a side door around Bench/gatekeeperd. One schema, one
+  audit vocabulary, one authority model; the model learns each verb from its schema, so the model is
+  swappable and **removing Slinkd leaves the local assistant fully functional** (install VLC, explain a
+  denial, find yesterday's PDF, grant a Workshop a folder — all local via Granite + Mycelium + Bench).
 - **Quickshell (later slice):** an AI panel consuming the same `~/.mycolink` session store, so CLI
   and GUI share history.
 
@@ -211,9 +231,22 @@ counters stay zero**; a seeded injection payload produces no host effect.
 
 **All owner decisions closed (2026-09-02):**
 - **(a) Model-placement default** — ✅ **Mode A (on-box) ratified** as north-star, §2.
-- **(c) Model class + hardware floor** — ✅ **small 3–4B Q4 (~2–3 GB), ~8 GB-RAM floor**; the
-  exact GGUF is selected per-box via the model-as-data digest (§3), so the ADR stays
-  size-mechanism-neutral while M1 targets the small tier.
+- **(c) Model class + hardware floor + reference model** — ✅ **small 3–4B Q4** class. **M1
+  reference model: IBM Granite 4.2 3B Q4_K_M** — HF `ibm-granite/granite-4.2-3b-GGUF`, **2.24 GB**
+  (HF tags the size "4B params", so it lands in the upper half of the 3–4B band), Apache-2.0,
+  released 2026-08-25, native tool-calling (recommended parser `qwen3_coder`) + switchable
+  reasoning (`enable_thinking`/`low_effort`), BFCL v4 52.41. Run **on-box via llama.cpp** off the
+  GGUF (`llama serve -hf …:Q4_K_M`; note the *base* card's marquee runtimes are vLLM/SGLang/
+  Transformers, but the GGUF repo documents llama.cpp/Ollama). **8 GB RAM supported floor / 16 GB
+  recommended**; CPU-capable, GPU acceleration opportunistic. **Operational context 8–16K, NOT the
+  model's native 128K** — the on-box Mycelium (§3) retrieves 3–10 relevant memories into a small
+  window rather than a huge resident context, keeping KV-cache/RAM sane. Granite is the
+  **reference, not a lock**: the exact GGUF stays per-box via the model-as-data digest (§3), so
+  swapping it is a per-box config change, never an OS redesign. **The model is an untrusted
+  intent/tool-call proposer; Bench + ShrekOS service APIs + gatekeeperd remain the local
+  execution/authority boundary (§6/§7). Slinkd, when configured, is an optional agent-coordination
+  client of that same boundary and receives no privileged execution path** — §3 keeps slinkd
+  absent by default, and removing it must never reduce the box's local function.
 - **(b) permission model** → split store, §4. **(d) vendor-vs-depend** → pin `agent-harness` by
   digest, §3. **(e) base coupling** → the generic post-merge applier, §8.
 

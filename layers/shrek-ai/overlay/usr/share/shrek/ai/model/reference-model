@@ -1,0 +1,32 @@
+# shrek-ai — M1 REFERENCE MODEL (ADR-006 §9c, ratified by owner 2026-09-02).
+#
+# This NAMES the M1 reference model. It is deliberately NOT a digest: shrek-ai-model-verify globs
+# *.gguf.digest, which this file is not, so an unconfigured box still reports "no model configured"
+# (exit 1) and shrek-ai-model.service stays dormant. A per-box build turns the reference real by
+# FETCHING the GGUF, computing its actual sha256, and baking <name>.gguf.digest beside this file
+# (see ./README). Granite is the REFERENCE, not a lock — swapping it is a per-box config change.
+#
+# Specs verified against the model cards 2026-09-02:
+#   ibm-granite/granite-4.2-3b        (base card)
+#   ibm-granite/granite-4.2-3b-GGUF   (GGUF repo — the on-box artifact source)
+
+MODEL_NAME=granite-4.2-3b
+MODEL_BASENAME=granite-4.2-3b-Q4_K_M.gguf   # conventional GGUF basename; confirm the exact file at fetch time
+QUANT=Q4_K_M
+APPROX_SIZE=2.24GB                          # verified (GGUF repo quant ladder: Q3_K_M 1.84 / Q4_K_M 2.24 / Q5_K_M 2.61 / Q6_K 3.01 / BF16 7.32)
+PARAM_CLASS=3-4B                            # marketed "3B"; HF size tag reads "4B params" — upper half of the 3-4B band
+LICENSE=Apache-2.0
+RELEASED=2026-08-25
+RUNTIME=llama.cpp                           # on-box: `llama serve -hf ibm-granite/granite-4.2-3b-GGUF:Q4_K_M`
+HF_GGUF_REPO=ibm-granite/granite-4.2-3b-GGUF
+TOOL_CALLING=yes                            # native function calling; recommended llama.cpp tool parser: qwen3_coder
+REASONING_MODES=enable_thinking,low_effort  # normal = enable_thinking=false; ambiguous tool pick = +low_effort; rare hard = full
+NATIVE_CONTEXT=128K                         # capability only — see CONTEXT_OPERATIONAL
+CONTEXT_OPERATIONAL=8192-16384              # what shrek-ai actually runs: Mycelium retrieval feeds the window, NOT 128K
+RAM_FLOOR=8GB                               # supported
+RAM_RECOMMENDED=16GB
+BENCH_BFCL_V4=52.41                         # IBM-published function-calling benchmark (independent verification pending)
+
+# AUTHORITY: the model is an untrusted intent/tool-call PROPOSER. Bench + ShrekOS service APIs +
+# gatekeeperd are the local execution/authority boundary (ADR-006 §6/§7). It proposes through the
+# single Shrek Tool Contract (adr-006-shrek-tool-contract.md); it holds no credential authority.

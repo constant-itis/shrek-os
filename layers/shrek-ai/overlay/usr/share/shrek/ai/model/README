@@ -20,9 +20,14 @@ THE DESCRIPTOR (what a per-box build bakes here)
   The two-field shape is exactly `sha256sum`'s output over the GGUF bytes, so a per-box build produces
   it with:  sha256sum <name>.gguf > <name>.gguf.digest   (the bench-seed `.digest` sidecar discipline).
 
-  M1 targets the small tier — a 3-4B Q4 GGUF (~2-3 GB, ~8 GB-RAM floor, ADR-006 §9c). The EXACT GGUF is
-  a per-box choice, so this skeleton Onion ships NO descriptor: an unconfigured box has no baked digest,
-  shrek-ai-model-verify reports "no model configured" (exit 1), and shrek-ai-model.service stays dormant.
+  M1 targets the small tier — a 3-4B Q4 GGUF (~2-3 GB, ~8 GB-RAM floor, ADR-006 §9c).
+
+M1 REFERENCE MODEL
+  The ratified M1 reference is IBM Granite 4.2 3B Q4_K_M (~2.24 GB, Apache-2.0), run on-box via
+  llama.cpp — see ./reference-model for the full verified descriptor. That file NAMES the reference;
+  it is NOT a digest. The EXACT GGUF is still a per-box choice, so this Onion ships no *.gguf.digest:
+  an unconfigured box has no baked digest, shrek-ai-model-verify reports "no model configured"
+  (exit 1), and shrek-ai-model.service stays dormant. Granite is the reference, not a lock.
 
 DELIVERY + VERIFY (runtime)
   1. shrek-ai-store        creates the landing dir  /home/.shrek/ai/model  (root:root 0755, world-readable).
