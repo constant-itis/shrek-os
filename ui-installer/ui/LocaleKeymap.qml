@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import "../theme"
+import "../state"
 
 Item {
     ColumnLayout {
@@ -45,14 +46,22 @@ Item {
 
                 Item { height: Tokens.spaceSm }
 
-                Field { label: "Language"; value: "English (United States)"; mono: "en_US.UTF-8"; kind: "select" }
-                Field { label: "Keyboard layout"; value: "English (US)"; mono: "us"; kind: "select" }
+                // Bound to the Intent singleton (single source the collect bridge reads). Rich pickers are a
+                // follow-up; M1 ships the §5a defaults wired through the flow.
+                Field { label: "Language"; value: Intent.localeLabel; mono: Intent.locale; kind: "select" }
+                Field { label: "Keyboard layout"; value: Intent.keymapLabel; mono: Intent.keymap; kind: "select" }
                 Field { label: "Test your keyboard"; value: "Type here to check the layout"; placeholder: true; kind: "test" }
 
                 Item { Layout.fillHeight: true }
             }
         }
 
-        ActionBar { Layout.fillWidth: true; backText: "Back"; primaryText: "Continue" }
+        ActionBar {
+            Layout.fillWidth: true
+            backText: "Back"
+            primaryText: "Continue"
+            onBackClicked: Intent.back()
+            onPrimaryClicked: Intent.next()
+        }
     }
 }

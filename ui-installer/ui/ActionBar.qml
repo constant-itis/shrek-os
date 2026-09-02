@@ -11,6 +11,8 @@ Rectangle {
     property string primaryText: ""
     property string primaryKind: "accent"
     property bool primaryEnabled: true
+    signal backClicked()
+    signal primaryClicked()
 
     implicitHeight: Tokens.actionHeight
     color: Tokens.footerBg
@@ -27,7 +29,7 @@ Rectangle {
         anchors.rightMargin: Tokens.spaceXl
         spacing: Tokens.spaceMd
 
-        PillButton { visible: bar.backText.length > 0; text: bar.backText; kind: "ghost" }
+        PillButton { visible: bar.backText.length > 0; text: bar.backText; kind: "ghost"; onClicked: bar.backClicked() }
         Text {
             visible: bar.asideText.length > 0
             text: bar.asideText
@@ -43,6 +45,7 @@ Rectangle {
             text: bar.primaryText
             kind: bar.primaryKind
             enabled: bar.primaryEnabled
+            onClicked: bar.primaryClicked()
         }
     }
 }

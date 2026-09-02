@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import "../theme"
+import "../state"
 
 Item {
     ColumnLayout {
@@ -47,7 +48,9 @@ Item {
 
                 Field {
                     label: "Your name"
-                    value: "Sebastian"
+                    editable: true
+                    text: Intent.ownerName
+                    onEdited: function(t) { Intent.ownerName = t }
                     hint: "Shown on the lock screen and in the menu. You can change it later in Settings."
                 }
 
@@ -55,6 +58,12 @@ Item {
             }
         }
 
-        ActionBar { Layout.fillWidth: true; backText: "Back"; primaryText: "Continue" }
+        ActionBar {
+            Layout.fillWidth: true
+            backText: "Back"
+            primaryText: "Continue"
+            onBackClicked: Intent.back()
+            onPrimaryClicked: Intent.next()
+        }
     }
 }

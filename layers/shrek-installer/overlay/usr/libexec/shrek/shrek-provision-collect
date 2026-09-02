@@ -1,0 +1,57 @@
+#!/bin/sh
+# shrek-provision-collect — the Quickshell installer's file-legible bridge to shrek-provision-stage
+# (ADR-005 §6, steps 1-3: collect -> schema-validate(live) -> stage). The UI calls this with the collected
+# non-secret intent passed as ARGV (NEVER a shell-interpolated string — the owner display name is untrusted
+# text), and it writes the key=value COLLECT FILE that shrek-provision-stage consumes via
+# SHREK_PROVISION_COLLECT_FILE, then invokes stage to produce the staged manifest for the target transplant.
+#
+# WHY A COLLECT FILE (not env straight into stage): ADR-004 file-legibility — the collected intent is a
+# durable, inspectable artifact, and stage remains the single validator/sanitizer. No secret ever crosses
+# here (the passphrase is set target-side at first run — §3).
+#
+# TEST SEAM: SHREK_PROVISION_COLLECT_FILE redirects the output; SHREK_PROVISION_COLLECT_RUN_STAGE=0 writes
+# the collect file only (skip stage); shrek-provision-stage's own SHREK_PROVISION_* seams redirect its
+# staging when it IS run — so scripts/provision-collect-proof.sh exercises the whole path non-root, no VM.
+set -eu
+
+COLLECT="${SHREK_PROVISION_COLLECT_FILE:-/run/shrek/provisioning/collect}"
+RUN_STAGE="${SHREK_PROVISION_COLLECT_RUN_STAGE:-1}"
+STAGE_BIN="${SHREK_PROVISION_STAGE_BIN:-/usr/libexec/shrek/shrek-provision-stage}"
+SCHEMA=1; LOCALE=""; KEYMAP=""; NAME=""
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --schema) SCHEMA="${2:-1}"; shift 2 ;;
+        --locale) LOCALE="${2:-}"; shift 2 ;;
+        --keymap) KEYMAP="${2:-}"; shift 2 ;;
+        --name)   NAME="${2:-}";   shift 2 ;;
+        *) echo "shrek-provision-collect: unknown arg: $1" >&2; exit 64 ;;
+    esac
+done
+
+# Strip C0 controls + DEL from every value. Critical for the display name: a raw newline would forge a
+# SECOND key=value line in the collect file (key injection). stage + the target gate re-validate/sanitize
+# every value regardless — this is the first, structural guard so the FILE itself is always well-formed.
+strip() { printf '%s' "$1" | tr -d '\000-\037\177'; }
+SCHEMA=$(strip "$SCHEMA"); LOCALE=$(strip "$LOCALE"); KEYMAP=$(strip "$KEYMAP"); NAME=$(strip "$NAME")
+
+dir=$(dirname "$COLLECT")
+mkdir -p "$dir"; chmod 0700 "$dir" 2>/dev/null || true
+umask 077
+tmp="$COLLECT.tmp.$$"
+{
+    printf 'schema_version=%s\n' "${SCHEMA:-1}"
+    [ -n "$LOCALE" ] && printf 'locale=%s\n' "$LOCALE"
+    [ -n "$KEYMAP" ] && printf 'keymap=%s\n' "$KEYMAP"
+    [ -n "$NAME" ]   && printf 'owner_display_name=%s\n' "$NAME"
+    :
+} > "$tmp"
+chmod 0600 "$tmp"
+mv "$tmp" "$COLLECT"
+echo "shrek-provision-collect: wrote $COLLECT"
+
+if [ "$RUN_STAGE" = "1" ]; then
+    [ -x "$STAGE_BIN" ] || { echo "shrek-provision-collect: stage bin $STAGE_BIN not executable — collect file written, staging skipped" >&2; exit 0; }
+    SHREK_PROVISION_COLLECT_FILE="$COLLECT" "$STAGE_BIN"
+fi
+exit 0

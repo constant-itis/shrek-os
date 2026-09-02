@@ -1,12 +1,13 @@
 import QtQuick
 import "../theme"
 
-// Static button (no wiring). kind: accent | danger | ghost. Enabled controls opacity only.
+// Button. kind: accent | danger | ghost. `enabled` controls opacity AND interactivity. Emits clicked().
 Rectangle {
     id: root
     property string text: ""
     property string kind: "accent"
     property bool enabled: true
+    signal clicked()
 
     implicitHeight: Tokens.buttonHeight
     implicitWidth: label.implicitWidth + 44
@@ -26,5 +27,12 @@ Rectangle {
         color: root.kind === "accent" ? Tokens.accentText
              : root.kind === "danger" ? Tokens.dangerText
              : Tokens.textSecondary
+    }
+
+    MouseArea {
+        anchors.fill: parent
+        enabled: root.enabled
+        cursorShape: Qt.PointingHandCursor
+        onClicked: root.clicked()
     }
 }

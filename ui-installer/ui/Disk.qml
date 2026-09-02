@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import "../theme"
+import "../state"
 
 Item {
     ColumnLayout {
@@ -81,6 +82,12 @@ Item {
             }
         }
 
-        ActionBar { Layout.fillWidth: true; backText: "Back"; primaryText: "Continue" }
+        ActionBar {
+            Layout.fillWidth: true
+            backText: "Back"
+            primaryText: "Continue"
+            onBackClicked: Intent.back()
+            onPrimaryClicked: Intent.next()
+        }
     }
 }

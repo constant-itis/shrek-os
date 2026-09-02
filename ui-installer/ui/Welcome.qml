@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Layouts
 import "../theme"
+import "../state"
 
 Item {
     ColumnLayout {
@@ -45,6 +46,7 @@ Item {
             Layout.fillWidth: true
             asideText: "Live session · nothing has been written yet"
             primaryText: "Begin install"
+            onPrimaryClicked: Intent.next()
         }
     }
 }

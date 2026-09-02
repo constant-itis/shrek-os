@@ -13,6 +13,11 @@ ColumnLayout {
     property string kind: "text"
     property bool placeholder: false
     property int boxWidth: 520
+    // Editable mode (the owner-name field): renders a TextInput bound to `text` and emits edited() on user
+    // input so the owning screen can push it into the Intent singleton without a binding loop.
+    property bool editable: false
+    property string text: value
+    signal edited(string t)
     spacing: 7
 
     Text {
@@ -37,10 +42,22 @@ ColumnLayout {
             spacing: 10
 
             Text {
+                visible: !f.editable
                 text: f.kind === "password" ? "••••••••••" : f.value
                 color: f.placeholder ? Tokens.muted : Tokens.textPrimary
                 font.family: Tokens.fontFamily
                 font.pixelSize: Tokens.fontBody
+            }
+            TextInput {
+                visible: f.editable
+                text: f.text
+                color: Tokens.textPrimary
+                font.family: Tokens.fontFamily
+                font.pixelSize: Tokens.fontBody
+                selectByMouse: true
+                clip: true
+                Layout.fillWidth: true
+                onTextEdited: f.edited(text)
             }
             Text {
                 visible: f.mono.length > 0

@@ -1,8 +1,22 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell.Io
 import "../theme"
+import "../state"
 
 Item {
+    // The file-legible collect bridge (ADR-005 §6): at the point of no return, hand the collected intent to
+    // shrek-provision-collect as ARGV (never a shell string — the owner name is untrusted). It writes the
+    // collect file and runs shrek-provision-stage, producing the staged manifest for the target transplant.
+    Process {
+        id: collector
+        command: ["/usr/libexec/shrek/shrek-provision-collect",
+                  "--schema", String(Intent.schemaVersion),
+                  "--locale", Intent.locale,
+                  "--keymap", Intent.keymap,
+                  "--name",   Intent.ownerName]
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -118,6 +132,15 @@ Item {
             backText: "Back"
             primaryText: "Erase disk & install"
             primaryKind: "danger"
+            onBackClicked: Intent.back()
+            onPrimaryClicked: {
+                // Stage the collected intent, then advance to the install progress screen. The actual disk
+                // write is the calamares deploy job (main.py -> shrek-install-target), which transplants the
+                // manifest this staged.
+                collector.running = true
+                Intent.committed = true
+                Intent.next()
+            }
         }
     }
 }
