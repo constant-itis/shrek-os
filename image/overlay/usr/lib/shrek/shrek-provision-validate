@@ -1,0 +1,135 @@
+#!/bin/sh
+# shrek-provision-validate — the TARGET-side re-validation gate (ADR-005 §6.6, docs/adr-005-provisioning.md).
+#
+# The provisioning manifest crossed an untrusted boundary (staged in the live installer, transplanted onto
+# the target /home). The target trusts NOTHING from it until this gate re-validates on the sealed side. It
+# runs first-boot, After=home.mount, and its output — NOT the manifest — is what the domain appliers consume.
+#
+# OUTPUT CONTRACT (the structural guarantee, §6.6): this gate ALWAYS exits 0 and emits to $RUN_DIR:
+#   (a) one validated per-key file per ACCEPTED key   ($RUN_DIR/<key> = value)
+#   (b) a rejected/absent key is simply omitted; its reason is appended to the store `fault`
+#   (c) a completion sentinel  $RUN_DIR/.gate-complete  written LAST
+# The sentinel is what lets an applier distinguish "the gate ran and produced no key for me" (an intentional
+# default) from "the gate never completed" (a transient crash — must NOT be treated as a default). A crash
+# writes neither the sentinel nor any key file, so the appliers retry next boot instead of default-locking.
+#
+# READ HARDENING (§6.6, closes the crafted-offline-disk class): O_NOFOLLOW-equivalent (reject a symlink
+# manifest), require a regular root-owned file under a size cap, strict key whitelist, reject duplicate keys.
+# Any hardening failure => whole manifest rejected (audit copy to manifest.rejected, fault recorded, NO
+# per-key files) but the sentinel STILL fires (the gate ran to completion) => the target cleanly defaults.
+#
+# TEST SEAM: $SHREK_PROVISION_STORE / $SHREK_PROVISION_RUN redirect the store + /run paths, and enum sources
+# are env-overridable (SHREK_XKB_SYMBOLS_DIR, SHREK_LOCALE_ALLOWLIST), so scripts/provision-apply-proof.sh
+# exercises the whole gate as a non-root user with no VM. SHREK_PROVISION_SKIP_OWNER=1 skips the root-owned
+# check under that seam (a non-root fixture manifest is owned by the test uid, not 0).
+set -eu
+
+SCHEMA_VERSION_EXPECTED="1"
+STORE_DIR="${SHREK_PROVISION_STORE:-/home/.shrek-system/provisioning}"
+MANIFEST="$STORE_DIR/manifest"
+FAULT="$STORE_DIR/fault"
+REJECTED="$STORE_DIR/manifest.rejected"
+RUN_DIR="${SHREK_PROVISION_RUN:-/run/shrek/provisioning/validated}"
+XKB_SYMBOLS_DIR="${SHREK_XKB_SYMBOLS_DIR:-/usr/share/X11/xkb/symbols}"
+LOCALE_ALLOWLIST="${SHREK_LOCALE_ALLOWLIST:-}"
+ZONEINFO="${SHREK_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+NAME_MAX="${SHREK_PROVISION_NAME_MAX:-64}"
+SIZE_CAP="${SHREK_PROVISION_SIZE_CAP:-65536}"
+SKIP_OWNER="${SHREK_PROVISION_SKIP_OWNER:-0}"
+
+WHITELIST="schema_version locale keymap owner_display_name timezone"
+
+log()  { echo "shrek-provision-validate: $*"; }
+
+# ---- validators (re-implemented on the TRUSTED side; deliberately independent of the live staging) -------
+normloc() { printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-'; }
+valid_locale() {
+    [ -n "$1" ] || return 1
+    _n="$(normloc "$1")"
+    if [ -n "$LOCALE_ALLOWLIST" ] && [ -f "$LOCALE_ALLOWLIST" ]; then _src="$(cat "$LOCALE_ALLOWLIST")"
+    else _src="$(locale -a 2>/dev/null || true)"; fi
+    _hit="$(printf '%s\n' "$_src" | while IFS= read -r _l; do
+                [ "$(normloc "$_l")" = "$_n" ] && { printf 'y'; break; }; done)"
+    [ -n "$_hit" ]
+}
+valid_keymap() { case "$1" in ''|*[!a-z0-9]*) return 1 ;; esac; [ -f "$XKB_SYMBOLS_DIR/$1" ]; }
+valid_timezone() {  # path must resolve strictly BENEATH $ZONEINFO (no .. escape, no absolute)
+    case "$1" in ''|/*|*..*) return 1 ;; esac
+    [ -f "$ZONEINFO/$1" ]
+}
+sanitize_name() { printf '%s' "$1" | tr -d '\000-\037\177' | tr -d ':' | cut -c1-"$NAME_MAX"; }
+
+# ---- (re)create the ephemeral /run output dir; sentinel is written LAST ------------------------------
+rm -rf "$RUN_DIR"
+mkdir -p "$RUN_DIR"
+
+FAULTS=0
+: > "$FAULT.tmp"
+addfault() { printf '%s\n' "$1" >> "$FAULT.tmp"; FAULTS=$((FAULTS+1)); }
+emit()     { printf '%s' "$2" > "$RUN_DIR/$1"; }        # validated per-key file
+finish() {                                              # flush fault + sentinel(LAST) + exit 0
+    if [ "$FAULTS" -gt 0 ]; then mv "$FAULT.tmp" "$FAULT"; else rm -f "$FAULT.tmp" "$FAULT"; fi
+    : > "$RUN_DIR/.gate-complete"
+    log "gate complete (faults=$FAULTS, keys=$(ls -1 "$RUN_DIR" | grep -cv '^\.gate-complete$' || true))"
+    exit 0
+}
+reject_whole() {  # audit-copy + fault + NO per-key files, but sentinel STILL fires
+    [ -f "$MANIFEST" ] && cp "$MANIFEST" "$REJECTED" 2>/dev/null || true
+    addfault "MANIFEST REJECTED: $1 — all values default"
+    finish
+}
+
+# ---- read hardening ---------------------------------------------------------------------------------
+if [ ! -e "$MANIFEST" ]; then
+    log "no manifest at $MANIFEST — clean default (this install collected no intent)"
+    finish
+fi
+[ ! -L "$MANIFEST" ]        || reject_whole "manifest is a symlink (O_NOFOLLOW)"
+[ -f "$MANIFEST" ]          || reject_whole "manifest is not a regular file"
+if [ "$SKIP_OWNER" != "1" ]; then
+    [ "$(stat -c '%u' "$MANIFEST" 2>/dev/null || echo -1)" = "0" ] || reject_whole "manifest not root-owned"
+fi
+_sz="$(wc -c < "$MANIFEST" 2>/dev/null || echo 0)"
+[ "$_sz" -le "$SIZE_CAP" ]  || reject_whole "manifest exceeds size cap ($_sz > $SIZE_CAP)"
+
+# strict key whitelist + duplicate-key rejection + malformed-line rejection
+while IFS= read -r _line || [ -n "$_line" ]; do
+    [ -n "$_line" ] || continue
+    case "$_line" in *=*) : ;; *) reject_whole "malformed line (no '='): $_line" ;; esac
+    _k="${_line%%=*}"
+    case " $WHITELIST " in *" $_k "*) : ;; *) reject_whole "unknown key: $_k" ;; esac
+    case " ${SEEN_KEYS:-} " in *" $_k "*) reject_whole "duplicate key: $_k" ;; esac
+    SEEN_KEYS="${SEEN_KEYS:-} $_k"
+done < "$MANIFEST"
+
+getk() { awk -F= -v k="$1" '$1==k{print substr($0,length($1)+2)}' "$MANIFEST"; }
+
+# schema_version gate (§5): exact match else whole-manifest reject
+_sv="$(getk schema_version)"
+[ "$_sv" = "$SCHEMA_VERSION_EXPECTED" ] || reject_whole "schema_version '$_sv' != '$SCHEMA_VERSION_EXPECTED'"
+
+# ---- per-key re-validation: accept -> emit; reject -> omit + fault -----------------------------------
+_v="$(getk locale)"
+if [ -n "$_v" ]; then
+    if valid_locale "$_v"; then emit locale "$_v"
+    else addfault "locale: '$_v' not in installed set — default"; fi
+fi
+_v="$(getk keymap)"
+if [ -n "$_v" ]; then
+    if valid_keymap "$_v"; then emit keymap "$_v"
+    else addfault "keymap: '$_v' not a shipped XKB layout — default"; fi
+fi
+_v="$(getk timezone)"
+if [ -n "$_v" ]; then
+    if valid_timezone "$_v"; then emit timezone "$_v"
+    else addfault "timezone: '$_v' not under $ZONEINFO — default"; fi
+fi
+_v="$(getk owner_display_name)"
+if [ -n "$_v" ]; then
+    _sn="$(sanitize_name "$_v")"
+    if [ -n "$_sn" ]; then emit owner_display_name "$_sn"
+        [ "$_sn" = "$_v" ] || addfault "owner_display_name: sanitized"
+    else addfault "owner_display_name: empty after sanitize"; fi
+fi
+
+finish

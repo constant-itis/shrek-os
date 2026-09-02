@@ -1,0 +1,120 @@
+#!/bin/sh
+# shrek-provision-seed — a TARGET-side domain applier for the provisioning plane (ADR-005 §6.7-6.8).
+# One parameterized helper; the per-domain units (shrek-{locale,keymap,timezone}-seed.service) invoke it
+# with SHREK_PROVISION_DOMAIN set. It consumes ONLY the gate's /run output (never the raw manifest) and
+# resolves exactly one of THREE states — never conflating them:
+#
+#   gate-complete + valid key present  -> SEED (materialize store/state/<file> IF not already stamped),
+#                                          write .applied/<domain>, then DELIVER.
+#   gate-complete + key rejected/absent-> intentional DEFAULT: write .applied/<domain> as a TERMINAL default
+#                                          decision (no state file), DELIVER leaves the baked default showing.
+#   sentinel ABSENT (gate crashed/ran) -> do NOT seed, do NOT stamp. DELIVER an existing persistent state
+#                                          file if a prior boot seeded one, else leave the baked default.
+#                                          RETRY next boot. (A transient crash never default-locks a manifest.)
+#
+# SEED is .applied-gated (seed-once, so a later manual user change is never re-clobbered). DELIVER runs
+# UNCONDITIONALLY every boot when a persistent state file exists — bind mounts are not persistent, so
+# deliver-once would silently revert to the baked default on boot 2 (the shrek-owner-provision seed/deliver
+# split, applied here). The unit carries NO mount-namespace isolation (PrivateMounts/MountFlags=slave would
+# hide the bind from PID1/PAM consumers).
+#
+# NO Requires=/Wants= on the gate (non-secret plane, §6): After= ordering only, so a gate failure can never
+# cascade an applier into failed/emergency. That is a structural "never emergency mode" property.
+#
+# TEST SEAM: SHREK_PROVISION_STORE / SHREK_PROVISION_RUN redirect paths; DELIVER (bind-mount over sealed
+# /etc + consumer kick) is applied only when run as root AND SHREK_PROVISION_DELIVER!=0, so
+# scripts/provision-apply-proof.sh exercises the whole seed/stamp/three-state core non-root with no VM. The
+# bind delivery + kick are proven by the sealed-VM dogfood (§11).
+set -eu
+
+DOMAIN="${SHREK_PROVISION_DOMAIN:?SHREK_PROVISION_DOMAIN required (locale|keymap|timezone)}"
+STORE_DIR="${SHREK_PROVISION_STORE:-/home/.shrek-system/provisioning}"
+RUN_DIR="${SHREK_PROVISION_RUN:-/run/shrek/provisioning/validated}"
+STATE_DIR="$STORE_DIR/state"
+APPLIED_DIR="$STORE_DIR/.applied"
+ZONEINFO="${SHREK_ZONEINFO_DIR:-/usr/share/zoneinfo}"
+KEYMAP_DEFAULT="${SHREK_KEYMAP_DEFAULT:-us}"
+DELIVER="${SHREK_PROVISION_DELIVER:-1}"
+
+log()  { echo "shrek-provision-seed[$DOMAIN]: $*"; }
+fail() { echo "shrek-provision-seed[$DOMAIN]: FATAL: $*" >&2; exit 1; }
+is_root() { [ "$(id -u)" = "0" ]; }
+
+# ---- domain -> (run key, state file, sealed target) -------------------------------------------------
+case "$DOMAIN" in
+    locale)   KEY="locale";   STATEFILE="locale.conf";   ETC="/etc/locale.conf"   ;;
+    keymap)   KEY="keymap";   STATEFILE="vconsole.conf";  ETC="/etc/vconsole.conf" ;;
+    timezone) KEY="timezone"; STATEFILE="localtime";      ETC="/etc/localtime"     ;;
+    *) fail "unknown domain '$DOMAIN' (want locale|keymap|timezone)" ;;
+esac
+STATE_PATH="$STATE_DIR/$STATEFILE"
+STAMP="$APPLIED_DIR/$DOMAIN"
+SENTINEL="$RUN_DIR/.gate-complete"
+KEYFILE="$RUN_DIR/$KEY"
+
+mkdir -p "$STATE_DIR" "$APPLIED_DIR"
+chmod 0700 "$STORE_DIR" "$STATE_DIR" "$APPLIED_DIR" 2>/dev/null || true
+if is_root; then chown 0:0 "$STORE_DIR" "$STATE_DIR" "$APPLIED_DIR" 2>/dev/null || true; fi
+
+# render the validated value into the store state file (materialize a bind SOURCE), atomically.
+materialize() {  # $1 = validated value
+    _tmp="$STATE_PATH.tmp.$$"
+    case "$DOMAIN" in
+        locale)   printf 'LANG=%s\n' "$1" > "$_tmp" ;;
+        # XKBLAYOUT is the single canonical source (§5b); the VT + compositor adapters convert it. KEYMAP
+        # stays the baked default (us) as a harmless console fallback — a non-`us` KEYMAP would need console
+        # keymap data we do not ship (console-data); the real VT layout comes via the ckbcomp adapter.
+        keymap)   printf 'KEYMAP=%s\nXKBLAYOUT=%s\n' "$KEYMAP_DEFAULT" "$1" > "$_tmp" ;;
+        timezone) cp "$ZONEINFO/$1" "$_tmp" ;;   # a REGULAR-FILE copy (never a symlink), like the placeholder
+    esac
+    chmod 0644 "$_tmp"
+    if is_root; then chown 0:0 "$_tmp" 2>/dev/null || true; fi
+    mv "$_tmp" "$STATE_PATH"
+}
+
+# DELIVER: bind the store state file over the sealed /etc target (nosuid,nodev), then kick the consumer.
+# No-op under the oracle seam / non-root.
+deliver() {
+    [ -f "$STATE_PATH" ] || { log "no persistent state to deliver — baked default stands"; return 0; }
+    if [ "$DELIVER" = "0" ] || ! is_root; then
+        log "seam/non-root: skipping bind-deliver of $STATE_PATH -> $ETC"
+        return 0
+    fi
+    if mountpoint -q "$ETC" 2>/dev/null; then
+        log "deliver: $ETC already bound — leaving it"
+    else
+        mount --bind "$STATE_PATH" "$ETC" || fail "bind $STATE_PATH -> $ETC failed"
+        mount -o remount,bind,nosuid,nodev "$ETC" 2>/dev/null || true
+        log "delivered: $STATE_PATH bind-mounted over $ETC"
+    fi
+    # Consumer kick is domain-specific; the keymap VT/compositor adapters are wired in the §5b slice.
+    [ -x /usr/lib/shrek/shrek-provision-kick ] && SHREK_KICK_DOMAIN="$DOMAIN" /usr/lib/shrek/shrek-provision-kick || true
+}
+
+# ---- the three-state resolution ---------------------------------------------------------------------
+if [ -e "$SENTINEL" ]; then
+    if [ -f "$KEYFILE" ]; then
+        _val="$(cat "$KEYFILE")"
+        if [ ! -e "$STAMP" ]; then
+            materialize "$_val"
+            printf 'seeded value=%s\n' "$_val" > "$STAMP"
+            chmod 0644 "$STAMP" 2>/dev/null || true
+            log "seeded '$_val' -> $STATE_PATH (stamped)"
+        else
+            log "already stamped ($STAMP) — not re-seeding; delivering persistent value"
+        fi
+    else
+        if [ ! -e "$STAMP" ]; then
+            printf 'default (terminal — gate produced no value for %s)\n' "$DOMAIN" > "$STAMP"
+            chmod 0644 "$STAMP" 2>/dev/null || true
+            log "gate-complete, no value -> terminal default stamp; baked default stands"
+        else
+            log "already stamped ($STAMP); no value this boot — delivering whatever persists"
+        fi
+    fi
+else
+    log "gate sentinel absent (crashed/never ran) — NOT seeding/stamping; retry next boot"
+fi
+
+deliver
+exit 0
