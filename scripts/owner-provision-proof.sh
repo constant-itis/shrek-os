@@ -108,6 +108,27 @@ fi
 [ -f "$IDENT/owner" ] && [ "$(head -n1 "$IDENT/owner")" = "$NAME" ] && ok "display name recorded in owner file" || bad "display name not recorded"
 [ -f "$IDENT/provisioned" ] && ok "provisioned marker written (login gate keys on it)" || bad "provisioned marker missing"
 
+# ADR-005 §5 display-name PRE-FILL (from the gate's validated owner_display_name):
+VDIR="$SCRATCH/validated"; mkdir -p "$VDIR"; printf 'Manifest Owner' > "$VDIR/owner_display_name"
+# (i) a BLANK seed display-name line adopts the validated manifest name.
+SEED_BLANK="$SCRATCH/seed.blank"; printf '%s\n\n' "$PW" > "$SEED_BLANK"; IDENT_PF="$SCRATCH/ident.prefill"
+env SHREK_IDENTITY_DIR="$IDENT_PF" SHREK_SOURCE_SHADOW="$SRC" SHREK_PROVISION_MODE=noninteractive \
+    SHREK_PROVISION_SEED_FILE="$SEED_BLANK" SHREK_PROVISION_VALIDATED_DIR="$VDIR" SHREK_PROVISION_SEED_ONLY=1 \
+    sh "$HELPER" >/dev/null 2>&1 || true
+[ "$(head -n1 "$IDENT_PF/owner" 2>/dev/null)" = "Manifest Owner" ] && ok "pre-fill: blank seed name adopts the gate-validated owner_display_name" || bad "pre-fill from validated manifest name failed"
+# (ii) an EXPLICIT seed name overrides the pre-fill.
+IDENT_OV="$SCRATCH/ident.override"
+env SHREK_IDENTITY_DIR="$IDENT_OV" SHREK_SOURCE_SHADOW="$SRC" SHREK_PROVISION_MODE=noninteractive \
+    SHREK_PROVISION_SEED_FILE="$SEEDF" SHREK_PROVISION_VALIDATED_DIR="$VDIR" SHREK_PROVISION_SEED_ONLY=1 \
+    sh "$HELPER" >/dev/null 2>&1 || true
+[ "$(head -n1 "$IDENT_OV/owner" 2>/dev/null)" = "$NAME" ] && ok "pre-fill: an explicit seed name overrides the manifest default" || bad "explicit seed name did not override the pre-fill"
+# (iii) NO manifest name + blank seed => falls back to the account name (dev), not empty.
+IDENT_FB="$SCRATCH/ident.fallback"
+env SHREK_IDENTITY_DIR="$IDENT_FB" SHREK_SOURCE_SHADOW="$SRC" SHREK_PROVISION_MODE=noninteractive \
+    SHREK_PROVISION_SEED_FILE="$SEED_BLANK" SHREK_PROVISION_VALIDATED_DIR="$SCRATCH/nonexistent" SHREK_PROVISION_SEED_ONLY=1 \
+    sh "$HELPER" >/dev/null 2>&1 || true
+[ "$(head -n1 "$IDENT_FB/owner" 2>/dev/null)" = "dev" ] && ok "pre-fill: no manifest name falls back to the account name" || bad "no-manifest fallback is not the account name"
+
 # NEGATIVE case (must-fix 1) — a uid-1000 unlink-replace of the store must be impossible. Non-root, we prove
 # this as the invariant that makes it so: the helper sets the store dir root:root 0700 at runtime and NEVER
 # chowns it to the owner/uid-1000 (unlike hosts-seed). A root:root 0700 dir denies uid≠0 all write, so a
@@ -198,8 +219,16 @@ grep -qE '^(PrivateMounts|MountFlags)=' "$SERVICE" && bad "oneshot isolates its 
 # must-fix 9: the autologin drop-in no longer claims dev's password is locked.
 grep -q 'password is locked' "$AUTOLOGIN" && bad "autologin.conf still says 'password is locked' (stale — it is UNLOCKED)" || ok "autologin.conf stale 'password is locked' comment fixed"
 
-# must-fix 7: profile.d renders the display name (hides dev@).
-present "$PROFILE" && grep -q '/home/.shrek-identity/owner' "$PROFILE" && ok "profile.d renders the owner display name in PS1" || bad "profile.d owner-name rendering missing"
+# ADR-005 §5: the display-name-in-PS1 behavior is REMOVED — bash PS1 does command substitution
+# (promptvars default-on) and the name is not shell-safe (the sanitizer strips control/CSI/colon but not
+# $ ` \), so a name like $(cmd) would execute at every prompt. The name renders in Quickshell ONLY now.
+[ ! -e "$PROFILE" ] && ok "PS1 owner-name injection removed (50-shrek-owner.sh gone)" || bad "50-shrek-owner.sh still present (PS1 injection vector)"
+# Belt-and-braces: no profile.d script interpolates the owner name into a prompt.
+if grep -rl 'shrek-identity/owner' image/overlay/etc/profile.d/ 2>/dev/null | while IFS= read -r f; do grep -q 'PS1' "$f" && echo "$f"; done | grep -q .; then
+  bad "a profile.d script still injects the owner display name into PS1"
+else
+  ok "no profile.d script interpolates the owner name into PS1"
+fi
 
 # Template + payload gate + base package.
 visudo_ok=1; present "$TEMPLATE" && grep -q 'Requires=shrek-owner-provision.service' "$TEMPLATE" && ok "getty drop-in template Requires= the oneshot" || bad "drop-in template missing/incomplete"
