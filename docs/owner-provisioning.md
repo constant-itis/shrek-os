@@ -1,6 +1,6 @@
 # Owner-account provisioning (#2939) — identity foundation, lock-screen scope
 
-Status: host-oracle-green (`scripts/owner-provision-proof.sh` 37/0), sealed-VM dogfood pending.
+Status: COMPLETE — host oracle (`scripts/owner-provision-proof.sh`) 37/0 and sealed-VM dogfood 134/0.
 Zero Rust — config/shell/docs only, so no system-index bump. Design locked in mem #3011
 (Fable GO-WITH-FIXES on Identity-Model-A + first-boot oneshot).
 
@@ -88,10 +88,11 @@ seed-only-if-absent means a base placeholder never clobbers it.
 - **Host oracle** `scripts/owner-provision-proof.sh` (no root, no VM): valid `$6$` crypt of the
   passphrase (salt round-trip), byte-preserved non-dev lines, store modes, no chown-to-1000,
   idempotent re-run, and the full variant matrix via the `SHREK_STAGE_ONLY` seam.
-- **Sealed-VM dogfood** (pending): wizard runs before desktop; the new passphrase unlocks the DMS
-  lock and the old `shrek` does NOT; the console-consent ceremony still resolves uid 1000 and
-  completes a bench grant (zero regression vs #2986); the credential survives reboot + an A/B base
-  swap.
+- **Sealed-VM dogfood** (`dogfood-persist-probe` OWNER stage, scored by `dogfood-vm.sh`) — 134/0:
+  the wizard runs before desktop; the new passphrase unlocks the DMS lock and the old `shrek` does
+  NOT; the credential survives the reboot (the stage runs at boot>=2); the bench grant/sec/media
+  flow still passes (zero regression vs #2986's 114/0 — +20 OWNER legs, no losses); dev is still
+  uid 1000 with a sealed /etc/passwd.
 
 ## Deferred (named, not in this slice)
 
