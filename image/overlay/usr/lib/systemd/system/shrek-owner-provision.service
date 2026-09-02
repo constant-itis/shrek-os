@@ -18,7 +18,9 @@
 [Unit]
 Description=Provision the Shrek owner account credential + display name (first boot)
 Documentation=file:///usr/share/doc/shrek/owner-provisioning.md
-After=home.mount shrek-desktop-ready.service
+# After=shrek-provision-validate.service (ordering only, no Requires/Wants) so the gate's validated
+# owner_display_name is in /run before the wizard reads it for the display-name pre-fill (ADR-005 §5).
+After=home.mount shrek-desktop-ready.service shrek-provision-validate.service
 Wants=home.mount
 Before=getty@tty1.service
 ConditionPathExists=/home

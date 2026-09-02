@@ -61,6 +61,9 @@ SEED_ONLY="${SHREK_PROVISION_SEED_ONLY:-0}"              # oracle seam: seed the
 DEV_USER="${SHREK_OWNER_USER:-dev}"                      # the baked uid-1000 slot whose credential we mutate
 MIN_LEN="${SHREK_PROVISION_MIN_LEN:-8}"
 CONSOLE="${SHREK_PROVISION_CONSOLE:-/dev/tty1}"
+# ADR-005 §5: pre-fill the display name from the provisioning gate's VALIDATED output (sanitized, trusted —
+# NOT the raw manifest). Env-overridable for the proof seam.
+VALIDATED_DIR="${SHREK_PROVISION_VALIDATED_DIR:-/run/shrek/provisioning/validated}"
 
 log()  { echo "shrek-owner-provision: $*"; }
 fail() { echo "shrek-owner-provision: FATAL: $*" >&2; exit 1; }
@@ -94,6 +97,16 @@ read_secret() {   # read_secret PROMPT VARNAME  (echo off, from the console)
 }
 
 collect() {
+    # Pre-fill the display name from the gate's VALIDATED owner_display_name (its trusted, already-sanitized
+    # output — never the raw manifest). Absent/empty -> fall back to the account name. This is only a DEFAULT
+    # the owner confirms or overrides; it is not a credential and nothing here depends on it being present.
+    PREFILL_NAME=""
+    if [ -r "$VALIDATED_DIR/owner_display_name" ]; then
+        PREFILL_NAME=$(head -n1 "$VALIDATED_DIR/owner_display_name" 2>/dev/null || true)
+        case "$PREFILL_NAME" in *:*) PREFILL_NAME="" ;; esac   # belt-and-braces (the gate already strips ':')
+    fi
+    DEFAULT_NAME="${PREFILL_NAME:-$DEV_USER}"
+
     case "$MODE" in
     noninteractive)
         [ -r "$SEED_FILE" ] || fail "noninteractive mode: seed file $SEED_FILE is missing/unreadable"
@@ -112,14 +125,16 @@ collect() {
             [ "$PASSPHRASE" = "$_confirm" ] && break
             printf 'Passphrases did not match — try again.\n' > "$CONSOLE"
         done
-        printf 'Display name (shown on the lock screen and prompt) [%s]: ' "$DEV_USER" > "$CONSOLE"
+        # Pre-fill + confirm: the manifest's name is the default; enter accepts it, or type a replacement.
+        printf 'Display name (shown on the lock screen) [%s]: ' "$DEFAULT_NAME" > "$CONSOLE"
         read DISPLAY_NAME < "$CONSOLE" || DISPLAY_NAME=""
         ;;
     *) fail "unknown SHREK_PROVISION_MODE=$MODE (want interactive|noninteractive)" ;;
     esac
     # Display name never contains a colon (it must not be able to forge extra shadow/passwd fields anywhere
-    # it is later rendered) and defaults to the account name.
-    [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$DEV_USER"
+    # it is later rendered). A blank seed line / bare enter adopts the pre-filled default (manifest name,
+    # else the account name).
+    [ -n "$DISPLAY_NAME" ] || DISPLAY_NAME="$DEFAULT_NAME"
     case "$DISPLAY_NAME" in *:*) fail "display name must not contain ':'";; esac
 }
 
@@ -170,8 +185,8 @@ if is_root; then chown 0:0 "$IDENT_DIR" || fail "cannot chown $IDENT_DIR to root
 chmod 0640 "$STORE"
 if is_root; then chown 0:42 "$STORE" || fail "cannot chown $STORE to root:shadow"; fi   # gid 42 = shadow
 
-# Display name: 0644 root:root so the dev session's PS1/greeter can read it (not a secret; /etc/passwd
-# GECOS stays sealed — must-fix 7).
+# Display name: 0644 root:root so the Quickshell lock screen / greeter can read it (not a secret; /etc/passwd
+# GECOS stays sealed — must-fix 7). NOT rendered in PS1 — ADR-005 §5 removed that (a shell injection vector).
 printf '%s\n' "$DISPLAY_NAME" > "$OWNER_FILE"
 chmod 0644 "$OWNER_FILE"
 if is_root; then chown 0:0 "$OWNER_FILE" || fail "cannot chown $OWNER_FILE to root:root"; fi
