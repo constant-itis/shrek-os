@@ -76,6 +76,54 @@ chown 0:0 "$BUILDROOT/etc/containers/policy.json" "$BUILDROOT/etc/containers/reg
 chmod 0644 "$BUILDROOT/etc/containers/policy.json" "$BUILDROOT/etc/containers/registries.conf"
 echo "postinst: podman /etc/containers -> $(ls -1 "$BUILDROOT/etc/containers" | tr '\n' ' ')"
 
+# ── Install-time provisioning base prerequisites + baked placeholders (ADR-005 §5a) ──────────────────
+# The provisioning appliers bind writable /home-backed config over the sealed RO /etc/{locale,vconsole}.conf
+# and /etc/localtime; those TARGETS must pre-exist as baked placeholders, and the enum DATA must be present
+# on /usr, or the appliers no-op to an unattainable default. All baked here into the sealed /etc (runtime
+# /etc is read-only dm-verity — a boot-time generator could never write it).
+#
+# Locale: regenerate a CURATED set (not locales-all — size) so the manifest default en_US.UTF-8 is actually
+# usable on the sealed image. Written+generated here so it is self-contained regardless of ExtraTrees order.
+cat > "$BUILDROOT/etc/locale.gen" <<'LGEN'
+C.UTF-8 UTF-8
+en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+de_DE.UTF-8 UTF-8
+fr_FR.UTF-8 UTF-8
+es_ES.UTF-8 UTF-8
+LGEN
+printf 'LANG=en_US.UTF-8\n' > "$BUILDROOT/etc/locale.conf"        # baked default (§5a)
+if [ -x "$BUILDROOT/usr/sbin/locale-gen" ]; then
+    chroot "$BUILDROOT" /usr/sbin/locale-gen >/dev/null 2>&1 || echo "postinst: WARN locale-gen returned nonzero"
+else
+    echo "postinst: WARN /usr/sbin/locale-gen absent (locales pkg?) — locale-archive not regenerated"
+fi
+
+# VT keymap placeholder — ONE canonical XKB source (XKBLAYOUT) + a console KEYMAP fallback (§5a/§5b).
+cat > "$BUILDROOT/etc/vconsole.conf" <<'VCON'
+KEYMAP=us
+XKBLAYOUT=us
+VCON
+
+# /etc/localtime as a REGULAR-FILE copy of UTC — NEVER a symlink: binding a value over a symlink resolves to
+# and shadows the sealed /usr/share/zoneinfo target for every consumer (§5a).
+if [ -f "$BUILDROOT/usr/share/zoneinfo/UTC" ]; then
+    # tzdata leaves /etc/localtime as a SYMLINK into /usr/share/zoneinfo (read-only /usr); a plain cp would
+    # follow it and fail "Read-only file system" (confirmed at build). Drop the symlink, then copy the
+    # REGULAR file — the whole point of §5a (a symlink target would be shadowed when a value is bound over it).
+    rm -f "$BUILDROOT/etc/localtime"
+    cp "$BUILDROOT/usr/share/zoneinfo/UTC" "$BUILDROOT/etc/localtime"
+    chmod 0644 "$BUILDROOT/etc/localtime"
+else
+    echo "postinst: WARN /usr/share/zoneinfo/UTC missing (tzdata not installed?)"
+fi
+
+# EMPIRICAL CHECK (the whole point of §5a — --no-install-recommends silently drops data pkgs). The build log
+# must show yes for every dep at the applier's ordering point on the merged BASE /usr.
+echo "postinst: §5a locale -> $(chroot "$BUILDROOT" locale -a 2>/dev/null | tr '\n' ' ')"
+echo "postinst: §5a keymap deps -> ckbcomp=$([ -x "$BUILDROOT/usr/bin/ckbcomp" ] && echo yes || echo NO) loadkeys=$([ -x "$BUILDROOT/usr/bin/loadkeys" ] && echo yes || echo NO) setfont=$([ -x "$BUILDROOT/usr/bin/setfont" ] && echo yes || echo NO) xkb_us=$([ -f "$BUILDROOT/usr/share/X11/xkb/symbols/us" ] && echo yes || echo NO)"
+echo "postinst: §5a placeholders -> vconsole=$([ -f "$BUILDROOT/etc/vconsole.conf" ] && echo yes || echo NO) localtime_regularfile=$([ -f "$BUILDROOT/etc/localtime" ] && [ ! -L "$BUILDROOT/etc/localtime" ] && echo yes || echo NO) locale.conf=$(cat "$BUILDROOT/etc/locale.conf" 2>/dev/null)"
+
 # Dogfood-0 (M3): the `swamp` system user+group. gatekeeperd writes its session/authority records
 # root:swamp 0640 (session_view.rs `swamp_ids()` resolves BOTH the swamp user in /etc/passwd and the
 # swamp group in /etc/group by NAME — absent either, the chown silently falls back to root:root and the
