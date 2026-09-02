@@ -1,0 +1,72 @@
+#!/bin/sh
+# shrek-provision-kick — the provisioning consumer "kick" + VT keymap adapter (ADR-005 §5b).
+#
+# Two callers, one entry point (dispatch on SHREK_KICK_DOMAIN):
+#   (a) shrek-provision-seed's deliver() calls it after binding a domain's state file over sealed /etc, so
+#       the live consumer picks up the new value in the same boot.
+#   (b) the credential-boundary re-assert: an ExecStartPre on shrek-owner-provision.service (the first-boot
+#       passphrase wizard) and on getty@tty1.service re-runs the KEYMAP kick immediately before the prompt,
+#       so the LAST VT keymap write before any credential entry is always the provisioned layout.
+#
+# VT KEYMAP ADAPTER (domain=keymap): XKBLAYOUT in /etc/vconsole.conf is the single canonical source; this
+# converts it with `ckbcomp "$XKBLAYOUT" | loadkeys -` — compile the XKB layout to a console keymap in
+# memory (piped, no file written to the sealed FS) and load it into the GLOBAL kernel keyboard translation
+# table. M1 is layout-only (the schema has no XKBVARIANT), so no variant is passed. locale/timezone need no
+# VT kick (their consumers re-read /etc on next use), so those domains are a clean no-op.
+#
+# ADR-005 §5b CORRECTION (mechanism, verified on trixie + our §5a package set): the ADR names
+# systemd-vconsole-setup as the clobber source, but that unit is ABSENT on our image (systemd 257 ships no
+# such unit here). The console is owned by console-setup: keyboard-setup.service (sysinit) and
+# console-setup.service (multi-user) apply the keymap from /etc/default/keyboard (baked `us`) — NOT from our
+# bound /etc/vconsole.conf. The vtconsole udev rule (90-console-setup.rules) is already font-only. So the
+# real keymap clobber is console-setup.service re-applying `us`, and the load-bearing guard is THIS
+# re-assert at the credential boundary (behavior-independent — it does not depend on stopping the clobber).
+# shrek-keymap-seed is additionally ordered After=console-setup.service to win the multi-user race.
+#
+# TEST SEAM: SHREK_KICK_VCONSOLE redirects the source file and SHREK_KICK_DELIVER=0 prints the resolved
+# layout + the command it WOULD run instead of touching the kernel keymap, so the proof exercises the parse
+# + invocation shape non-root with no console. Runs fail-open everywhere (exit 0): a keymap kick must never
+# fail a login/credential unit (the ExecStartPre callers also use a `-` prefix).
+set -eu
+
+DOMAIN="${SHREK_KICK_DOMAIN:-keymap}"
+VCONSOLE="${SHREK_KICK_VCONSOLE:-/etc/vconsole.conf}"
+DELIVER="${SHREK_KICK_DELIVER:-1}"
+log() { echo "shrek-provision-kick[$DOMAIN]: $*"; }
+
+case "$DOMAIN" in
+    keymap) : ;;
+    locale|timezone) exit 0 ;;               # no VT kick — consumer re-reads /etc on next use
+    *) log "unknown domain — no-op"; exit 0 ;;
+esac
+
+[ -r "$VCONSOLE" ] || { log "no readable $VCONSOLE — leaving VT keymap as-is"; exit 0; }
+
+# Parse XKBLAYOUT WITHOUT sourcing the file (never eval config). Take the last assignment; strip an optional
+# surrounding pair of double or single quotes and any whitespace.
+_line="$(grep -E '^XKBLAYOUT=' "$VCONSOLE" 2>/dev/null | tail -n1 || true)"
+_layout="${_line#XKBLAYOUT=}"
+_layout="${_layout%\"}"; _layout="${_layout#\"}"
+_layout="${_layout%\'}"; _layout="${_layout#\'}"
+_layout="$(printf '%s' "$_layout" | tr -d '[:space:]')"
+
+# Defense in depth (the gate already validated keymap against the shipped XKB symbol set): a console keymap
+# name is lowercase alnum. Reject anything else rather than feed it to ckbcomp.
+case "$_layout" in
+    ''|*[!a-z0-9]*) log "no usable XKBLAYOUT ('$_layout') — leaving VT keymap as-is"; exit 0 ;;
+esac
+
+if [ "$DELIVER" = "0" ]; then
+    log "seam: resolved layout='$_layout'; WOULD run: ckbcomp '$_layout' | loadkeys -"
+    exit 0
+fi
+
+command -v ckbcomp  >/dev/null 2>&1 || { log "ckbcomp absent — cannot compile layout '$_layout'"; exit 0; }
+command -v loadkeys >/dev/null 2>&1 || { log "loadkeys absent — cannot load keymap"; exit 0; }
+
+if ckbcomp "$_layout" 2>/dev/null | loadkeys - >/dev/null 2>&1; then
+    log "VT keymap set to '$_layout' (ckbcomp | loadkeys)"
+else
+    log "ckbcomp|loadkeys failed for '$_layout' — VT keymap unchanged"
+fi
+exit 0

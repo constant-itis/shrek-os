@@ -20,8 +20,13 @@
 [Unit]
 Description=Seed & deliver the provisioned keymap (ADR-005 §6.7, §5b)
 Documentation=file:///usr/share/doc/shrek/adr-005-provisioning.md
-After=home.mount shrek-provision-validate.service
-Before=getty@tty1.service graphical.target
+# §5b: order After console-setup's keymap services so our ckbcomp|loadkeys wins the multi-user race
+# (console-setup.service re-applies the baked `us` from /etc/default/keyboard — the real clobber on our
+# image, NOT systemd-vconsole-setup, which is absent). Ordered Before shrek-owner-provision.service so the
+# provisioned layout is live on tty1 BEFORE the first-boot passphrase wizard reads a credential. After=/
+# Before= are ordering only — still no Requires=/Wants= on any of them (no failure cascade, §6).
+After=home.mount shrek-provision-validate.service console-setup.service keyboard-setup.service
+Before=getty@tty1.service graphical.target shrek-owner-provision.service
 ConditionPathExists=/home
 
 [Service]

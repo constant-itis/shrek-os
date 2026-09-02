@@ -18,6 +18,17 @@ _shrek_tty="$(tty 2>/dev/null || true)"
 if { [ "${XDG_VTNR:-}" = 1 ] || [ "$_shrek_tty" = /dev/tty1 ]; } \
    && [ -z "${WAYLAND_DISPLAY:-}" ] \
    && [ -e /dev/dri/card0 ] && command -v shrek-desktop >/dev/null 2>&1; then
+    # §5b compositor keymap adapter: XKBLAYOUT (in /etc/vconsole.conf, bound from the provisioning store) is
+    # the ONE canonical source; export it as XKB_DEFAULT_LAYOUT so sway/libxkbcommon picks up the
+    # provisioned layout at context creation (the shipped sway.config sets no xkb_layout/input override, so
+    # the env is authoritative). Parse it WITHOUT sourcing vconsole.conf (never eval config). No-op / left
+    # to the libxkbcommon default when unset or `us`.
+    if [ -r /etc/vconsole.conf ]; then
+        _xkbl="$(grep -E '^XKBLAYOUT=' /etc/vconsole.conf 2>/dev/null | tail -n1)"
+        _xkbl="${_xkbl#XKBLAYOUT=}"; _xkbl="${_xkbl%\"}"; _xkbl="${_xkbl#\"}"; _xkbl="${_xkbl%\'}"; _xkbl="${_xkbl#\'}"
+        case "$_xkbl" in ''|*[!a-z0-9]*) : ;; *) export XKB_DEFAULT_LAYOUT="$_xkbl" ;; esac
+        unset _xkbl
+    fi
     exec shrek-desktop
 fi
 unset _shrek_tty

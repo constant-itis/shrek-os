@@ -27,6 +27,12 @@ ConditionPathExists=/home
 Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=-/etc/shrek/owner-provision.env
+# §5b clobber closure guard (i): re-assert the provisioned VT keymap immediately before the passphrase
+# wizard reads a credential, so the LAST keymap write before enrollment is the owner's chosen layout — not
+# a `us` left by console-setup.service. `-` prefix: keymap is best-effort and must never fail the wizard
+# (a wrong layout is a UX bug; a failed unit would fail-close getty and lock the box out). No-op when
+# XKBLAYOUT is `us` (unprovisioned / plain image).
+ExecStartPre=-/usr/bin/env SHREK_KICK_DOMAIN=keymap /usr/lib/shrek/shrek-provision-kick
 ExecStart=/usr/lib/shrek/shrek-owner-provision
 # The interactive (INSTALLABLE) wizard reads the passphrase from the console; give the service tty1 and a
 # clean terminal. Ordered Before=getty@tty1.service, so no getty is contending for it yet.

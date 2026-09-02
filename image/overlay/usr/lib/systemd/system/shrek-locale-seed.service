@@ -20,8 +20,10 @@
 [Unit]
 Description=Seed & deliver the provisioned locale (ADR-005 §6.7)
 Documentation=file:///usr/share/doc/shrek/adr-005-provisioning.md
+# Ordered Before shrek-owner-provision.service too, so the provisioned LANG is active for the first-boot
+# wizard's own prompts (ordering only — no Requires=/Wants=, no cascade).
 After=home.mount shrek-provision-validate.service
-Before=getty@tty1.service graphical.target
+Before=getty@tty1.service graphical.target shrek-owner-provision.service
 ConditionPathExists=/home
 
 [Service]
