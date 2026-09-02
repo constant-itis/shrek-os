@@ -1,0 +1,35 @@
+# shrek-ai-seed.service — deliver the baked seed brain to /home with seed-version replace-on-update
+# (ADR-006 §5b/§8). docs/adr-006-slice3-seed-brain.md.
+#
+# §8 timing: the seed generator/applier logic ships in the Onion, but a unit living INSIDE a late-merging
+# sysext is invisible when systemd computes the boot transaction. So — the slice-1 discipline, and §8
+# option (1) (a base-carried post-merge applier) — this UNIT is base-baked and Condition-gated: it is in
+# the transaction at sysinit and runs only when the AI Onion merged AND shipped both the baked seed and
+# the applier. A box without the AI layer runs nothing. Ordered after shrek-ai-store.service, which
+# creates the root-owned /home/.shrek/ai/seed surface this fills; before local-fs.target like its peers.
+[Unit]
+Description=Shrek AI — deliver the seed brain to /home (seed-version replace-on-update) — ADR-006 §5/§8
+Documentation=file:///usr/share/doc/shrek/adr-006-optional-ai-layer.md
+DefaultDependencies=no
+Requires=home.mount
+After=home.mount shrek-ai-store.service
+Wants=shrek-ai-store.service
+Before=local-fs.target
+Conflicts=umount.target
+Before=umount.target
+# Dormant unless the AI Onion merged AND carried the applier AND the baked seed. Any absent ⇒ clean skip.
+ConditionPathExists=/usr/lib/shrek/layers/ai
+ConditionPathExists=/usr/lib/shrek/ai/shrek-ai-seed
+ConditionPathExists=/usr/share/shrek/ai/seed/memories.jsonl
+
+[Service]
+# Root — it writes the root-owned system-seed surface (dev must not be able to forge the OS's self-
+# description). It touches only /home/.shrek/ai/seed; the dev-owned ~/.mycolink brain is never rewritten.
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/ai/shrek-ai-seed
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=local-fs.target

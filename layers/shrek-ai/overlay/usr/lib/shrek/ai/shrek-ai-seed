@@ -1,0 +1,54 @@
+#!/bin/sh
+# shrek-ai-seed — deliver the baked seed brain to /home with seed-version REPLACE-ON-UPDATE (ADR-006
+# §5b/§8). The seed set is generated deterministically at build time (scripts/gen-ai-seed.py) and ships
+# read-only in the sealed Onion under /usr/share/shrek/ai/seed. This applier materializes it onto the
+# persistent /home (the ADR-005 deliver discipline, since /usr is read-only) into the root-owned
+# system-seed surface the on-box mycelium mounts read-only (§4) — SEPARATE from the dev-owned runtime
+# brain under ~/.mycolink, which is NEVER touched here (never-clobber, §5b).
+#
+# REPLACE-ON-UPDATE, not seed-once: a bare .applied stamp would mean a later OS update carrying revised
+# ADRs never refreshes the seeded self-knowledge — drift, the opposite of the claim. So the whole
+# seed-versioned set is replaced when the baked manifest differs from what is on /home (retracting stale
+# descriptions of the old design), while the dev brain is preserved. Same-manifest boots are a no-op, so
+# this is safe to run every boot.
+#
+# Idempotent, root-run, first-boot-safe. A plain helper (not an inline ExecStart) — the hosts-seed /
+# shrek-provision-seed idiom. Run by shrek-ai-seed.service after shrek-ai-store.service (which created
+# /home/.shrek/ai/seed root:root 0755).
+set -eu
+
+is_root() { [ "$(id -u)" = "0" ]; }
+
+BAKED="${SHREK_AI_SEED_BAKED:-/usr/share/shrek/ai/seed}"      # sealed source (Onion); overridable for test
+DEST="${SHREK_AI_SEED_DEST:-/home/.shrek/ai/seed}"           # /home system-seed surface (root:root 0755)
+
+[ -f "$BAKED/memories.jsonl" ] && [ -f "$BAKED/SEED-MANIFEST" ] || {
+    echo "shrek-ai-seed: no baked seed at $BAKED — nothing to deliver"; exit 0; }
+
+# The manifest carries SEED_VERSION + MEMORIES_SHA256; comparing the whole manifest catches BOTH a version
+# bump and any regenerated content at the same version. If it matches what's on /home, we're done.
+if [ -f "$DEST/SEED-MANIFEST" ] && cmp -s "$BAKED/SEED-MANIFEST" "$DEST/SEED-MANIFEST"; then
+    echo "shrek-ai-seed: /home seed already current ($(awk -F= '/SEED_VERSION/{print $2}' "$DEST/SEED-MANIFEST" | tr -d '[:space:]') ) — no-op"
+    exit 0
+fi
+
+# Replace the seed-tagged set: remove the prior seed files (the system-seed namespace only — the dev brain
+# at ~/.mycolink is a different path and is untouched), then install the baked set read-only-to-dev.
+echo "shrek-ai-seed: (re)delivering seed set to $DEST"
+mkdir -p "$DEST"
+rm -f "$DEST/memories.jsonl" "$DEST/SEED-MANIFEST"
+# Install atomically-ish: copy to temp then move, so a crash never leaves a half-written seed the mycelium
+# might index. Ownership root:root, mode 0644 (dev reads, never rewrites — §4).
+for f in memories.jsonl SEED-MANIFEST; do
+    tmp="$DEST/.$f.tmp.$$"
+    cp "$BAKED/$f" "$tmp"
+    chmod 0644 "$tmp"
+    if is_root; then chown root:root "$tmp" 2>/dev/null || true; fi
+    mv "$tmp" "$DEST/$f"
+done
+if is_root; then chown root:root "$DEST" 2>/dev/null || true; fi
+chmod 0755 "$DEST" 2>/dev/null || true
+
+ver="$(awk -F= '/SEED_VERSION/{print $2}' "$DEST/SEED-MANIFEST" | tr -d '[:space:]')"
+n="$(awk -F= '/RECORDS/{print $2}' "$DEST/SEED-MANIFEST" | tr -d '[:space:]')"
+echo "shrek-ai-seed: delivered seed v${ver} (${n} records) read-only to dev; ~/.mycolink runtime brain untouched"

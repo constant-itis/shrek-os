@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# gen-ai-seed.py — deterministically generate the shrek-ai seed brain (ADR-006 §5a: "no model in the
+# build loop"). Chunks the pinned in-tree docs (seed-src/sources.list) and the authored conventions
+# (seed-src/conventions.md) by H2 section into seed memory records, and writes them + a hash manifest
+# under the shrek-ai Onion overlay. The output is COMMITTED and hash-logged (# VERIFY discipline).
+#
+# Determinism is load-bearing (a sealed reproducible image cannot float): explicit ordered inputs (no
+# glob), version from SEED_VERSION (never a timestamp/date), content-hash record ids, sort_keys on every
+# record, LF line endings, no trailing whitespace. Same inputs -> byte-identical memories.jsonl. Run it,
+# then commit the result; re-running must produce a clean `git diff`.
+#
+# Usage:  scripts/gen-ai-seed.py            # generate into the overlay
+#         scripts/gen-ai-seed.py --check    # generate to a temp + fail if it differs from the committed
+#                                           # overlay (CI/pre-commit determinism guard)
+#
+# stdlib only (minimal-deps).
+import hashlib
+import json
+import os
+import sys
+
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(REPO, "layers", "shrek-ai", "seed-src")
+OUT = os.path.join(REPO, "layers", "shrek-ai", "overlay", "usr", "share", "shrek", "ai", "seed")
+
+
+def read_text(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+def slug(s):
+    out = []
+    for ch in s.lower():
+        if ch.isalnum():
+            out.append(ch)
+        elif out and out[-1] != "-":
+            out.append("-")
+    return "".join(out).strip("-")
+
+
+def chunk_markdown(text):
+    """Split a doc into (title, [(section_header, body)]). Sections are H2 (`## `) blocks; any preamble
+    between the H1 title and the first H2 becomes an 'Overview' section. Deterministic, structural."""
+    lines = text.splitlines()
+    title = None
+    for ln in lines:
+        if ln.startswith("# ") and not ln.startswith("## "):
+            title = ln[2:].strip()
+            break
+    sections = []
+    cur_header = "Overview"
+    cur_body = []
+    started = False
+    for ln in lines:
+        if ln.startswith("## "):
+            if started and any(b.strip() for b in cur_body):
+                sections.append((cur_header, "\n".join(cur_body).strip()))
+            cur_header = ln[3:].strip()
+            cur_body = []
+            started = True
+        else:
+            # skip the H1 title line itself; collect everything else
+            if ln.startswith("# ") and not ln.startswith("## "):
+                continue
+            cur_body.append(ln)
+    if any(b.strip() for b in cur_body):
+        sections.append((cur_header, "\n".join(cur_body).strip()))
+    return title, sections
+
+
+def record(content, mtype, source, seed_version, extra_tags):
+    rid = hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
+    tags = ["seed", "seed-v%d" % seed_version] + extra_tags
+    return {
+        "id": rid,
+        "content": content,
+        "mtype": mtype,
+        "source": source,
+        "seed_version": seed_version,
+        "tags": tags,
+    }
+
+
+def build(seed_version):
+    records = []
+    seen = set()  # content-hash dedup (ADR-006 §5)
+
+    def add(rec):
+        if rec["id"] in seen:
+            return
+        seen.add(rec["id"])
+        records.append(rec)
+
+    # (i) infra & architecture self-knowledge — pinned docs, chunked by H2.
+    sources = []
+    for raw in read_text(os.path.join(SRC, "sources.list")).splitlines():
+        raw = raw.strip()
+        if raw and not raw.startswith("#"):
+            sources.append(raw)
+    for rel in sources:
+        path = os.path.join(REPO, rel)
+        title, sections = chunk_markdown(read_text(path))
+        docslug = slug(os.path.basename(rel).rsplit(".", 1)[0])
+        for header, body in sections:
+            content = "%s — %s\n\n%s" % (title or docslug, header, body)
+            add(record(content, "reference", "%s#%s" % (rel, slug(header)), seed_version, ["infra", docslug]))
+
+    # (ii) memory-use conventions — authored doctrine, chunked by H2 into behavior (lesson) memories.
+    ctitle, csections = chunk_markdown(read_text(os.path.join(SRC, "conventions.md")))
+    for header, body in csections:
+        content = "Shrek OS assistant convention — %s\n\n%s" % (header, body)
+        add(record(content, "lesson", "seed-src/conventions.md#%s" % slug(header), seed_version, ["convention"]))
+
+    return records
+
+
+def serialize(records):
+    lines = []
+    for rec in records:
+        lines.append(json.dumps(rec, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+    body = "\n".join(lines) + "\n"
+    return body
+
+
+def manifest(seed_version, body):
+    sha = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    n = body.count("\n")
+    return (
+        "# shrek-ai seed manifest (ADR-006 §5). Generated by scripts/gen-ai-seed.py — do not edit by hand.\n"
+        "SEED_VERSION=%d\n"
+        "RECORDS=%d\n"
+        "MEMORIES_SHA256=%s\n" % (seed_version, n, sha)
+    )
+
+
+def main():
+    check = "--check" in sys.argv[1:]
+    seed_version = int(read_text(os.path.join(SRC, "SEED_VERSION")).strip())
+    records = build(seed_version)
+    body = serialize(records)
+    man = manifest(seed_version, body)
+
+    mem_path = os.path.join(OUT, "memories.jsonl")
+    man_path = os.path.join(OUT, "SEED-MANIFEST")
+
+    if check:
+        cur_mem = read_text(mem_path) if os.path.exists(mem_path) else ""
+        cur_man = read_text(man_path) if os.path.exists(man_path) else ""
+        if cur_mem != body or cur_man != man:
+            sys.stderr.write("gen-ai-seed --check: committed seed is STALE — run scripts/gen-ai-seed.py and commit.\n")
+            return 1
+        sys.stdout.write("gen-ai-seed --check: seed is up to date (%d records, v%d).\n" % (len(records), seed_version))
+        return 0
+
+    os.makedirs(OUT, exist_ok=True)
+    with open(mem_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(body)
+    with open(man_path, "w", encoding="utf-8", newline="\n") as f:
+        f.write(man)
+    sys.stdout.write("gen-ai-seed: wrote %d seed records (v%d) -> %s\n" % (len(records), seed_version, mem_path))
+    sys.stdout.write(man)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

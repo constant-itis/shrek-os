@@ -1,0 +1,21 @@
+# shrek-ai seed — pinned self-knowledge sources (ADR-006 §5 body (i): infra & architecture).
+#
+# scripts/gen-ai-seed.py chunks these in-tree docs by H2 section into seed memory records so
+# /recall "how does Bench work" returns real answers. The list is EXPLICIT + ORDERED (not a glob) so
+# the generated seed is deterministic and reproducible — no model in the build loop (§5a). To change
+# the seed: edit this list or the docs, bump layers/shrek-ai/seed-src/SEED_VERSION, and regenerate.
+#
+# Excludes docs/adr-004-* (owned by a parallel working session, not yet committed). One path per line,
+# relative to the repo root; '#' comments and blanks ignored.
+docs/overview.md
+docs/architecture.md
+docs/security-model.md
+docs/threat-model.md
+docs/trust-bands.md
+docs/isolation.md
+docs/swamp.md
+docs/update-model.md
+docs/adr-002-environment-vocabulary.md
+docs/adr-003-application-and-bench-runtime.md
+docs/adr-005-provisioning.md
+docs/adr-006-optional-ai-layer.md
