@@ -109,8 +109,8 @@ MU_WANTS="image/overlay/usr/lib/systemd/system/multi-user.target.wants"
 INSTALLABLE="${INSTALLABLE:-0}"
 LIVE_INSTALLER="${LIVE_INSTALLER:-0}"
 # Bench authz slice step 4: the `dev ALL=(ALL) NOPASSWD:ALL` placeholder is baked into the sealed base
-# /etc ONLY for the live installer (its dev autologin session has no polkit/owner account, so calamares +
-# gparted have no other escalation path). The INSTALLABLE product, the DOGFOOD proof, and the plain-CI
+# /etc ONLY for the live installer (its dev autologin session has no polkit/owner account, so the installer
+# + gparted have no other escalation path). The INSTALLABLE product, the DOGFOOD proof, and the plain-CI
 # image ship a `dev` account with NO passwordless root — admin flows through polkit + the gatekeeper socket
 # + the console consent ceremony. Dropping it from DOGFOOD is deliberate: with dev sudo present a caller
 # could `sudo gatekeeperd bench grant …` and bypass the consent ceremony, so the dogfood would not honestly

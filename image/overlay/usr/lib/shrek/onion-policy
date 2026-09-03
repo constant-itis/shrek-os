@@ -19,9 +19,9 @@ enable shrek-desktop
 # store omits it (e.g. a plain desktop build), a listed-but-absent layer is simply not merged — no error.
 # docs/dogfood-0.md §M2.
 enable shrek-dev
-# INSTALL-0: live installer media stages this signed sysext to add Calamares and the human-facing
-# "Install Shrek OS" launcher. It does not expose destructive disk authority through agent capability
-# APIs; the installer job runs only from the human-launched Calamares flow.
+# INSTALL-0: live installer media stages this signed sysext to add the Quickshell graphical installer
+# and the human-facing "Install Shrek OS" launcher. It does not expose destructive disk authority through
+# agent capability APIs; the installer job runs only from the human-launched Quickshell install flow.
 enable shrek-installer
 # Bench-0 (ADR-003 Part 2): the rootless-container runtime sysext (podman/crun/…, scripts/build-bench-layer.sh)
 # for the Bench plane. Sealed-enabled so oniond merges it when the store carries it (INCLUDE_BENCH=1 build);

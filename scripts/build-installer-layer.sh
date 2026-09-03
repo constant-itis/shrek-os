@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Build the signed shrek-installer sysext DDI for INSTALL-0.
 #
-# This layer carries Calamares plus live-environment tools that should appear only on installer media.
+# This layer carries the live-environment tools that should appear only on installer media (the Quickshell
+# installer is staged from ui-installer/ below; zenity chooser, GParted, browser and disk utilities come
+# from the sysext Packages).
 # It is staged with the desktop sysext for the live USB, not enabled as a destructive agent capability.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
@@ -18,7 +20,7 @@ scripts/stage-refind.sh
 # ui-installer/; the staged copy is a build input (gitignored), same pattern as the rEFInd vendoring above.
 scripts/stage-installer-ui.sh
 
-echo "=== building shrek-installer sysext (Calamares 3.3.14-1) in debian:trixie ==="
+echo "=== building shrek-installer sysext (live tools + Quickshell installer) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 docker run --rm --privileged \
   -v "${REPO_ROOT}:/work" -w /work \

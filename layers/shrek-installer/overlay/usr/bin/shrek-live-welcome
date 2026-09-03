@@ -22,7 +22,7 @@ while [ "$i" -lt 30 ]; do
 done
 
 # Run a GUI program as root under the current Wayland session (GParted needs root; the live
-# session has no polkit agent, so prefer NOPASSWD sudo, mirroring shrek-install-calamares).
+# session has no polkit agent, so prefer NOPASSWD sudo, same escalation the installer uses).
 run_root() {
     if [ "$(id -u)" = 0 ]; then
         env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="$rt" \
@@ -42,11 +42,9 @@ do_action() {
     case "$1" in
         gparted)  run_root gparted ;;
         terminal) term ;;
-        # must-fix #4: the Quickshell graphical installer is the install path now. It runs unprivileged
-        # (escalates per-action via sudo -n); Calamares stays in the image as a fallback but is no longer
-        # the default surface. Legacy launcher still reachable as `install-calamares`.
-        install)          shrek-install-ui ;;
-        install-calamares) shrek-install-calamares ;;
+        # must-fix #4: the Quickshell graphical installer is the only install path. It runs unprivileged
+        # (compositor/Qt out of the privileged path) and escalates per-action via sudo -n.
+        install)  shrek-install-ui ;;
         *)        return 1 ;;
     esac
 }

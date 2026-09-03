@@ -1,5 +1,13 @@
 # INSTALL-0 — Calamares boundary
 
+> **SUPERSEDED (2026-09-03).** Calamares has been removed. The user-facing installer is now the
+> bespoke **Quickshell installer** (`ui-installer/`, staged into the installer sysext), which collects
+> intent, stages the provisioning manifest, and hands off to the `shrek-install-run` orchestrator driving
+> the `shrek-install-target` writer. See **ADR-005** (`docs/adr-005-provisioning.md`) and memory
+> must-fix #4 for the current architecture. The Calamares-specific detail below is retained only as a
+> record of the prior boundary; the `calamares` package, `shrek-install-calamares` launcher, and
+> `shrekdeploy` Calamares module no longer exist in the tree.
+
 INSTALL-0 uses Debian Trixie's packaged Calamares as a thin GUI shell, not a Shrek partition editor:
 
 - `calamares=3.3.14-1`

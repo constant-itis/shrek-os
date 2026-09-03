@@ -1,6 +1,0 @@
----
-name: shrekdeploy
-type: job
-interface: python
-script: main.py
-weight: 40

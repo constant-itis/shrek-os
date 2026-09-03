@@ -1,8 +1,8 @@
 # LIVE INSTALLER ONLY — never shipped on the installed system.
 #
-# The live USB (LIVE_INSTALLER=1 base) runs Calamares + GParted from the `dev` autologin Wayland session,
-# which has NO polkit agent and NO owner account yet, so passwordless sudo is its only escalation path
-# (shrek-install-calamares / shrek-live-welcome do `sudo -n`). The live medium is an ephemeral,
+# The live USB (LIVE_INSTALLER=1 base) runs the Quickshell installer + GParted from the `dev` autologin
+# Wayland session, which has NO polkit agent and NO owner account yet, so passwordless sudo is its only
+# escalation path (shrek-live-welcome / shrek-install-run do `sudo -n`). The live medium is an ephemeral,
 # single-purpose whole-disk-erase tool with no persistent state, so broad NOPASSWD here is acceptable and
 # unavoidable pre-owner-account.
 #

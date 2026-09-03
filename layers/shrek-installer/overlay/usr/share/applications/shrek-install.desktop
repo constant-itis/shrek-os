@@ -2,7 +2,7 @@
 Type=Application
 Name=Install Shrek OS
 Comment=Install Shrek OS to this computer
-Exec=shrek-install-calamares
+Exec=shrek-install-ui
 Icon=/usr/share/shrek/branding/shrek-os-logo-256.png
 Terminal=false
 Categories=System;

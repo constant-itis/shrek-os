@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # INSTALL-0 writer proof: exercise the installer deployment job against a disposable target disk.
 #
-# This is the non-GUI gate for the dangerous part of INSTALL-0. Calamares owns the human UI; this proof
+# This is the non-GUI gate for the dangerous part of INSTALL-0. The Quickshell installer owns the human UI; this proof
 # drives the Shrek deployment payload writer directly and verifies that the target disk ends with the
 # installed-system layout: sealed base image + appended shrek-layers + shrek-data partitions.
 set -euo pipefail

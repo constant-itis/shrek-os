@@ -5,14 +5,14 @@
 #   1. a staged manifest lands at <home>/.shrek-system/provisioning/manifest, mode 0600, store dir 0700,
 #      byte-identical to the source, with NO leftover manifest.tmp (atomic rename);
 #   2. an absent/empty staged manifest is a clean no-op (exit 0, nothing written) — target first-boot-defaults;
-#   3. main.py passes --provisioning-manifest to the writer, and the writer accepts the flag.
+#   3. the shrek-install-run orchestrator passes --provisioning-manifest to the writer, which accepts the flag.
 # The real mkfs'd-fs transplant (fsync/rename durability on a live ext4) is covered by install0-writer-proof
 # under the payload build; the sealed-VM dogfood (§11) is the end-to-end runtime oracle.
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 
 TARGET=layers/shrek-installer/overlay/usr/libexec/shrek/shrek-install-target
-MAINPY=layers/shrek-installer/overlay/usr/lib/calamares/modules/shrekdeploy/main.py
+ORCH=layers/shrek-installer/overlay/usr/libexec/shrek/shrek-install-run
 
 PASS=0; FAIL=0
 ok()  { echo "  PASS $*"; PASS=$((PASS+1)); }
@@ -38,11 +38,11 @@ mkdir -p "$TMP/home2"
 transplant "$TMP/does-not-exist" "$TMP/home2" >/dev/null 2>&1 && ok "absent manifest exits 0" || bad "absent manifest errored"
 [ -z "$(ls -A "$TMP/home2" 2>/dev/null)" ] && ok "nothing written (target will first-boot-default)" || bad "absent manifest wrote something"
 
-echo "=== 3. writer + calamares wiring ==="
+echo "=== 3. writer + orchestrator wiring ==="
 grep -q -- '--provisioning-manifest) PROV_MANIFEST=' "$TARGET" && ok "writer parses --provisioning-manifest" || bad "writer missing --provisioning-manifest arg"
 grep -q 'transplant_provisioning_manifest "\$PROV_MANIFEST"' "$TARGET" && ok "writer calls transplant after mkfs with the parsed path" || bad "writer does not invoke the transplant with PROV_MANIFEST"
-grep -q -- '"--provisioning-manifest"' "$MAINPY" && grep -q 'prov_manifest' "$MAINPY" && ok "main.py passes --provisioning-manifest to the writer" || bad "main.py does not pass the staged manifest path"
-python3 -m py_compile "$MAINPY" 2>/dev/null && ok "main.py compiles" || bad "main.py syntax error"
+grep -q -- '--provisioning-manifest "\$PROV_MANIFEST"' "$ORCH" && ok "shrek-install-run passes --provisioning-manifest to the writer" || bad "shrek-install-run does not pass the staged manifest path"
+sh -n "$ORCH" 2>/dev/null && ok "shrek-install-run is valid sh" || bad "shrek-install-run syntax error"
 
 echo
 echo "=== install0-transplant-proof: PASS=$PASS FAIL=$FAIL ==="

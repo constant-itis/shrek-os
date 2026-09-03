@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # INSTALL-0 live boot proof: boot the live installer image with the installer store, payload disk,
 # and a blank target disk attached. This validates the live-media composition and captures a screenshot
-# for the Calamares autostart surface; the destructive writer path is covered by install0-writer-proof.sh.
+# of the live welcome surface; the destructive writer path is covered by install0-writer-proof.sh.
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"; mkdir -p out

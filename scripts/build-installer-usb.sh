@@ -15,7 +15,7 @@
 #
 # Layout produced (mirrors shrek-install-target's append convention):
 #   p1..p6   the live base image, copied verbatim (esp / root+verity / A-B slots / swamp)
-#   p7       shrek-layers   <- STORE   (desktop + installer sysexts: gparted, calamares, shrekdeploy)
+#   p7       shrek-layers   <- STORE   (desktop + installer sysexts: gparted, Quickshell installer, writer)
 #   p8       shrek-payload  <- PAYLOAD (the sealed installed image written to the target)
 #
 # With STAGE_REFIND=1 (default) the ESP is fitted with rEFInd + a loose kernel/initrd so 2012-era
