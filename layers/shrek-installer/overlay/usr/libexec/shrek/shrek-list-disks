@@ -34,11 +34,15 @@ fi
 # the shell's own $PATH; we derive /dev/NAME instead.
 rows="$("$LSBLK" -P -b -o NAME,PKNAME,TYPE,RO,MOUNTPOINT,PARTLABEL,LABEL,SIZE,MODEL)"
 
-# A label that marks a disk as off-limits: the ESP, or any Shrek-owned volume
-# (shrek_1, shrek_1_verity, shrek-swamp, shrek-layers, shrek-data, shrek-payload).
+# A label that marks a disk as off-limits. ONLY the install SOURCE marker (shrek-payload) protects by
+# label: it exists solely on the live installer medium, never on an installed target. A previously-installed
+# Shrek disk carries ESP / shrek_1 / shrek-layers / shrek-data labels too, but those MUST stay erasable so
+# the machine can be reinstalled from the GUI (otherwise the picker shows "no eligible disk" on any box that
+# already has Shrek). The live medium is still fully protected by shrek-payload plus the read-only and
+# root-backing rules below.
 is_reserved_label() {
     case "$(printf '%s' "${1:-}" | tr 'A-Z' 'a-z')" in
-        esp|shrek*|shrek-*) return 0 ;;
+        shrek-payload) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -62,7 +66,13 @@ while IFS= read -r line; do
     eval "$line"
     base="$(base_of "$NAME" "$TYPE" "$PKNAME")"
     reserve=0
-    [ -n "$MOUNTPOINT" ] && reserve=1
+    # A mount at a SYSTEM path protects the disk (the running live medium mounts at /, /usr, /run/shrek/*).
+    # A courtesy auto-mount of a secondary/target disk under /media or /run/media does NOT protect it — the
+    # target must stay selectable for reinstall, and the writer unmounts it before erasing.
+    case "$MOUNTPOINT" in
+        ""|/media/*|/run/media/*) ;;
+        *) reserve=1 ;;
+    esac
     [ "$RO" = 1 ] && reserve=1
     is_reserved_label "$PARTLABEL" && reserve=1
     is_reserved_label "$LABEL" && reserve=1
