@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
 import "../theme"
 import "../state"
 
@@ -23,6 +24,10 @@ ShellRoot {
     PanelWindow {
         anchors { top: true; bottom: true; left: true; right: true }
         color: Tokens.background
+        // The installer is a layer-shell surface; without this it never receives keyboard input, so text
+        // fields (owner name, keyboard test) silently ignore every keystroke while the mouse still works.
+        // Exclusive grabs the keyboard for the full-screen installer — it is the only thing on screen.
+        WlrLayershell.keyboardFocus: WlrKeyboardFocus.Exclusive
 
         Loader {
             anchors.fill: parent

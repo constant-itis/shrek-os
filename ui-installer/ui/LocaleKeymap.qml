@@ -50,7 +50,7 @@ Item {
                 // follow-up; M1 ships the §5a defaults wired through the flow.
                 Field { label: "Language"; value: Intent.localeLabel; mono: Intent.locale; kind: "select" }
                 Field { label: "Keyboard layout"; value: Intent.keymapLabel; mono: Intent.keymap; kind: "select" }
-                Field { label: "Test your keyboard"; value: "Type here to check the layout"; placeholder: true; kind: "test" }
+                Field { label: "Test your keyboard"; editable: true; value: ""; hint: "Type here — the characters should match the keys you press." }
 
                 Item { Layout.fillHeight: true }
             }

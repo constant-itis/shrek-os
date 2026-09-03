@@ -49,6 +49,7 @@ ColumnLayout {
                 font.pixelSize: Tokens.fontBody
             }
             TextInput {
+                id: input
                 visible: f.editable
                 text: f.text
                 color: Tokens.textPrimary
@@ -57,6 +58,10 @@ ColumnLayout {
                 selectByMouse: true
                 clip: true
                 Layout.fillWidth: true
+                // Grab focus so the field actually receives keystrokes once the window holds the keyboard.
+                focus: f.editable
+                activeFocusOnTab: true
+                Component.onCompleted: if (f.editable) forceActiveFocus()
                 onTextEdited: f.edited(text)
             }
             Text {
