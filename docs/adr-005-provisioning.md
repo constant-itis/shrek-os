@@ -72,10 +72,13 @@ data crosses that arc and under what trust.
   keymap, timezone, owner display name, and the install-time-only target-disk choice).
 - **No credential material — no passphrase, no hash — ever crosses the live→target
   handoff.** The installed sealed system establishes owner credentials itself, at first
-  boot, in the Quickshell first-run / credential-enrollment surface (reusing the proven
-  `shrek-owner-provision` oneshot, unchanged except that it may *pre-fill and show for
-  confirmation* the display name from the transplanted manifest and require only the
-  passphrase).
+  boot, on the **text console (tty1)** — the `shrek-owner-provision` oneshot reads the
+  passphrase echo-off from `/dev/tty1` *before* the graphical session starts, keeping the
+  compositor and Qt out of the pre-auth trust base. (For M1 the credential surface is the
+  console, **not** a graphical Quickshell screen; the graphical first-run confirms only the
+  non-secret display name, post-credential.) The oneshot is unchanged except that it may
+  *pre-fill and show for confirmation* the display name from the transplanted manifest and
+  require only the passphrase.
 - Intent is carried as a **file-legible manifest** (ADR-004) in a **supervisor-owned
   store** `/home/.shrek-system/provisioning`, `root:root 0700`, separate from user state.
 - The **transplant across the live→target boundary is an explicit trust boundary**: the
