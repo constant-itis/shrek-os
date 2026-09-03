@@ -49,6 +49,10 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadWritePaths=/home/dev/.mycolink
+# §7 egress-zero: this loopback listener must never reach the network — kernel-enforced, same posture as
+# shrek-ai-model.service. localhost stays reachable so the :8199 Shrek Memory API serves the dev shell.
+IPAddressDeny=any
+IPAddressAllow=localhost
 StandardOutput=journal
 StandardError=journal
 
