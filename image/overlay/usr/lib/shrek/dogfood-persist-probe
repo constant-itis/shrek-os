@@ -1383,6 +1383,21 @@ PYEOF
     else
         say "AI reasoning-default=FAIL(model_client absent at $_mc)"
     fi
+
+    # (11) §6 ai-cli-dispatch: the Rust `shrek` CLI routes `ai` to the on-device front door. `shrek ai --help`
+    #      is handled in the CLI itself (no model start), so it is a cheap OFFLINE proof that the dispatch arm
+    #      shipped in the SEALED /usr/bin/shrek and reaches the AI front door.
+    _shrekbin=/usr/bin/shrek
+    if [ -x "$_shrekbin" ]; then
+        _aihelp="$("$_shrekbin" ai --help 2>&1)"; _airc=$?
+        if [ "$_airc" -eq 0 ] && printf '%s' "$_aihelp" | grep -q 'on-device AI front door'; then
+            say "AI ai-cli-dispatch=[ok \`shrek ai --help\` routed by the Rust CLI (rc=0)]"
+        else
+            say "AI ai-cli-dispatch=FAIL(rc=$_airc out=[$(printf '%s' "$_aihelp" | tr '\n' ' ' | tail -c 120)])"
+        fi
+    else
+        say "AI ai-cli-dispatch=FAIL(shrek CLI absent at $_shrekbin)"
+    fi
 else
     say "AI onion-merged=[no] — shrek-ai layer not present (non-AI build; skipping AI proof)"
 fi

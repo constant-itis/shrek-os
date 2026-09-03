@@ -651,7 +651,8 @@ if grep -qa 'SHREK-DOGFOOD AI onion-merged=.ok' "$LOG"; then
     "egress-zero|every AI listener enforces kernel egress-deny (IPAddressDeny=any active) — ADR-006 §7" \
     "injection-no-host-effect|a seeded instruction-shaped memory is inert — recalled as data, no host effect" \
     "shell-no-subprocess|the shipped merged mycolink-shell carries no host-exec/process-spawn primitive" \
-    "reasoning-default|the sealed shell defaults to the ratified NORMAL mode (enable_thinking=False) — ADR-006 §9c"; do
+    "reasoning-default|the sealed shell defaults to the ratified NORMAL mode (enable_thinking=False) — ADR-006 §9c" \
+    "ai-cli-dispatch|the Rust \`shrek\` CLI routes \`ai\` to the on-device front door (shrek ai --help, rc 0)"; do
     tag=${pair%%|*}; desc=${pair#*|}
     line=$(grep -a "SHREK-DOGFOOD AI ${tag}=" "$LOG" | tail -1)
     val=$(printf '%s' "$line" | sed "s/.*AI ${tag}=//" | tr -d '\r')
