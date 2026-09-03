@@ -98,11 +98,16 @@ printf '%s\n' "$out_re" | grep -q "/dev/vda" && bad "live medium (shrek-payload)
 # --- courtesy vs system mount ----------------------------------------------------------------------
 # A target whose partition is auto-mounted under /media (udisks/file-manager courtesy) stays selectable;
 # a disk mounted at a system path does not.
-echo "=== scenario: courtesy /media mount stays eligible; system mount excluded ==="
+echo "=== scenario: courtesy/spurious mounts stay eligible; system mount excluded ==="
 sed 's#NAME="vde8"\(.*\)MOUNTPOINT=""#NAME="vde8"\1MOUNTPOINT="/media/nhac/shrek-data"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
 out_courtesy="$(run_list)"
 printf '%s\n' "$out_courtesy" | grep -q "/dev/vde" && ok "target with a /media courtesy mount still offered" || bad "target wrongly excluded by a /media mount"
-sed 's#MOUNTPOINT="/media/nhac/shrek-data"#MOUNTPOINT="/mnt/data"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
+# The exact metal 2026-09-03 failure: the live session's home.mount grabbed the target's shrek-data at
+# /home, and the disk vanished from the picker. A /home mount must NOT protect the disk.
+sed 's#MOUNTPOINT="/media/nhac/shrek-data"#MOUNTPOINT="/home"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
+out_home="$(run_list)"
+printf '%s\n' "$out_home" | grep -q "/dev/vde" && ok "target with a spurious /home mount still offered (metal regression)" || bad "target wrongly excluded by a /home mount"
+sed 's#MOUNTPOINT="/home"#MOUNTPOINT="/mnt/data"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
 out_sys="$(run_list || true)"
 printf '%s\n' "$out_sys" | grep -q "/dev/vde" && bad "disk mounted at a system path (/mnt) wrongly offered" || ok "disk mounted at a system path excluded"
 
