@@ -17,6 +17,8 @@ import "../state"
 Item {
     id: root
     readonly property bool preview: (Quickshell.env("SHREK_INSTALLER_SCREEN") || "") !== ""
+    // Render-harness only: pre-open the Details pane with sample log lines so the pane can be signed off.
+    readonly property bool detailsPreview: (Quickshell.env("SHREK_INSTALLER_DETAILS") || "") === "1"
 
     // Per-phase state: pending | now | done (the tokens ProgressRow renders).
     property string sVerify:    "pending"
@@ -25,6 +27,30 @@ Item {
     property string sFirstboot: "pending"
     property bool   faulted:    false
     property string failText:   ""
+
+    // Details pane: the full writer log (the same stream `tail -f /run/shrek/install-run.log` shows),
+    // including the dd byte counter on the writer's stderr. shrek-install-run keeps stdout machine-clean
+    // for the frame parser above; the human-readable prose + byte counter all land in this log, so we
+    // surface them by tailing the log rather than widening the stdout contract. Collapsed by default.
+    property bool  showDetails: false
+    property var   logBuf:      []
+    property string logText:    ""
+    readonly property string logPath: Quickshell.env("SHREK_INSTALL_RUN_LOG") || "/run/shrek/install-run.log"
+
+    function appendLog(line) {
+        var arr = root.logBuf
+        arr.push(line)
+        if (arr.length > 500) arr = arr.slice(arr.length - 500)   // cap: an install log stays bounded
+        root.logBuf = arr
+        root.logText = arr.join("\n")
+    }
+
+    // Keep the newest lines in view while the pane is open (unless the user has scrolled up is a nicety
+    // we skip for M1 — installs are short and always-follow is the expected log behaviour).
+    onLogTextChanged: {
+        if (root.showDetails)
+            logFlick.contentY = Math.max(0, logBody.height - logFlick.height)
+    }
 
     function setPhase(id, v) {
         if (id === "verify")         sVerify = v
@@ -64,11 +90,34 @@ Item {
         }
     }
 
+    // Follow the orchestrator's log from the first line (it truncates the file at start; -F re-follows the
+    // truncate/recreate). Run as root via sudo -n so the read never depends on the log's umask; the live
+    // `dev` session has NOPASSWD, the same escalation the installer itself uses. Runs whenever the install
+    // is live so the pane shows full history even if the user opens Details mid-write.
+    Process {
+        id: logtail
+        command: ["sudo", "-n", "tail", "-n", "+1", "-F", root.logPath]
+        running: !root.preview && Intent.diskPath !== ""
+        stdout: SplitParser { onRead: (line) => root.appendLog(line) }
+    }
+
     Component.onCompleted: {
         if (root.preview) {
             root.applyFrame("SHREK-INSTALL STEP verify begin")
             root.applyFrame("SHREK-INSTALL STEP verify done")
             root.applyFrame("SHREK-INSTALL STEP write begin")
+            if (root.detailsPreview) {
+                root.showDetails = true
+                var sample = [
+                    "shrek-install-run: BEGIN target=/dev/sda",
+                    "shrek-install-target: verifying payload checksum (sha256)…",
+                    "shrek-install-target: @PHASE verify done",
+                    "shrek-install-target: writing sealed base image to /dev/sda",
+                    "2147483648 bytes (2.1 GB, 2.0 GiB) copied, 20 s, 105 MB/s",
+                    "shrek-install-target: appending shrek-layers + shrek-data partitions"
+                ]
+                for (var i = 0; i < sample.length; i++) root.appendLog(sample[i])
+            }
         }
     }
 
@@ -128,6 +177,59 @@ Item {
                     wrapMode: Text.WordWrap
                     Layout.topMargin: Tokens.spaceSm
                     Layout.maximumWidth: 540
+                }
+
+                // Details disclosure — expands the live writer log for anyone who wants to watch the bytes.
+                Item {
+                    id: detailsToggle
+                    Layout.fillWidth: true
+                    Layout.topMargin: Tokens.spaceMd
+                    implicitHeight: detailsLabel.implicitHeight
+                    Text {
+                        id: detailsLabel
+                        text: (root.showDetails ? "▾" : "▸") + "  Details"
+                              + (root.showDetails ? "" : "  —  show the live install log")
+                        color: Tokens.textSecondary
+                        font.family: Tokens.fontMono
+                        font.pixelSize: Tokens.fontSmall
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: root.showDetails = !root.showDetails
+                    }
+                }
+
+                Rectangle {
+                    visible: root.showDetails
+                    Layout.fillWidth: true
+                    Layout.maximumWidth: 720
+                    Layout.preferredHeight: 220
+                    Layout.topMargin: Tokens.spaceSm
+                    color: Tokens.surface
+                    radius: 6
+                    border.width: 1
+                    border.color: Tokens.outline
+
+                    Flickable {
+                        id: logFlick
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        clip: true
+                        contentWidth: width
+                        contentHeight: logBody.height
+                        flickableDirection: Flickable.VerticalFlick
+                        Text {
+                            id: logBody
+                            width: logFlick.width
+                            text: root.logText.length > 0 ? root.logText : "Waiting for the installer to start…"
+                            color: root.logText.length > 0 ? Tokens.textSecondary : Tokens.muted
+                            font.family: Tokens.fontMono
+                            font.pixelSize: Tokens.fontSmall
+                            wrapMode: Text.Wrap
+                            lineHeight: 1.25
+                        }
+                    }
                 }
 
                 Item { Layout.fillHeight: true }

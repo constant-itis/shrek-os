@@ -52,8 +52,8 @@ CFG=/work/ui-installer/shell.qml
 FAIL=0
 
 shot() {
-  local name="$1" screen="$2" fault="${3:-}"
-  SHREK_INSTALLER_SCREEN="$screen" SHREK_INSTALLER_FAULT="$fault" \
+  local name="$1" screen="$2" fault="${3:-}" details="${4:-}"
+  SHREK_INSTALLER_SCREEN="$screen" SHREK_INSTALLER_FAULT="$fault" SHREK_INSTALLER_DETAILS="$details" \
     "$QS" -p "$CFG" >"/tmp/qs-$name.log" 2>&1 &
   local pid=$!
   sleep 4
@@ -76,6 +76,7 @@ shot name           name
 shot disk           disk
 shot erase          erase
 shot progress       progress
+shot progress-details progress "" 1
 shot done           done
 shot firstrun       firstrun
 shot firstrun-fault firstrun 1
