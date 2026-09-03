@@ -58,9 +58,6 @@ docker run --rm --privileged \
 
     SHREK_INSTALL_ALLOW_LOOP=1 /work/layers/shrek-installer/overlay/usr/libexec/shrek/shrek-install-target \
       --target-disk "$target_loop" \
-      --username dev \
-      --fullname "Shrek Dev" \
-      --hostname shrek-proof \
       --provisioning-manifest /run/shrek/provisioning/manifest
 
     old_loop="$target_loop"
