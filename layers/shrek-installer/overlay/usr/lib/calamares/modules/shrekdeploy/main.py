@@ -76,9 +76,6 @@ def run():
     libcalamares.job.setprogress(0.02)
 
     target_disk = _target_disk()
-    username = _gs_value("username", "") or "shrek"
-    fullname = _gs_value("fullname", "")
-    hostname = _gs_value("hostname", "shrek") or "shrek"
 
     if not target_disk:
         return (
@@ -91,16 +88,13 @@ def run():
     # /run/shrek/provisioning/manifest (shrek-provision-stage). Hand its path to the writer so it can
     # transplant it onto the target /home. A missing file is not fatal — the target first-boot-defaults.
     prov_manifest = os.environ.get("SHREK_PROVISION_MANIFEST", "/run/shrek/provisioning/manifest")
+    # ADR-005 §5: account identity is not passed here. The sealed base image already carries the
+    # `shrek` account + hostname; the owner display name rides the provisioning manifest and is
+    # applied target-side at first boot. Only the target disk and the manifest path are needed.
     cmd = [
         "/usr/libexec/shrek/shrek-install-target",
         "--target-disk",
         target_disk,
-        "--username",
-        username,
-        "--fullname",
-        fullname,
-        "--hostname",
-        hostname,
         "--provisioning-manifest",
         prov_manifest,
     ]

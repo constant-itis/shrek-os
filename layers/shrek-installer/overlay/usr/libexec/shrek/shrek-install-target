@@ -2,7 +2,7 @@
 set -eu
 
 usage() {
-    echo "usage: shrek-install-target --target-disk DISK --username USER --fullname NAME --hostname HOST [--provisioning-manifest PATH]" >&2
+    echo "usage: shrek-install-target --target-disk DISK [--provisioning-manifest PATH]" >&2
     exit 64
 }
 
@@ -48,23 +48,22 @@ if [ "${SHREK_INSTALL_TRANSPLANT_SEAM:-0}" = 1 ]; then
     exit 0
 fi
 
+# ADR-005 §5: INSTALL-0 is a whole-disk image writer — the sealed base image already carries the
+# `shrek` account and hostname, and the owner display name is carried as validated intent in the
+# provisioning manifest (owner_display_name), applied target-side at first boot. The old
+# --username/--fullname/--hostname args were never used to create anything here (they were only
+# echoed) and are removed; account identity is established first-boot, not on the install media.
 TARGET_DISK=
-USERNAME=
-FULLNAME=
-HOSTNAME=
 PROV_MANIFEST=
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --target-disk) TARGET_DISK="${2:-}"; shift 2 ;;
-        --username) USERNAME="${2:-}"; shift 2 ;;
-        --fullname) FULLNAME="${2:-}"; shift 2 ;;
-        --hostname) HOSTNAME="${2:-}"; shift 2 ;;
         --provisioning-manifest) PROV_MANIFEST="${2:-}"; shift 2 ;;
         *) usage ;;
     esac
 done
 
-[ -n "$TARGET_DISK" ] && [ -n "$USERNAME" ] && [ -n "$HOSTNAME" ] || usage
+[ -n "$TARGET_DISK" ] || usage
 [ -b "$TARGET_DISK" ] || { echo "target disk is not a block device: $TARGET_DISK" >&2; exit 66; }
 
 case "$TARGET_DISK" in
@@ -116,9 +115,6 @@ payload_real=$(readlink -f "$payload_dev")
 
 echo "INSTALL-0 erase/install:"
 echo "  target_disk=$TARGET_DISK"
-echo "  username=$USERNAME"
-echo "  fullname=$FULLNAME"
-echo "  hostname=$HOSTNAME"
 echo "  payload=$payload_mnt"
 
 for p in $(lsblk -lnpo NAME "$TARGET_DISK" | tail -n +2 | sort -r); do
