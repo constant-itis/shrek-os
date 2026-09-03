@@ -38,6 +38,10 @@ fn main() {
         // `shrek run` → `gatekeeperd sandbox`. Bench containers run as `dev`'s rootless podman; the
         // supervisor drops privilege internally.
         Some("bench") => std::process::exit(bench(&argv[1..])),
+        // ADR-006 Mode A: the on-device AI front door. A thin forwarder to
+        // /usr/lib/shrek/ai/shrek-ai-front-door (mirrors `shrek run` → gatekeeperd). This CLI owns no AI
+        // logic and adds no host-exec surface; the front door + the vendored no-exec shell are the boundary.
+        Some("ai") => std::process::exit(ai(&argv[1..])),
         Some("-h") | Some("--help") | None => {
             usage();
             std::process::exit(0);
@@ -95,7 +99,40 @@ fn usage() {
     eprintln!("    list                          list all Benches");
     eprintln!("      (grant/network arrive in step 5; promote → Workshop later)");
     eprintln!();
+    eprintln!("  shrek ai [opts]         open the on-device AI front door (ADR-006 Mode A): the offline,");
+    eprintln!("      hardened mycolink-shell wired to the on-box model + memory (loopback only, zero");
+    eprintln!("      egress, no host-exec). Starts the model on demand. Opts: --model, --resume, --cartridge.");
+    eprintln!();
     eprintln!("  (planned) shrek history | related | status; shrek audit --agent");
+}
+
+/// `shrek ai [ARGS…]` — the ADR-006 Mode-A on-device AI front door. A THIN forwarder to
+/// /usr/lib/shrek/ai/shrek-ai-front-door (which wires the hardened mycolink-shell to on-box loopback
+/// services and drops the operator in). Mirrors `shrek run` → gatekeeperd: no AI logic, no host-exec
+/// surface of its own. `--help` is handled HERE (no model start) so `shrek ai --help` is a cheap offline
+/// probe; a real invocation execs the front door with the operator's args passed through verbatim.
+fn ai(args: &[String]) -> i32 {
+    const FRONT_DOOR: &str = "/usr/lib/shrek/ai/shrek-ai-front-door";
+    if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) {
+        ai_usage();
+        return 0;
+    }
+    if !Path::new(FRONT_DOOR).exists() {
+        eprintln!("shrek ai: on-device AI layer not present (the shrek-ai Onion is not merged on this box).");
+        eprintln!("          Build with INCLUDE_AI=1 and boot the shrek-ai layer to enable `shrek ai`.");
+        return 1;
+    }
+    let err = Command::new(FRONT_DOOR).args(args).exec();
+    // Only reached if exec itself failed (missing interpreter, not executable, …).
+    eprintln!("shrek ai: cannot exec `{FRONT_DOOR}`: {err}");
+    1
+}
+
+fn ai_usage() {
+    eprintln!("shrek ai [--model tier2|tier3] [--resume SESSION_ID] [--cartridge ID]");
+    eprintln!("      Open the on-device AI front door (ADR-006 Mode A): the hardened, OFFLINE");
+    eprintln!("      mycolink-shell wired to the on-box model (127.0.0.1:8198) and memory");
+    eprintln!("      (127.0.0.1:8199) — zero egress, no host-exec surface. Starts the model on demand.");
 }
 
 /// %-escape space/`%`/control so each argv arg is exactly one newline-free line on the count-framed BENCH
