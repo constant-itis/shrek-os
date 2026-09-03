@@ -75,5 +75,36 @@ grep -v 'NAME="vdd"' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp"
 out_none="$(run_list || true)"
 [ -z "$out_none" ] && ok "no disks offered when only live media present" || bad "unexpected disks offered: $out_none"
 
+# --- reinstall regression (metal 2026-09-03) -------------------------------------------------------
+# A disk that ALREADY has Shrek installed (esp + shrek_1 + shrek-layers + shrek-data labels, RO=0, not
+# mounted) MUST be offered for erase — otherwise the picker shows "no eligible disk" on every machine that
+# already runs Shrek and you can never reinstall from the GUI. The live medium (shrek-payload) stays out.
+echo "=== scenario: reinstall over an existing Shrek disk ==="
+cat >"$bin/lsblk_p_rows" <<'ROWS'
+NAME="vda" PKNAME="" TYPE="disk" RO="0" MOUNTPOINT="" PARTLABEL="" LABEL="" SIZE="8589934592" MODEL="LIVE USB"
+NAME="vda2" PKNAME="vda" TYPE="part" RO="1" MOUNTPOINT="" PARTLABEL="shrek_1" LABEL="" SIZE="4294967296" MODEL=""
+NAME="vda8" PKNAME="vda" TYPE="part" RO="0" MOUNTPOINT="" PARTLABEL="" LABEL="shrek-payload" SIZE="3221225472" MODEL=""
+NAME="vde" PKNAME="" TYPE="disk" RO="0" MOUNTPOINT="" PARTLABEL="" LABEL="" SIZE="480103981056" MODEL="APPLE SSD"
+NAME="vde1" PKNAME="vde" TYPE="part" RO="0" MOUNTPOINT="" PARTLABEL="esp" LABEL="ESP" SIZE="1073741824" MODEL=""
+NAME="vde2" PKNAME="vde" TYPE="part" RO="0" MOUNTPOINT="" PARTLABEL="shrek_1" LABEL="shrek_1" SIZE="2147483648" MODEL=""
+NAME="vde7" PKNAME="vde" TYPE="part" RO="0" MOUNTPOINT="" PARTLABEL="shrek-layers" LABEL="shrek-layers" SIZE="4187593728" MODEL=""
+NAME="vde8" PKNAME="vde" TYPE="part" RO="0" MOUNTPOINT="" PARTLABEL="shrek-data" LABEL="shrek-data" SIZE="470000000000" MODEL=""
+ROWS
+out_re="$(run_list)"
+paths_re="$(printf '%s\n' "$out_re" | cut -f1 | sort | tr '\n' ' ')"
+[ "$paths_re" = "/dev/vde " ] && ok "existing-Shrek target offered for reinstall (got: $paths_re)" || bad "expected only /dev/vde, got: $paths_re"
+printf '%s\n' "$out_re" | grep -q "/dev/vda" && bad "live medium (shrek-payload) leaked" || ok "live medium still excluded via shrek-payload"
+
+# --- courtesy vs system mount ----------------------------------------------------------------------
+# A target whose partition is auto-mounted under /media (udisks/file-manager courtesy) stays selectable;
+# a disk mounted at a system path does not.
+echo "=== scenario: courtesy /media mount stays eligible; system mount excluded ==="
+sed 's#NAME="vde8"\(.*\)MOUNTPOINT=""#NAME="vde8"\1MOUNTPOINT="/media/nhac/shrek-data"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
+out_courtesy="$(run_list)"
+printf '%s\n' "$out_courtesy" | grep -q "/dev/vde" && ok "target with a /media courtesy mount still offered" || bad "target wrongly excluded by a /media mount"
+sed 's#MOUNTPOINT="/media/nhac/shrek-data"#MOUNTPOINT="/mnt/data"#' "$bin/lsblk_p_rows" > "$bin/rows.tmp" && mv "$bin/rows.tmp" "$bin/lsblk_p_rows"
+out_sys="$(run_list || true)"
+printf '%s\n' "$out_sys" | grep -q "/dev/vde" && bad "disk mounted at a system path (/mnt) wrongly offered" || ok "disk mounted at a system path excluded"
+
 echo "--- INSTALL-0 disk-picker tally: PASS=$pass FAIL=$fail ---"
 [ "$fail" -eq 0 ] && echo "=== INSTALL-0 disk-picker proof GREEN ===" || { echo "=== INSTALL-0 disk-picker proof NOT GREEN ==="; exit 1; }
