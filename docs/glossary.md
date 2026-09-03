@@ -8,6 +8,10 @@ An attested subject with `(identity, profile, trust_band)`. The profile is the d
 
 The rule that an agent receives precise capabilities, not root or a user account. Effective authority is the sealed profile intersected with live grants. The kernel and broker enforce the result.
 
+## Agent legibility
+
+The design property that Shrek's durable state is inspectable as boring, human-readable files rather than opaque daemon/D-Bus/SQLite internals — so a human *or* a coding agent can `cat`/`grep`/`diff` the truth instead of reconstructing it from many abstraction layers. Canonical invariant: every durable Shrek fact has a filesystem-visible canonical representation; a daemon may own the write path for atomicity, but is never the sole source of durable truth, and `shrek … show` is always a pretty-printer of the record, never a divergent computed view. *Debian underneath, file-legible Shrek state above* — not an argument to change the base distro. See [`adr-004-file-legible-canonical-state.md`](adr-004-file-legible-canonical-state.md).
+
 ## Agentd
 
 The unprivileged resolver daemon. It binds identity, checks `caps ⊆ profile`, computes the requested tier from sealed policy, and emits a request for `gatekeeperd` to re-check.
