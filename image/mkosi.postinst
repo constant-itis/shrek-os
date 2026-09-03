@@ -158,6 +158,23 @@ install -d -o 0 -g 0   -m 0755 "$BUILDROOT/etc/polkit-1"
 install -d -o 0 -g 701 -m 0750 "$BUILDROOT/etc/polkit-1/rules.d"
 echo "postinst: polkitd user -> $(grep '^polkitd:' "$BUILDROOT/etc/passwd") / rules.d $(ls -ldn "$BUILDROOT/etc/polkit-1/rules.d" | awk '{print $1, $3":"$4}')"
 
+# ADR-006 slice-6 (AI layer): the optional shrek-ai inference server (shrek-ai-model.service) runs as a
+# STATIC system user, NOT DynamicUser=yes. WHY static: DynamicUser makes systemd manage per-uid POSIX ACLs
+# on the paths a transient user touches, and on this box that ACL landed on the persistent /home mount root
+# with OTHER=--- — silently stripping the `dev` user's traverse of /home and killing shrek-ai-mycelium
+# (which runs as dev, brain under /home/dev). A static uid reading the world-readable GGUF (0644 under 0755
+# parents) needs NO ACL, so systemd never touches /home. The user holds no authority (nologin, no home,
+# locked shadow) — §7 is preserved by ProtectHome=tmpfs on the unit, not by an ephemeral identity. uid/gid
+# 702 continues Shrek's reserved low-custom range (shrek=700, polkitd=701), clear of the Debian block. Baked
+# here for the same reason as polkitd: a layer's sysusers.d can't create it (runtime /etc is sealed).
+grep -q '^shrek-ai:' "$BUILDROOT/etc/group" \
+    || echo 'shrek-ai:x:702:' >> "$BUILDROOT/etc/group"
+grep -q '^shrek-ai:' "$BUILDROOT/etc/passwd" || {
+    echo 'shrek-ai:x:702:702:Shrek AI model server:/nonexistent:/usr/sbin/nologin' >> "$BUILDROOT/etc/passwd"
+    echo 'shrek-ai:!*:20000:0:99999:7:::' >> "$BUILDROOT/etc/shadow"
+}
+echo "postinst: shrek-ai svc user -> $(grep '^shrek-ai:' "$BUILDROOT/etc/passwd")"
+
 # Sprint S2 (network): the DMS network center manages NetworkManager over its polkit-gated D-Bus API.
 # For the ACTIVE seat0 user NM already defaults allow_active=yes for list/toggle/scan/connect
 # (network-control, enable-disable-{network,wifi}, wifi.scan, settings.modify.own). The ONE gap is

@@ -118,3 +118,14 @@
 # not tracked source — the pin (layers/shrek-ai/agent-harness.pin) + the harden/adapt patchset + the
 # no-exec gate ARE the committed provenance.
 /layers/shrek-ai/overlay/usr/lib/shrek/ai/mycolink-shell/
+
+# ADR-006 §3 (slice 6): the sealed llama.cpp inference runtime is BUILT FROM the pinned immutable source
+# commit by scripts/vendor-llama-server.sh (GGML_NATIVE=OFF, static internal libs, curl off, dep-allowlisted)
+# and staged into the Onion overlay. Build product, not tracked source — the pin
+# (layers/shrek-ai/llama-server.pin) + the vendor script + the ldd allowlist ARE the committed provenance.
+/layers/shrek-ai/overlay/usr/lib/shrek/ai/llama-server
+
+# ADR-006 §3 (slice 6): the per-box model-as-data descriptor (<name>.gguf.digest) is baked ONLY for the
+# DOGFOOD acceptance VM by scripts/build-ai-layer.sh (a product Onion ships none — dormant by design). It is
+# a build product keyed off the delivered GGUF, not tracked source.
+/layers/shrek-ai/overlay/usr/share/shrek/ai/model/*.gguf.digest

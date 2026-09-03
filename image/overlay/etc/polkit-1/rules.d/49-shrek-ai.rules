@@ -1,0 +1,18 @@
+// 49-shrek-ai.rules — ADR-006 slice-6: let the active, local (dev) seat0 session START the lazy on-box AI
+// inference server without a graphical polkit agent. The `shrek ai` front door issues
+// `systemctl start shrek-ai-model.service` on the first model-needing turn (the model is lazy-start +
+// idle-unload, not boot-enabled); systemd delegates manage-units to polkit, whose default for a system
+// unit is auth_admin_keep — unanswerable in the sealed session that has no graphical agent. Same shape as
+// the baked 49-shrek-nm / 49-shrek-udisks rules that unblock the sealed desktop's NM/udisks actions.
+//
+// SCOPE IS DELIBERATELY NARROW: START of shrek-ai-model.service ONLY (not stop/restart/mask, not other
+// units), and only for an active + local session. Granting the start confers no authority — the service is
+// DynamicUser, model-as-data verify-gated, and bound loopback-only with IPAddressDeny=any (ADR-006 §7).
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "shrek-ai-model.service" &&
+        action.lookup("verb") == "start" &&
+        subject.active && subject.local) {
+        return polkit.Result.YES;
+    }
+});

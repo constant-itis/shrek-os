@@ -57,8 +57,12 @@ GGUF="$MODEL_DIR/$gguf_name"
 [ -x "$LLAMA_BIN" ] || { echo "shrek-ai-model: inference runtime $LLAMA_BIN missing (vendored in a later build)" >&2; exit 1; }
 
 # Start the server on loopback. --no-webui keeps it a bare OpenAI-compatible API (no browser surface).
+# --jinja loads the GGUF's OWN embedded chat template (Granite 4.2), which is what makes the reasoning
+# toggle real: the reference-model's normal mode drives the model with chat_template_kwargs.enable_thinking
+# (ADR-006 §9c) — a kwarg the built-in (non-jinja) template path ignores. Without --jinja, Granite's
+# thinking stays on and short turns return empty content (reasoning-only). Proven in the slice-6 bring-up.
 echo "shrek-ai-model: starting $LLAMA_BIN on $HOST:$PORT (ctx=$CTX) model=$gguf_name" >&2
-"$LLAMA_BIN" --host "$HOST" --port "$PORT" --ctx-size "$CTX" --model "$GGUF" --no-webui &
+"$LLAMA_BIN" --host "$HOST" --port "$PORT" --ctx-size "$CTX" --model "$GGUF" --no-webui --jinja &
 srv_pid=$!
 
 # Grace: seed the marker at start so a just-started server isn't reaped before its first turn.

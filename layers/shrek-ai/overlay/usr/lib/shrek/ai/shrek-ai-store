@@ -41,6 +41,7 @@ for d in /home/.shrek/ai /home/.shrek/ai/seed /home/.shrek/ai/model; do
     chmod 0755 "$d" 2>/dev/null || true
 done
 
+
 # --- runtime brain + chat memories: dev-owned, private (0700), the shell's ~/.mycolink native layout.
 #     /home/dev itself is created 0700 dev:dev by tmpfiles (shrek-home.conf); create the subtree under it. ---
 for d in /home/dev/.mycolink /home/dev/.mycolink/brain /home/dev/.mycolink/sessions; do

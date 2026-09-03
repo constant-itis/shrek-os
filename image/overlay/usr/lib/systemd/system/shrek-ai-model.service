@@ -23,11 +23,16 @@ ConditionPathExists=/usr/lib/shrek/layers/ai
 ConditionPathExists=/usr/lib/shrek/ai/shrek-ai-model
 
 [Service]
-# No ambient authority (ADR-006 §7: the AI layer never holds its own credential authority). A fresh
-# DynamicUser reads the WORLD-READABLE GGUF from the root-owned model landing and holds nothing else — it
-# cannot reach dev's home, ~/.ssh, or config.json. ProtectHome=read-only (implied by DynamicUser) still
-# lets it read /home/.shrek/ai/model; the model only mmaps the GGUF read-only.
-DynamicUser=yes
+# No ambient authority (ADR-006 §7: the AI layer never holds its own credential authority). A STATIC,
+# authority-less system user (shrek-ai, uid 702, nologin/no-home/locked, baked in image/mkosi.postinst) —
+# NOT DynamicUser=yes. WHY static (slice-6 ACL fix): DynamicUser makes systemd manage per-uid POSIX ACLs on
+# the paths the transient user touches, and that ACL landed on the persistent /home mount root with
+# OTHER=--- — silently stripping the `dev` user's traverse of /home and killing shrek-ai-mycelium (runs as
+# dev, brain under /home/dev). A static uid reading the world-readable GGUF (0644 under 0755 parents) needs
+# NO ACL, so systemd never touches /home. It cannot reach dev's home/.ssh/config.json: InaccessiblePaths=
+# below over-mounts /home/dev away, and it holds no authority (nologin, no home) — the §7 posture.
+User=shrek-ai
+Group=shrek-ai
 Type=simple
 # Model-as-data gate: refuse to start unless a delivered GGUF matches the sealed baked digest (exit 0).
 # A non-zero pre (no model configured / not delivered / digest mismatch) keeps the server down, logged.
@@ -48,6 +53,19 @@ IPAddressAllow=localhost
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
+# §7 dev-home isolation WITHOUT poisoning /home (slice-6 final): earlier this used ProtectHome=tmpfs + a
+# BindReadOnlyPaths back to /home/.shrek/ai/model. That combination is what poisoned /home — to bridge the
+# bind source through the tmpfs mask systemd writes a POSIX ACL onto the real /home (OTHER=---), which locks
+# the dev user (hence shrek-ai-mycelium) out of /home/dev while the model runs. Instead: the static shrek-ai
+# user reads the world-readable model landing DIRECTLY (/home is 0755, GGUF 0644 — no bind, so systemd never
+# touches /home's ACL), and dev's private home is hidden by a plain over-mount. InaccessiblePaths= is a mount,
+# not an ACL op — it hides /home/dev (dev's ~, ~/.ssh, config.json — the §7 targets) with zero /home ACL churn.
+# ProtectSystem=strict keeps all of /home read-only, so the model can only READ the landing, never write /home.
+InaccessiblePaths=-/home/dev
+# ProtectSystem=strict makes /run read-only; the launcher writes+reads its idle-unload activity marker under
+# /run/shrek-ai (a missing marker makes the watchdog read age=huge and self-kill the server immediately).
+# RuntimeDirectory gives the service its own writable /run/shrek-ai (0755, removed on stop).
+RuntimeDirectory=shrek-ai
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -1,0 +1,36 @@
+# ShrekOS AI inference runtime — provenance pin (ADR-006 §3, docs/adr-006-slice6-dogfood.md).
+#
+# The sealed on-box inference server (`shrek-ai-model` launches it at /usr/lib/shrek/ai/llama-server) is
+# BUILT FROM SOURCE at an IMMUTABLE upstream commit — never a downloaded release binary. A prebuilt release
+# would plant an external opaque binary as a trust root inside a signed, offline Onion; building from a
+# pinned commit keeps the runtime as auditable + reproducible as every other vendored artifact.
+#
+# scripts/vendor-llama-server.sh clones this exact commit, builds it CPU-only in debian:trixie (so glibc
+# matches the sealed base), enforces the runtime shared-object allowlist below, records the resulting binary
+# digest, and stages it into the git-ignored Onion overlay. The commit + build flags + ldd allowlist ARE the
+# committed provenance (the binary itself is a git-ignored build product, sealed by dm-verity at image time).
+SOURCE_REPO=ggml-org/llama.cpp
+# Immutable commit (NOT a tag — a tag can move). master @ 2026-09-02; carries LLM_ARCH_GRANITE ("granite"),
+# the architecture the ratified Granite 4.2 3B Q4_K_M GGUF declares (general.architecture=granite). Verified
+# against the model's own metadata before pinning (docs/adr-006-slice6-dogfood.md).
+SOURCE_COMMIT=f027c4f1b025e05d6a2fc3b741047bda07b85ef7
+
+# Reproducible, minimal, offline CPU build. GGML_NATIVE=OFF => no -march=native (host-independent codegen);
+# static internal libs => ggml/llama linked into the one binary (no shared ggml .so to also seal); OpenMP OFF
+# => drops libgomp from the runtime closure; CURL OFF => no libcurl trust root / no network model pulls;
+# BACKEND_DL OFF => a single sealed binary, no dlopen'd backends. libgcc/libstdc++ statically linked so the
+# ONLY dynamic dependencies are base-guaranteed (see the allowlist).
+BUILD_FLAGS=-DGGML_NATIVE=OFF -DLLAMA_CURL=OFF -DGGML_OPENMP=OFF -DBUILD_SHARED_LIBS=OFF -DGGML_BACKEND_DL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DCMAKE_BUILD_TYPE=Release
+LINKER_FLAGS=-static-libgcc -static-libstdc++
+BUILD_TARGET=llama-server
+
+# Runtime shared-object ALLOWLIST — vendor-llama-server.sh runs `ldd` on the built binary and FAILS if any
+# NEEDED library outside this set survives (every entry here is present in the sealed base's runtime closure,
+# pulled by systemd/glibc). This is the structural guarantee that the sealed base can actually run it offline.
+LDD_ALLOWLIST=linux-vdso.so.1 libm.so.6 libc.so.6 ld-linux-x86-64.so.2 libgcc_s.so.1
+
+# Recorded digest of the binary THIS pinned build produces (sha256, filled by the first vendoring run).
+# SOURCE_COMMIT is the authoritative trust root; this records the artifact for audit. vendor-llama-server.sh
+# verifies it on subsequent runs and FAILS on mismatch — re-bake intentionally with REBUILD_PIN=1 whenever
+# SOURCE_COMMIT or BUILD_FLAGS change on purpose.
+BINARY_SHA256=e638cd69b43e84905c7650a7da18f81c2a3274856dd7eb7f03f21ac2a7f267af

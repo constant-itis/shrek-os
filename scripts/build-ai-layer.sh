@@ -29,6 +29,34 @@ else
   echo "=== SKIP_SHELL=1 — not vendoring mycolink-shell (shell-less shrek-ai build) ==="
 fi
 
+# Slice 6: build the sealed llama.cpp inference runtime FROM the pinned immutable commit and stage it into
+# the same (git-ignored) overlay (ADR-006 §3, docs/adr-006-slice6-dogfood.md). ExtraTrees=overlay ships it
+# at /usr/lib/shrek/ai/llama-server (where shrek-ai-model launches it). Skippable for a runtime-less spike
+# via SKIP_LLAMA=1 (the layer then stays model-dormant — shrek-ai-model exits 1 "inference runtime missing").
+if [ "${SKIP_LLAMA:-0}" != "1" ]; then
+  scripts/vendor-llama-server.sh
+else
+  echo "=== SKIP_LLAMA=1 — not vendoring llama-server (runtime-less shrek-ai build) ==="
+fi
+
+# Slice 6 (DOGFOOD only): bake the per-box model-as-data descriptor so the acceptance VM has a CONFIGURED
+# model (an unconfigured box ships NO *.gguf.digest and stays dormant by design — README/reference-model).
+# The descriptor is `sha256sum`-shaped: "<64-hex>  <name>.gguf". Git-ignored, staged only under DOGFOOD —
+# exactly the gating idiom build-in-container.sh uses for the DOGFOOD home.mount / owner seed. The matching
+# multi-GB GGUF is delivered to the VM's /home out-of-band by scripts/dogfood-vm.sh (never sealed).
+MODEL_SEAL_DIR="layers/shrek-ai/overlay/usr/share/shrek/ai/model"
+if [ "${DOGFOOD:-0}" = "1" ]; then
+  GGUF_SRC="${SHREK_AI_GGUF:-out/ai-model/granite-4.2-3b-Q4_K_M.gguf}"
+  [ -f "$GGUF_SRC" ] || { echo "build-ai-layer: DOGFOOD needs the GGUF at $GGUF_SRC (set SHREK_AI_GGUF)" >&2; exit 1; }
+  gname="$(basename "$GGUF_SRC")"
+  ghash="$(sha256sum "$GGUF_SRC" | cut -d' ' -f1)"
+  printf '%s  %s\n' "$ghash" "$gname" > "$MODEL_SEAL_DIR/${gname}.digest"
+  echo "=== DOGFOOD: baked model descriptor $MODEL_SEAL_DIR/${gname}.digest ($ghash) ==="
+else
+  # normal build: ensure no stray DOGFOOD descriptor leaks into a product Onion (dormant-by-default).
+  rm -f "$MODEL_SEAL_DIR"/*.gguf.digest 2>/dev/null || true
+fi
+
 echo "=== building shrek-ai sysext (python3 runtime + AI overlay) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 # Bind-mount a host ext4 dir OVER /var/tmp so mkosi's overlayfs workspace lands on real ext4, not docker's
