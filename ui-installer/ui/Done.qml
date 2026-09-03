@@ -1,8 +1,18 @@
 import QtQuick
 import QtQuick.Layouts
+import Quickshell.Io
 import "../theme"
 
 Item {
+    id: root
+
+    // Reboot the freshly-installed machine. Runs via sudo -n (dev has NOPASSWD on the live medium), same
+    // escalation path the collect/install steps use — the compositor never holds privilege itself.
+    Process {
+        id: rebooter
+        command: ["sudo", "-n", "systemctl", "reboot"]
+    }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -61,6 +71,7 @@ Item {
             Layout.fillWidth: true
             asideText: "Safe to remove install media now"
             primaryText: "Restart now"
+            onPrimaryClicked: rebooter.running = true
         }
     }
 }
