@@ -1366,6 +1366,23 @@ PYEOF
     else
         say "AI shell-no-subprocess=FAIL(shell tree absent at $_shelltree)"
     fi
+
+    # (10) §9c reasoning-default: the SHIPPED shell's model_client DEFAULTS to the ratified NORMAL mode
+    #      (enable_thinking=False). Granite 4.2 is a reasoning model — a True default exhausts max_tokens on
+    #      chain-of-thought and returns empty content on short turns (#638). Assert the SEALED /usr tree carries
+    #      no `enable_thinking: bool = True` default and has the flipped False default on both public entries.
+    _mc=/usr/lib/shrek/ai/mycolink-shell/agent_harness/model_client.py
+    if [ -f "$_mc" ]; then
+        _tdef=$(grep -cE '^[[:space:]]*enable_thinking:[[:space:]]*bool[[:space:]]*=[[:space:]]*True\b' "$_mc" 2>/dev/null | tr -dc '0-9')
+        _fdef=$(grep -cE '^[[:space:]]*enable_thinking:[[:space:]]*bool[[:space:]]*=[[:space:]]*False\b' "$_mc" 2>/dev/null | tr -dc '0-9')
+        if [ "${_tdef:-0}" -eq 0 ] && [ "${_fdef:-0}" -ge 2 ]; then
+            say "AI reasoning-default=[ok NORMAL mode: enable_thinking defaults False x${_fdef}, no True default in sealed model_client]"
+        else
+            say "AI reasoning-default=FAIL(true=${_tdef:-0} false=${_fdef:-0} — expected true=0 false>=2)"
+        fi
+    else
+        say "AI reasoning-default=FAIL(model_client absent at $_mc)"
+    fi
 else
     say "AI onion-merged=[no] — shrek-ai layer not present (non-AI build; skipping AI proof)"
 fi
