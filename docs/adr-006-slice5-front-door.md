@@ -42,10 +42,14 @@ spawn a host subprocess").
 
 ## 3. The front door + model launcher
 
-- `overlay/usr/lib/shrek/ai/shrek-ai-front-door` (+ `usr/bin/shrek-ai`) — points tier2 at the loopback
+- `overlay/usr/lib/shrek/ai/shrek-ai-front-door` — points tier2 at the loopback
   llama.cpp (`127.0.0.1:8198`), writes `~/.mycolink/config.json` aiming the recall client at the Shrek
   Memory API (`127.0.0.1:8199`), sets the system-prompt file (operator override on /home wins), starts the
   model on demand + warms the idle marker, then execs the hardened shell (`cli.main(['shell'])`).
+  - **Canonical entry: `shrek ai`** — the Rust CLI (`crates/shrek`) dispatches the `ai` subcommand to this
+    front door, a thin exec-forwarder mirroring `shrek run` → gatekeeperd (the CLI owns no AI logic and adds
+    no host-exec surface). `shrek ai --help` is handled in the CLI itself (no model start). `/usr/bin/shrek-ai`
+    remains as a back-compat alias forwarding to the same script.
 - `overlay/usr/lib/shrek/ai/shrek-ai-model` — the llama.cpp launcher slice-2's service waits on:
   verify-gated (`shrek-ai-model-verify`), loopback-only (refuses non-127.0.0.1), runs `llama-server`, and
   idle-unloads via the activity marker the front door touches. The `llama-server` binary is the sealed
