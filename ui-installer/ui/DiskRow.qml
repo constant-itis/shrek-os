@@ -10,6 +10,7 @@ Rectangle {
     property string model_: ""
     property string dev: ""
     property string size: ""
+    signal clicked()
 
     implicitHeight: 60
     radius: Tokens.radius
@@ -64,5 +65,12 @@ Rectangle {
             font.family: Tokens.fontMono
             font.pixelSize: row.excluded ? Tokens.fontCaption : Tokens.fontBody
         }
+    }
+
+    MouseArea {
+        anchors.fill: parent
+        enabled: !row.excluded
+        cursorShape: Qt.PointingHandCursor
+        onClicked: row.clicked()
     }
 }

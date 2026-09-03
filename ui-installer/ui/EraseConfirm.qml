@@ -103,13 +103,15 @@ Item {
                             font.letterSpacing: 1.4
                         }
                         Text {
-                            text: "Samsung SSD 980 PRO · 1.0 TB"
+                            text: (Intent.diskModel.length > 0 ? Intent.diskModel : "Selected disk") +
+                                  (Intent.diskSize.length > 0 ? " · " + Intent.diskSize : "")
                             color: Tokens.textPrimary
                             font.family: Tokens.fontFamily
                             font.pixelSize: Tokens.fontTitle
                         }
                         Text {
-                            text: "/dev/nvme0n1 — all existing partitions and data removed"
+                            text: (Intent.diskPath.length > 0 ? Intent.diskPath : "—") +
+                                  " — all existing partitions and data removed"
                             color: Tokens.textSecondary
                             font.family: Tokens.fontMono
                             font.pixelSize: Tokens.fontSmall

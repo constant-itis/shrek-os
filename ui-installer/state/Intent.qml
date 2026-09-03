@@ -20,6 +20,13 @@ QtObject {
     property string ownerName:   ""
     readonly property int schemaVersion: 1
 
+    // Target disk chosen on the Disk screen (path is the whole-disk /dev node handed to the orchestrator;
+    // model/size are display-only). Not part of the provisioning manifest — it is an install-time-only
+    // choice consumed by shrek-install-run --target-disk, never persisted onto the target.
+    property string diskPath:  ""
+    property string diskModel: ""
+    property string diskSize:  ""
+
     // ── linear flow ─────────────────────────────────────────────────────────────
     readonly property var order: ["welcome", "locale", "name", "disk", "erase", "progress", "done"]
     property int step: 0
