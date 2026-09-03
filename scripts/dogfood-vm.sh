@@ -646,7 +646,11 @@ if grep -qa 'SHREK-DOGFOOD AI onion-merged=.ok' "$LOG"; then
     "model-answers|the model ANSWERS on loopback with thinking OFF (Granite normal mode)" \
     "loopback-only|every AI listener (8198/8199) binds 127.0.0.1 ONLY (ADR-006 §7)" \
     "model-acl-safe|starting+restarting the model server leaves /home ACL intact (dev still traverses /home/dev)" \
-    "recall-selfknowledge|on-box Shrek Memory API /recall returns real seed self-knowledge"; do
+    "recall-selfknowledge|on-box Shrek Memory API /recall returns real seed self-knowledge" \
+    "brain-persists-reboot|the dev-owned runtime brain memory survives a reboot (seed re-ingest never clobbers it)" \
+    "egress-zero|every AI listener enforces kernel egress-deny (IPAddressDeny=any active) — ADR-006 §7" \
+    "injection-no-host-effect|a seeded instruction-shaped memory is inert — recalled as data, no host effect" \
+    "shell-no-subprocess|the shipped merged mycolink-shell carries no host-exec/process-spawn primitive"; do
     tag=${pair%%|*}; desc=${pair#*|}
     line=$(grep -a "SHREK-DOGFOOD AI ${tag}=" "$LOG" | tail -1)
     val=$(printf '%s' "$line" | sed "s/.*AI ${tag}=//" | tr -d '\r')
