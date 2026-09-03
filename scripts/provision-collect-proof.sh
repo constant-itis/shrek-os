@@ -4,7 +4,9 @@
 #
 # Asserts: the helper writes a well-formed key=value collect file (0600) from ARGV; a newline in the
 # untrusted name cannot forge a second key; an empty name omits the line; it chains shrek-provision-stage
-# (producing the staged manifest) and honors RUN_STAGE=0; and the EraseConfirm QML invokes it by ARGV.
+# (producing the staged manifest) and honors RUN_STAGE=0; the EraseConfirm QML invokes it by ARGV via
+# `sudo -n` (root staging) and GATES progression on the exit code; and collect fails LOUDLY (non-zero) when
+# it cannot create its root-owned staging dir — so the QML gate has a real signal (the live-env /run bug).
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 
@@ -51,9 +53,27 @@ Cn="$TMP/cn"; SDIR2="$TMP/stage2"
 SHREK_PROVISION_COLLECT_FILE="$Cn" SHREK_PROVISION_COLLECT_RUN_STAGE=0 SHREK_PROVISION_STAGE_DIR="$SDIR2" sh "$H" --locale en_US.UTF-8 --keymap us --name x >/dev/null 2>&1
 [ ! -e "$SDIR2/manifest" ] && ok "RUN_STAGE=0 writes the collect file only (no stage)" || bad "RUN_STAGE=0 still ran stage"
 
-echo "=== 5. EraseConfirm QML invokes the helper by ARGV ==="
+echo "=== 5. EraseConfirm QML invokes the helper by ARGV, via sudo -n, exit-gated ==="
 grep -q '/usr/libexec/shrek/shrek-provision-collect' "$ERASE" && ok "EraseConfirm calls shrek-provision-collect" || bad "EraseConfirm does not call the collect helper"
 grep -Eq '"--name",[[:space:]]*Intent.ownerName' "$ERASE" && ok "EraseConfirm passes the name as an argv element (not a shell string)" || bad "EraseConfirm does not pass the name as argv"
+grep -Eq '"sudo",[[:space:]]*"-n",[[:space:]]*"/usr/libexec/shrek/shrek-provision-collect"' "$ERASE" && ok "EraseConfirm runs collect via sudo -n (root staging, ADR-005 §6.3)" || bad "EraseConfirm does not invoke collect via sudo -n — collect dies on root-owned /run"
+grep -q 'onExited' "$ERASE" && ok "EraseConfirm has a collect exit handler" || bad "EraseConfirm has no exit handler — would advance regardless of collect outcome"
+grep -q 'exitCode === 0' "$ERASE" && ok "advance is gated on exitCode === 0 (no silent-default advance)" || bad "advance is not gated on the collect exit code"
+
+echo "=== 6. collect FAILS LOUDLY when it cannot create its staging dir (the live /run-as-dev bug) ==="
+if [ "$(id -u)" = 0 ]; then
+  echo "  SKIP running as root — cannot simulate an unwritable dir (proof is designed root-free)"
+else
+  RO="$TMP/ro"; mkdir -p "$RO"; chmod 0555 "$RO"
+  set +e
+  SHREK_PROVISION_COLLECT_FILE="$RO/sub/collect" SHREK_PROVISION_COLLECT_RUN_STAGE=0 \
+    sh "$H" --locale en_US.UTF-8 --keymap us --name x >/dev/null 2>&1
+  rc=$?
+  set -e
+  chmod 0755 "$RO" 2>/dev/null || true
+  [ "$rc" -ne 0 ] && ok "collect exits non-zero when it cannot create the staging dir (QML gate has a real signal)" \
+                  || bad "collect exited 0 despite an unwritable staging dir — a real failure would be silent"
+fi
 
 echo
 echo "=== provision-collect-proof: PASS=$PASS FAIL=$FAIL ==="
