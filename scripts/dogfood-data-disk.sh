@@ -29,8 +29,19 @@ fi
 
 command -v mkfs.ext4 >/dev/null || { echo "mkfs.ext4 not found — install e2fsprogs" >&2; exit 1; }
 truncate -s "$SIZE" "$DISK"
+# ADR-006 slice-6 (AI dogfood): optionally pre-seed the fresh /home with a directory tree via `mkfs -d`
+# (no mount, no root — the whole point of the -d flag). scripts/dogfood-vm.sh uses this to DELIVER the
+# model-as-data GGUF to /home/.shrek/ai/model BEFORE boot (the multi-GB model never rides the sealed Onion;
+# the non-privileged dogfood container cannot loopback-mount, so seeding at mkfs time is the clean path).
+# shrek-ai-store re-asserts the landing dir to root:root 0755 at boot; the seeded GGUF is world-readable.
+SEED_ARGS=""
+if [ -n "${DATA_SEED_DIR:-}" ]; then
+  [ -d "$DATA_SEED_DIR" ] || { echo "DATA_SEED_DIR=$DATA_SEED_DIR is not a directory" >&2; exit 1; }
+  SEED_ARGS="-d $DATA_SEED_DIR"
+  echo "seeding fresh /home from $DATA_SEED_DIR"
+fi
 # -F: operate on a regular file; -q: quiet. Label lets home.mount find it as /dev/disk/by-label/shrek-data.
 # -O quota,project (ADR-003 Part 2 step 3): arm PROJECT quotas so the Bench pool on /home is quota-capable
 # (home.mount mounts it `prjquota`). The dogfood oracle disk must be recreated (FRESH=1) to gain the feature.
-mkfs.ext4 -F -q -O quota,project -L "$LABEL" "$DISK"
+mkfs.ext4 -F -q -O quota,project -L "$LABEL" $SEED_ARGS "$DISK"
 echo "created $DISK — ext4 label=$LABEL size=$SIZE (sparse: $(du -h "$DISK" | cut -f1) used)"

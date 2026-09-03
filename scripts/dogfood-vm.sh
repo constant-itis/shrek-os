@@ -37,7 +37,34 @@ grep -qa 'shrek-dev.raw' "$STORE" || { echo "$STORE has no shrek-dev toolchain �
 # reboots; a stale marker would short-circuit the persistence proof. (The daily domain uses a persistent
 # out/shrek-data.raw instead — see scripts/dogfood-libvirt.sh.)
 DATA="out/dogfood-data.raw"
-FRESH=1 scripts/dogfood-data-disk.sh "$DATA" 4G
+# ADR-006 slice-6: when SHREK_AI_GGUF is set, DELIVER the model-as-data GGUF to the fresh /home before boot
+# (ADR-006 §3 — the multi-GB model never rides the sealed Onion; it is verified against the baked digest at
+# boot). Seeded into /home/.shrek/ai/model via mkfs -d (the non-privileged dogfood container can't
+# loopback-mount). Bigger disk to hold the ~2-3GB GGUF + /home. Hardlink (same fs) to avoid a host copy.
+DATA_SIZE=4G
+if [ -n "${SHREK_AI_GGUF:-}" ]; then
+  [ -f "$SHREK_AI_GGUF" ] || { echo "SHREK_AI_GGUF=$SHREK_AI_GGUF not found" >&2; exit 1; }
+  SEEDROOT=$(mktemp -d out/ai-seed.XXXXXX)
+  mkdir -p "$SEEDROOT/.shrek/ai/model"
+  gname=$(basename "$SHREK_AI_GGUF")
+  ln -f "$SHREK_AI_GGUF" "$SEEDROOT/.shrek/ai/model/$gname" 2>/dev/null \
+    || cp "$SHREK_AI_GGUF" "$SEEDROOT/.shrek/ai/model/$gname"
+  chmod 0644 "$SEEDROOT/.shrek/ai/model/$gname"
+  # CRITICAL: strip host-inherited POSIX ACLs from the seed tree before mkfs -d stamps it as the /home ROOT
+  # inode. out/ carries a DEFAULT ACL (user:libvirt-qemu:rwx, uid 64055) so mktemp -d inherits it, and
+  # mktemp's 0700 mode collapses MASK+OTHER to ---. mkfs.ext4 -d then writes that ACL onto /home's root inode,
+  # giving OTHER=--- → NO non-root user (dev uid1000, shrek-ai uid702) can traverse /home in the guest. That
+  # is the "ACL poison" that failed the AI legs — a pure host-harness artifact, not an OS bug. -Rbk drops
+  # access+default ACLs; the chmod re-asserts plain 0755 dirs so /home root is world-traversable, GGUF 0644.
+  setfacl -Rbk "$SEEDROOT"
+  chmod -R u=rwX,go=rX "$SEEDROOT"
+  chmod 0644 "$SEEDROOT/.shrek/ai/model/$gname"
+  export DATA_SEED_DIR="$SEEDROOT"
+  DATA_SIZE=8G
+  echo "=== slice-6: delivering $gname to VM /home/.shrek/ai/model (fresh data disk ${DATA_SIZE}) ==="
+fi
+FRESH=1 scripts/dogfood-data-disk.sh "$DATA" "$DATA_SIZE"
+[ -n "${DATA_SEED_DIR:-}" ] && rm -rf "$DATA_SEED_DIR" && unset DATA_SEED_DIR
 
 # The M1 cycle is THREE boots (enroll-reboot → write-marker+reboot → verify), so it needs more wall-clock
 # than the M0 single boot; the post-reboot desktop appears late, so screenshot near the end.
@@ -127,7 +154,12 @@ grep -qa 'SHREK-DOGFOOD MARKER-WRITTEN' "$LOG" && ok "marker written on the firs
 
 svc NetworkManager '^active'
 svc systemd-resolved '^active'
-svc bluetooth        '^active'
+# bluetooth.service is Type=dbus (BusName=org.bluez), D-Bus-activated ON DEMAND. In the adapterless headless
+# oracle nothing requests org.bluez within the probe window, so it validly rests INACTIVE (bluetoothd runs
+# fine once triggered — the probe modprobes bluetooth + polls). Before the slice-6 ACL fix a ~50s boot stall
+# (mycelium crash-loop) happened to let a desktop component activate it; the clean fast boot removed that
+# incidental trigger. active OR inactive pass; failed/unknown do not — same posture as upower below.
+svc bluetooth        '^(active|inactive)'
 svc dbus-broker      '^active'
 # HW-enablement batch (#2909) — new base services. timesyncd must be active (NTP on a 2012-RTC sealed OS).
 # mbpfan is applesmc-condition-guarded so in the VM it is INACTIVE, NOT failed — this asserts the
@@ -601,6 +633,28 @@ if grep -qa 'SHREK-DOGFOOD BENCH-CONSENT begin' "$LOG"; then
     elif grep -qa "SHREK-DOGFOOD BENCH-CONSENT ${tok%%=*}=SKIP" "$LOG"; then echo "  (consent ${tok%%=*} skipped — SAK delivery failed; see bench-consent-vm-proof.sh)"
     else bad "consent — ${desc} [$(grep -a "SHREK-DOGFOOD BENCH-CONSENT ${tok%%=*}=" "$LOG" | tail -1 | sed 's/.*BENCH-CONSENT //')]"; fi
   done
+fi
+
+# --- ADR-006 slice-6: optional on-device AI layer — boot-first proof. Scored ONLY if the shrek-ai Onion
+# merged (a non-AI build emits "AI onion-merged=[no]" and this whole block skips with zero new FAIL). The
+# full §9 legs (reboot persistence, egress counters, injection payload, shell no-subprocess) land in a
+# follow-up; this is the "the whole layer RUNS for real" boot-first milestone. ------------------------------
+if grep -qa 'SHREK-DOGFOOD AI onion-merged=.ok' "$LOG"; then
+  for pair in \
+    "model-verify|model-as-data GGUF on /home matches the sealed baked digest (READY)" \
+    "model-health|lazy inference server started + healthy on loopback 127.0.0.1:8198" \
+    "model-answers|the model ANSWERS on loopback with thinking OFF (Granite normal mode)" \
+    "loopback-only|every AI listener (8198/8199) binds 127.0.0.1 ONLY (ADR-006 §7)" \
+    "model-acl-safe|starting+restarting the model server leaves /home ACL intact (dev still traverses /home/dev)" \
+    "recall-selfknowledge|on-box Shrek Memory API /recall returns real seed self-knowledge"; do
+    tag=${pair%%|*}; desc=${pair#*|}
+    line=$(grep -a "SHREK-DOGFOOD AI ${tag}=" "$LOG" | tail -1)
+    val=$(printf '%s' "$line" | sed "s/.*AI ${tag}=//" | tr -d '\r')
+    if printf '%s' "$val" | grep -q '^\[ok'; then ok "ai — ${desc} ${val}"
+    else bad "ai — ${desc} ${val:-<no line — probe did not reach the AI stage>}"; fi
+  done
+elif grep -qa 'SHREK-DOGFOOD AI onion-merged=.no' "$LOG"; then
+  echo "  (AI proof skipped — shrek-ai Onion not in this store/build)"
 fi
 
 echo "--- Dogfood tally: PASS=$pass FAIL=$fail ---"

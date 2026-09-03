@@ -1143,4 +1143,130 @@ if [ -f /home/.shrek-consent-dogfood ]; then
     fi
 fi
 
+# --- ADR-006 slice-6: optional on-device AI layer — boot-first proof (runs at boot>=2) ----------------
+# Gated on the shrek-ai Onion marker: a non-AI dogfood build has no marker and skips clean. Proves the
+# layer actually RUNS end to end: model-as-data verify READY, the lazy inference server starts + answers on
+# loopback with thinking OFF (Granite normal mode = clean final content), every AI listener binds 127.0.0.1
+# ONLY (ADR-006 §7), and the on-box Shrek Memory API returns real seed self-knowledge. The probe is root
+# here; the dev polkit start-path is proven structurally by the baked 49-shrek-ai.rules. HTTP is driven with
+# python3 (shipped by the AI Onion) — no curl in the base. `set +e` so every leg reports regardless of rc.
+set +e
+if [ -e /usr/lib/shrek/layers/ai ]; then
+    say "AI onion-merged=[ok]"
+    PY=/usr/bin/python3
+    say "AI python3=[$([ -x "$PY" ] && "$PY" --version 2>&1 || echo MISSING)]"
+    # prerequisite split-store units (shrek-ai-store materializes ~/.mycolink brain + the seed landing;
+    # shrek-ai-seed delivers the deterministic self-knowledge). A crash here starves mycelium's /recall.
+    say "AI store-units=[store=$(systemctl is-active shrek-ai-store.service 2>/dev/null) seed=$(systemctl is-active shrek-ai-seed.service 2>/dev/null) brain-dir=$([ -d /home/dev/.mycolink/brain ] && echo yes || echo NO) seed-file=$([ -f /home/.shrek/ai/seed/memories.jsonl ] && echo yes || echo NO)]"
+
+    # (1) model-as-data verify: the GGUF delivered to /home matches the sealed baked digest (exit 0=READY).
+    /usr/lib/shrek/ai/shrek-ai-model-verify >/run/ai-verify.out 2>&1; _vrc=$?
+    [ "$_vrc" -eq 0 ] && say "AI model-verify=[ok $(tr '\n' ' ' </run/ai-verify.out | tail -c 110)]" \
+                      || say "AI model-verify=FAIL(rc=$_vrc out=[$(tr '\n' '|' </run/ai-verify.out | tail -c 200)])"
+
+    # (2) start the lazy inference server (root; dev's path is polkit-granted by 49-shrek-ai.rules) + wait
+    #     for loopback health. On a start failure, dump the unit's journal/status immediately (cheap, within
+    #     budget) so the oracle sees WHY — then skip the model-dependent legs (still run loopback + recall).
+    systemctl start shrek-ai-model.service >/run/ai-start.out 2>&1; _src=$?
+    _sact=$(systemctl is-active shrek-ai-model.service 2>/dev/null)
+    say "AI model-start=[rc=$_src active=$_sact]"
+    if [ "$_sact" = failed ] || [ "$_src" -ne 0 ]; then
+        say "AI model-start-status=[$(systemctl status shrek-ai-model.service --no-pager -n0 2>/dev/null | grep -E 'Active:|Process:|Main PID:|status=' | tr '\n' '|' | tail -c 300)]"
+        say "AI model-start-jrnl=[$(journalctl -u shrek-ai-model.service -b --no-pager 2>/dev/null | tail -n 15 | sed 's/.*]: //' | tr '\n' '|' | tail -c 480)]"
+        say "AI model-health=FAIL(service failed to start — see model-start-jrnl above)"
+        say "AI model-answers=FAIL(model service down)"
+    else
+        cat > /run/ai-health.py <<'PYEOF'
+import urllib.request, sys, time
+for _ in range(45):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:8198/health", timeout=2); print("ok"); sys.exit(0)
+    except Exception:
+        time.sleep(2)
+print("timeout"); sys.exit(1)
+PYEOF
+        if [ -x "$PY" ] && "$PY" /run/ai-health.py >/run/ai-health.out 2>&1; then
+            say "AI model-health=[ok loopback 127.0.0.1:8198 up]"
+        else
+            say "AI model-health=FAIL(timeout active=$(systemctl is-active shrek-ai-model.service 2>/dev/null) jrnl=[$(journalctl -u shrek-ai-model.service -b --no-pager 2>/dev/null | tail -n 8 | sed 's/.*]: //' | tr '\n' '|' | tail -c 300)])"
+        fi
+
+        # (3) the model ANSWERS on loopback with thinking OFF (Granite normal mode → clean final content).
+        cat > /run/ai-chat.py <<'PYEOF'
+import urllib.request, json, sys
+body = {"messages": [{"role": "user", "content": "Reply with exactly one word: OGRE"}],
+        "max_tokens": 64, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
+req = urllib.request.Request("http://127.0.0.1:8198/v1/chat/completions",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+try:
+    r = json.loads(urllib.request.urlopen(req, timeout=120).read().decode())
+    c = (r["choices"][0]["message"].get("content") or "").strip()
+    print("CONTENT=" + c.replace("\n", " ")[:80]); sys.exit(0 if c else 2)
+except Exception as e:
+    print("ERR=" + str(e)[:140]); sys.exit(1)
+PYEOF
+        if [ -x "$PY" ] && "$PY" /run/ai-chat.py >/run/ai-chat.out 2>&1; then
+            say "AI model-answers=[ok $(grep -a CONTENT= /run/ai-chat.out | tail -1)]"
+        else
+            say "AI model-answers=FAIL([$(tr '\n' '|' </run/ai-chat.out | tail -c 180)])"
+        fi
+    fi
+
+    # (4) every AI-layer listener binds 127.0.0.1 ONLY (ADR-006 §7) — no 0.0.0.0 / :: exposure.
+    _ail=$(ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -E ':8198$|:8199$')
+    _bad=$(printf '%s\n' "$_ail" | grep -vE '^127\.0\.0\.1:|^\[::1\]:' | tr '\n' ',')
+    say "AI listeners=[$(printf '%s' "$_ail" | tr '\n' ' ')]"
+    [ -z "$_bad" ] && say "AI loopback-only=[ok 8198/8199 bound 127.0.0.1]" \
+                   || say "AI loopback-only=FAIL(non-loopback=[$_bad])"
+
+    # (5a) PERMANENT REGRESSION GUARD (ADR-006 §4): the model server (User=shrek-ai) must never disturb the
+    #      dev user's traverse of /home. A /home root ACL with OTHER=--- — from ANY source (a mis-scoped
+    #      sandbox mount, or a mkfs -d seed that inherited a host default ACL) — strips dev's traverse and
+    #      kills shrek-ai-mycelium (runs as dev, brain under /home/dev). This leg PROVES starting+restarting
+    #      the model server leaves /home's ACL intact: dev must still traverse /home -> /home/dev -> its brain
+    #      across a model restart.
+    _trav() { runuser -u dev -- sh -c 'test -x /home && test -x /home/dev && test -r /home/dev/.mycolink' >/dev/null 2>&1 && echo ok || echo DENIED; }
+    _acl_before="$(_trav)"
+    systemctl restart shrek-ai-model.service >/dev/null 2>&1 || true   # a start+restart is the model op most likely to touch /home
+    _acl_after="$(_trav)"
+    if [ "$_acl_before" = ok ] && [ "$_acl_after" = ok ]; then
+        say "AI model-acl-safe=[ok dev traverses /home/dev across model start+restart (before=$_acl_before after=$_acl_after)]"
+    else
+        say "AI model-acl-safe=[POISONED dev lost /home traverse (before=$_acl_before after=$_acl_after) $(runuser -u dev -- stat /home/dev 2>&1 | tr '\n' ' ' | tail -c 130)]"
+    fi
+
+    # (5b) the on-box Shrek Memory API (mycelium) is up on loopback + /recall returns real seed
+    #      self-knowledge — the brain that never leaves the box. With the ACL fix it starts cleanly at boot;
+    #      the (re)start here is idempotent. Wait for a REAL :8199 listener (Type=simple flips active early).
+    systemctl start shrek-ai-mycelium.service >/dev/null 2>&1 || true
+    _m=0; while [ "$_m" -lt 30 ]; do ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -q ':8199$' && break; sleep 1; _m=$((_m + 1)); done
+    _ml=$(ss -H -ltn 2>/dev/null | awk '{print $4}' | grep -c ':8199$')
+    say "AI mycelium=[active=$(systemctl is-active shrek-ai-mycelium.service 2>/dev/null) listen8199=$_ml after=${_m}s]"
+    # On failure, a concise journal tail (systemd restart-spam stripped) so any regression stays diagnosable.
+    [ "$_ml" -eq 0 ] && say "AI mycelium-jrnl=[$(journalctl -u shrek-ai-mycelium.service -b --no-pager 2>/dev/null \
+        | grep -aviE 'Scheduled restart job|Start request repeated|Consumed [0-9]|Deactivated successfully|Stopped shrek-ai-mycelium|Started shrek-ai-mycelium' \
+        | tail -n 12 | sed 's/.*]: //' | tr '\n' '|' | tail -c 500)]"
+    cat > /run/ai-recall.py <<'PYEOF'
+import urllib.request, json, sys
+body = {"query": "on-device AI layer", "limit": 3}
+req = urllib.request.Request("http://127.0.0.1:8199/recall",
+        data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+try:
+    r = json.loads(urllib.request.urlopen(req, timeout=20).read().decode())
+    mems = r.get("memories", [])
+    print("RECALL n=%d first=[%s]" % (len(mems), (mems[0].get("content", "")[:60] if mems else "")))
+    sys.exit(0 if mems else 2)
+except Exception as e:
+    print("ERR=" + str(e)[:140]); sys.exit(1)
+PYEOF
+    if [ -x "$PY" ] && "$PY" /run/ai-recall.py >/run/ai-recall.out 2>&1; then
+        say "AI recall-selfknowledge=[ok $(grep -a RECALL /run/ai-recall.out | tail -1)]"
+    else
+        say "AI recall-selfknowledge=FAIL([$(tr '\n' '|' </run/ai-recall.out | tail -c 180)])"
+    fi
+else
+    say "AI onion-merged=[no] — shrek-ai layer not present (non-AI build; skipping AI proof)"
+fi
+set -e
+
 say "DONE boot=$n"
