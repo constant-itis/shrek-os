@@ -129,3 +129,7 @@
 # DOGFOOD acceptance VM by scripts/build-ai-layer.sh (a product Onion ships none — dormant by design). It is
 # a build product keyed off the delivered GGUF, not tracked source.
 /layers/shrek-ai/overlay/usr/share/shrek/ai/model/*.gguf.digest
+
+# Python bytecode caches from overlay helper scripts (build artifacts, not tracked source).
+__pycache__/
+*.pyc
