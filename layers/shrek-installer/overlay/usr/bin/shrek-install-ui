@@ -1,0 +1,20 @@
+#!/bin/sh
+# Launch the Quickshell graphical installer under the live Wayland session (must-fix #4, slice 3b).
+#
+# Runs as the UNPRIVILEGED live user on purpose: the compositor and Qt stay out of the privileged path.
+# The installer QML escalates only per-action, via `sudo -n` (shrek-provision-collect to stage the
+# manifest, shrek-install-run to write the disk) — exactly as the live medium's dev NOPASSWD sudo allows.
+# shrek-live-welcome has already waited for the Wayland socket before invoking us, so no re-wait here.
+set -u
+
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+CFG=/usr/share/shrek/installer/ui/shell.qml
+
+[ -r "$CFG" ] || { echo "shrek-install-ui: installer UI not staged at $CFG" >&2; exit 69; }
+command -v quickshell >/dev/null 2>&1 || { echo "shrek-install-ui: quickshell not found" >&2; exit 69; }
+
+exec env \
+    XDG_RUNTIME_DIR="$rt" \
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+    QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+    quickshell -p "$CFG"

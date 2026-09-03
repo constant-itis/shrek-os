@@ -42,7 +42,11 @@ do_action() {
     case "$1" in
         gparted)  run_root gparted ;;
         terminal) term ;;
-        install)  shrek-install-calamares ;;
+        # must-fix #4: the Quickshell graphical installer is the install path now. It runs unprivileged
+        # (escalates per-action via sudo -n); Calamares stays in the image as a fallback but is no longer
+        # the default surface. Legacy launcher still reachable as `install-calamares`.
+        install)          shrek-install-ui ;;
+        install-calamares) shrek-install-calamares ;;
         *)        return 1 ;;
     esac
 }

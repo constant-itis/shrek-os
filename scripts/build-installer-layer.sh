@@ -14,6 +14,10 @@ HOST_UID="$(id -u)"; HOST_GID="$(id -g)"
 # postinst hard-fails in the mkosi chroot. See scripts/stage-refind.sh.
 scripts/stage-refind.sh
 
+# Stage the Quickshell graphical installer (ui-installer/) into the overlay. Single source of truth is
+# ui-installer/; the staged copy is a build input (gitignored), same pattern as the rEFInd vendoring above.
+scripts/stage-installer-ui.sh
+
 echo "=== building shrek-installer sysext (Calamares 3.3.14-1) in debian:trixie ==="
 mkdir -p out/layers out/mkosi-vartmp
 docker run --rm --privileged \
