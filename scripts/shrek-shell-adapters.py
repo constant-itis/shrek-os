@@ -3,7 +3,10 @@
 # (ADR-006, owner directive 2026-09-02). Removal is done by harden-mycolink-shell.py; this step only ADDS:
 #   (1) a file-backed system prompt  — load /usr/share/shrek/ai/system-prompt.md (operator-overridable)
 #   (2) the Shrek Memory API recall adapter — repoint the recall transport at the on-box loopback service
-# The loopback model-endpoint config is RETAINED as-is (env vars, model_client) — not touched here.
+#   (3) the ratified reasoning-mode default — flip model_client's enable_thinking default to False so the
+#       shipped shell drives the reference model in NORMAL mode by default (ADR-006 §9c reference-model).
+# The loopback model-endpoint config (env vars, endpoints) is RETAINED as-is — only the reasoning default
+# is aligned here.
 #
 #   usage: shrek-shell-adapters.py <dest agent_harness/ (already hardened)>
 # stdlib only, deterministic.
@@ -78,6 +81,49 @@ def patch_recall(dest):
     with open(p, "w", encoding="utf-8", newline="\n") as f:
         f.write(src)
 
+# (3) reasoning-mode default. The reference model (Granite 4.2 3B, ADR-006 §9c) is a REASONING model:
+# with thinking ON its short turns exhaust max_tokens on chain-of-thought and return empty content
+# (the #638 trap). The ratified reference-model spec defines NORMAL mode as enable_thinking=false, so the
+# shipped shell must DEFAULT to normal — callers that want CoT (e.g. cartridge/agentic turns in repl.py)
+# pass enable_thinking=True explicitly. Upstream model_client ships True defaults tuned for the EVO-X2 35B;
+# we flip the two public entry points (chat, complete_code) to False for the ShrekOS derivative.
+MC_DEFAULT_OLD = "        enable_thinking: bool = True,\n"
+MC_DEFAULT_NEW = (
+    "        enable_thinking: bool = False,  # shrek-adapter: ratified NORMAL mode (ADR-006 §9c) —"
+    " reasoning model returns empty content on short thinking-on turns; callers pass True explicitly\n"
+)
+MC_DOC_CODE_OLD = "        For code generation we DEFAULT enable_thinking=True. The first\n"
+MC_DOC_CODE_NEW = (
+    "        ShrekOS default enable_thinking=False (ratified NORMAL mode, ADR-006 §9c);\n"
+    "        callers pass enable_thinking=True explicitly when they want CoT. The first\n"
+)
+MC_DOC_CHAT_OLD = "        Default enable_thinking=True for the agent loop — planning is\n"
+MC_DOC_CHAT_NEW = (
+    "        ShrekOS default enable_thinking=False (ratified NORMAL mode, ADR-006 §9c);\n"
+    "        callers enable thinking explicitly for cartridge/agentic turns. Planning is\n"
+)
+
+
+def patch_model_client(dest):
+    p = os.path.join(dest, "model_client.py")
+    with open(p, "r", encoding="utf-8") as f:
+        src = f.read()
+    n = src.count(MC_DEFAULT_OLD)
+    if n != 2:
+        raise SystemExit(
+            "shrek-shell-adapters: expected 2 `enable_thinking: bool = True` defaults in "
+            "model_client.py, found %d (source-pin drift?)" % n
+        )
+    src = src.replace(MC_DEFAULT_OLD, MC_DEFAULT_NEW)
+    # Keep the docstrings from contradicting the flipped default (audited sealed tree).
+    for old, new in ((MC_DOC_CODE_OLD, MC_DOC_CODE_NEW), (MC_DOC_CHAT_OLD, MC_DOC_CHAT_NEW)):
+        if src.count(old) != 1:
+            raise SystemExit("shrek-shell-adapters: model_client docstring anchor not unique: %r" % old)
+        src = src.replace(old, new, 1)
+    with open(p, "w", encoding="utf-8", newline="\n") as f:
+        f.write(src)
+
+
 PROMPT_HOOK = (
     '\n\n# shrek-adapter: file-backed system prompt (ADR-006 §5 iii). MYCOLINK_SYSTEM_PROMPT_FILE points at\n'
     '# /usr/share/shrek/ai/system-prompt.md (sealed default); an operator copy on /home overrides it.\n'
@@ -100,6 +146,10 @@ def main():
     # (1) recall adapter — patch the transport in place (keeps the module's public surface)
     patch_recall(dest)
     print("  patched Shrek Memory API transport into tools/mycelium_recall.py")
+
+    # (3) reasoning-mode default — flip model_client's enable_thinking default to normal mode
+    patch_model_client(dest)
+    print("  flipped model_client enable_thinking default -> False (ratified NORMAL mode)")
 
     # (2) file-backed system prompt — append the override after the SHELL_SYSTEM_PROMPT constant
     repl_path = os.path.join(dest, "shell", "repl.py")

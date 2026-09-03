@@ -14,5 +14,5 @@ SOURCE_REPO=BuberryWorldwide/agent-harness
 SOURCE_COMMIT=99e22569963c3df6c476adf08b1f8c144ce7960d
 # sha256 over sorted "<relpath>:<file-sha256>" of the hardened+adapted *.py tree (deterministic — the
 # harden/adapt steps use no timestamps or model). Regenerate + update on any patchset or source-pin change.
-HARDENED_TREE_SHA256=9fcddc1edcf0fd6da4d54166265b6d4bd4d93ebfccca0b2d9a7a4fbd313eca4f
+HARDENED_TREE_SHA256=bded0609e929e756a905ad2352c7fc70916bf85980bb81be0a53801451fd5e22
 HARDENED_PY_FILES=56
