@@ -2,10 +2,13 @@ import QtQuick
 import QtQuick.Layouts
 import "../theme"
 
-// First-run owner enrollment — runs on the installed, sealed system (post-reboot), a SEPARATE surface from
-// the installer. Confirms the transplanted display name and establishes the owner credential (created here,
-// target-side, never on the install media — ADR-005 §3/§5). `fault` renders the ADR-005 §10.5 degraded
-// state: a one-line notice when some install settings couldn't be applied. Static — no wiring.
+// First-run — runs on the installed, sealed system (post-reboot), a SEPARATE surface from the installer.
+// The owner CREDENTIAL is NOT collected here: for M1 the passphrase is established on the text console
+// (tty1) by the shrek-owner-provision oneshot, echo-off, BEFORE the graphical session starts — keeping
+// the compositor and Qt out of the pre-auth trust base (ADR-005 §2/§3). This graphical surface only
+// *confirms* the transplanted display name (inert plain-text, never a shell — §5). `fault` renders the
+// ADR-005 §10.5 degraded state: a one-line notice when some install settings couldn't be applied.
+// Static — no wiring.
 Item {
     id: screen
     property bool fault: false
@@ -72,7 +75,7 @@ Item {
                     Layout.alignment: Qt.AlignHCenter
                 }
                 Text {
-                    text: "Confirm your name and create a password. Your password is made here, on this computer."
+                    text: "Confirm your name. You already set your password at the text screen a moment ago — it never touches the install media."
                     color: Tokens.textSecondary
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
@@ -82,16 +85,20 @@ Item {
                     Layout.bottomMargin: Tokens.spaceSm
                 }
 
-                Field { label: "Your name"; value: "Sebastian"; hint: "Carried over from install — edit if you like."; boxWidth: 440 }
-                Field { label: "Create a password"; kind: "password"; placeholder: true; boxWidth: 440 }
-                Field { label: "Confirm password"; kind: "password"; placeholder: true; boxWidth: 440 }
+                Field {
+                    label: "Your name"
+                    editable: true
+                    value: ""
+                    hint: "Carried over from install — edit if you like."
+                    boxWidth: 440
+                }
             }
         }
 
         ActionBar {
             Layout.fillWidth: true
-            asideText: "Required before the desktop starts"
-            primaryText: "Create account & continue"
+            asideText: "Password already set at the text screen"
+            primaryText: "Confirm & continue"
         }
     }
 }
