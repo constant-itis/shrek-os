@@ -130,7 +130,7 @@ if [ "${DOGFOOD:-0}" = "1" ]; then
   # A prior LIVE_INSTALLER build stages a var-lib-swamp.mount mask; DOGFOOD has the writable shrek-data disk
   # and WANTS the real swamp mount, so drop any stale mask (mirrors home.mount's per-variant staging — the
   # LIVE_INSTALLER branch creates this mask, the plain/INSTALLABLE branch removes it; DOGFOOD must too).
-  rm -f "$DOGFOOD_MASKS/var-lib-swamp.mount"
+  rm -f "$DOGFOOD_MASKS/var-lib-swamp.mount" "$DOGFOOD_MASKS/home.mount"
   echo "!!! DOGFOOD=1: enabling persistent /home (home.mount) + the M1 persistence probe !!!"
   install -d "$LOCALFS_WANTS" "$MU_WANTS"
   ln -sf ../home.mount "$LOCALFS_WANTS/home.mount"
@@ -151,6 +151,14 @@ elif [ "$LIVE_INSTALLER" = "1" ]; then
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-mount-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/shrek-desktop-gate.service"
   ln -sf /dev/null "$DOGFOOD_MASKS/var-lib-swamp.mount"
+  # home.mount is by-label (LABEL=shrek-data). On a live boot with a previously-installed Shrek disk
+  # attached, that label resolves to the TARGET's shrek-data, so home.mount silently mounts the target's
+  # /home into the live session — making the disk "busy" with the live session's own $HOME and hiding it
+  # from the installer's disk picker (metal 2026-09-03: findmnt /home -> /dev/sda8). Removing the
+  # local-fs.target.wants symlink (below) is NOT enough — login/session machinery still pulls it — so MASK
+  # it. The live session has no persistent /home anyway (shrek-desktop redirects XDG to /run when $HOME is
+  # read-only), identical to a no-target live boot.
+  ln -sf /dev/null "$DOGFOOD_MASKS/home.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
   rm -f "$LOCALFS_WANTS/home.mount" "$LOCALFS_WANTS/shrek-bench-pool.service" "$LOCALFS_WANTS/shrek-home-quota-prep.service" "$LOCALFS_WANTS/shrek-bench-reissue.service"
   # step 4: the live installer is the ONLY variant that gets dev NOPASSWD; it never gets the debug-shell.
@@ -158,7 +166,7 @@ elif [ "$LIVE_INSTALLER" = "1" ]; then
   install -m0440 "$SUDOERS_SRC" "$SUDOERS_GEN"
   rm -f "$DEBUG_SHELL_WANT"
 else
-  rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount"
+  rm -f "$DOGFOOD_MASKS/shrek-mount-gate.service" "$DOGFOOD_MASKS/shrek-desktop-gate.service" "$DOGFOOD_MASKS/var-lib-swamp.mount" "$DOGFOOD_MASKS/home.mount"
   rm -f "$MU_WANTS/shrek-dogfood-persist.service"
   # step 4: INSTALLABLE (the product) and the plain-CI image ship NO dev passwordless root, and no
   # debug-shell (that is a dogfood-only affordance).

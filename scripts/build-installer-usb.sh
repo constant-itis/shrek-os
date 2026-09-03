@@ -92,13 +92,17 @@ mnt=$(mktemp -d)
 mount -o ro "${lo}p2" "$mnt"
 swamp_link=$(readlink "$mnt/etc/systemd/system/var-lib-swamp.mount" 2>/dev/null || true)
 home_enabled=""; [ -e "$mnt/usr/lib/systemd/system/local-fs.target.wants/home.mount" ] && home_enabled=1
+# home.mount is by-label (LABEL=shrek-data) and login/session machinery pulls it even when it is not in
+# local-fs.target.wants, so on the live medium it MUST be masked or it will mount a previously-installed
+# target disk's /home into the live session (metal 2026-09-03). Not-wanted is necessary but not sufficient.
+home_mask=$(readlink "$mnt/etc/systemd/system/home.mount" 2>/dev/null || true)
 umount "$mnt"; rmdir "$mnt"; mnt=""
-if [ "$swamp_link" != "/dev/null" ] || [ -n "$home_enabled" ]; then
-  echo "!!! BASE is NOT a LIVE_INSTALLER build (var-lib-swamp mask='$swamp_link', home.mount enabled='${home_enabled:-no}')" >&2
+if [ "$swamp_link" != "/dev/null" ] || [ -n "$home_enabled" ] || [ "$home_mask" != "/dev/null" ]; then
+  echo "!!! BASE is NOT a LIVE_INSTALLER build (var-lib-swamp mask='$swamp_link', home.mount enabled='${home_enabled:-no}', home.mount mask='${home_mask:-UNMASKED}')" >&2
   echo "!!! Rebuild with: LIVE_INSTALLER=1 scripts/build-in-container.sh 1  then cp out/shrek_1_x86-64.raw $BASE" >&2
   exit 1
 fi
-echo "--- GATE A: BASE confirmed LIVE_INSTALLER (swamp masked, home.mount not enabled) ---"
+echo "--- GATE A: BASE confirmed LIVE_INSTALLER (swamp masked, home.mount masked + not enabled) ---"
 
 # --- GATE B: mandatory pre-flash USB-stack check on the UKI (fable finding 3) ------------------
 # image/mkosi.conf.d/40-usb-boot.conf makes this a hard gate: a UKI whose appended modules initrd

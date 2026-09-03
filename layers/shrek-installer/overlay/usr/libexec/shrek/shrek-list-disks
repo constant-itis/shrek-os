@@ -68,9 +68,12 @@ while IFS= read -r line; do
     reserve=0
     # A mount at a SYSTEM path protects the disk (the running live medium mounts at /, /usr, /run/shrek/*).
     # A courtesy auto-mount of a secondary/target disk under /media or /run/media does NOT protect it — the
-    # target must stay selectable for reinstall, and the writer unmounts it before erasing.
+    # target must stay selectable for reinstall, and the writer unmounts it before erasing. /home is also
+    # non-protective: the live installer has no legitimate persistent /home, so a /home mount can only be a
+    # spurious by-label grab of a previously-installed target's shrek-data (defense-in-depth alongside the
+    # LIVE_INSTALLER home.mount mask).
     case "$MOUNTPOINT" in
-        ""|/media/*|/run/media/*) ;;
+        ""|/media/*|/run/media/*|/home|/home/*) ;;
         *) reserve=1 ;;
     esac
     [ "$RO" = 1 ] && reserve=1
