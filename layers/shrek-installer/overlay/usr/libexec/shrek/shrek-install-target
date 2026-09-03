@@ -6,6 +6,12 @@ usage() {
     exit 64
 }
 
+# Machine-readable phase boundary marker consumed by shrek-install-run (must-fix #4). The orchestrator
+# re-emits these under its own stable protocol prefix to drive the graphical progress bar. Printed
+# alongside (not instead of) the human prose so install logs stay readable. State is `begin` or `done`;
+# canonical ids, in execution order: verify -> write -> layout -> firstboot.
+emit_phase() { printf '@PHASE %s %s\n' "$1" "$2"; }
+
 # ADR-005 §6.5 — the trust-boundary crossing. Transplant the live-staged provisioning manifest onto the
 # freshly-formatted target /home, atomically and with the ADR-004 write discipline: mkdir -m0700 the store
 # -> write manifest.tmp -> fsync file -> rename -> fsync dir. The manifest is non-secret (no credential ever
@@ -102,9 +108,11 @@ sums="$payload_mnt/SHA256SUMS"
     echo "payload missing shrek_1_x86-64.raw or layer-store.raw" >&2
     exit 69
 }
+emit_phase verify begin
 if [ -f "$sums" ]; then
     ( cd "$payload_mnt" && sha256sum -c SHA256SUMS )
 fi
+emit_phase verify done
 
 target_real=$(readlink -f "$TARGET_DISK")
 payload_real=$(readlink -f "$payload_dev")
@@ -121,12 +129,15 @@ for p in $(lsblk -lnpo NAME "$TARGET_DISK" | tail -n +2 | sort -r); do
     umount "$p" 2>/dev/null || true
 done
 
+emit_phase write begin
 echo "copying sealed Shrek disk image to target"
 dd if="$base" of="$TARGET_DISK" bs=16M status=progress conv=fsync
 
 partprobe "$TARGET_DISK" 2>/dev/null || true
 udevadm settle 2>/dev/null || true
+emit_phase write done
 
+emit_phase layout begin
 echo "extending target GPT and appending installed state partitions"
 sgdisk -e "$TARGET_DISK"
 sgdisk -n 7:0:+4G -t 7:8300 -c 7:shrek-layers "$TARGET_DISK"
@@ -181,7 +192,9 @@ echo "formatting persistent owner state"
 # plane can cap each Bench's disk use on the growable /home (home.mount adds the `prjquota` option). The
 # noexec Bench pool sub-mount (shrek-bench-pool.service) lives on this same fs.
 mkfs.ext4 -F -O quota,project -L shrek-data "$home_part"
+emit_phase layout done
 
+emit_phase firstboot begin
 # ADR-005 §6.5: transplant the staged provisioning manifest onto the just-formatted /home, in this same
 # root context (no second mount cycle). Best-effort by design — a missing manifest first-boot-defaults.
 transplant_provisioning_manifest "$PROV_MANIFEST" /run/shrek-target-home "$home_part"
@@ -224,4 +237,5 @@ else
 fi
 
 sync
+emit_phase firstboot done
 echo "INSTALL-0 complete: remove installer media and boot $TARGET_DISK"

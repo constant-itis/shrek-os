@@ -1,0 +1,101 @@
+#!/bin/sh
+set -eu
+#
+# shrek-install-run — the M1 install orchestrator (must-fix #4).
+#
+# This is the single privileged entry point the graphical installer spawns (via `sudo -n`) to perform
+# the destructive install. It replaces the Calamares user-facing surface: the Quickshell installer
+# collects intent + stages the provisioning manifest, then hands off to this orchestrator, which drives
+# the proven privileged writer (shrek-install-target) and translates its progress into a small,
+# line-framed protocol on stdout that the QML Progress screen parses. No socket, no D-Bus: the UI reads
+# our stdout, because both ends live in the same live `dev` session (ADR: drop the /run socket idea).
+#
+# ── PROGRESS PROTOCOL (stdout, one frame per line, stable `SHREK-INSTALL ` prefix) ────────────────────
+#   SHREK-INSTALL BEGIN target=<disk>
+#   SHREK-INSTALL STEP <id> begin        # a phase started
+#   SHREK-INSTALL STEP <id> done         # a phase finished
+#   SHREK-INSTALL FAIL <id> <message>    # the writer died; <id> = phase in flight (or "-")
+#   SHREK-INSTALL DONE                   # all phases complete, disk installed
+# <id> is one of the canonical phases below, emitted in execution order. The writer announces its own
+# phase boundaries with `@PHASE <id> <state>` machine markers on its stdout; we consume those and
+# re-emit them under our stable prefix, so the UI is coupled to THIS contract, not to the writer's prose.
+#   verify     — verify the install media (payload checksums) before touching the target
+#   write      — write the sealed system image to the target disk
+#   layout     — lay out storage (append shrek-layers + shrek-data partitions, mkfs the /home fs)
+#   firstboot  — stage first boot (transplant the provisioning manifest, boot-loader enablement)
+# Anything the writer prints that is NOT a frame goes only to the log, never to our stdout — the stdout
+# channel stays machine-clean so a fragile parser on the UI side can trust every line.
+#
+# Exit status mirrors the writer: 0 on DONE, the writer's non-zero code on FAIL. A crash before any
+# phase `done` is reported as FAIL for the phase that was in flight, so the UI never shows a half-filled
+# bar with no verdict.
+
+usage() {
+    echo "usage: shrek-install-run --target-disk DISK [--provisioning-manifest PATH]" >&2
+    exit 64
+}
+
+emit() { printf 'SHREK-INSTALL %s\n' "$*"; }
+
+# The writer is overridable so the orchestrator's protocol translation can be proven without a real
+# disk or root (scripts/install-orchestrator-proof.sh points this at a stub emitting @PHASE markers).
+TARGET_BIN="${SHREK_INSTALL_TARGET:-/usr/libexec/shrek/shrek-install-target}"
+LOG="${SHREK_INSTALL_RUN_LOG:-/run/shrek/install-run.log}"
+
+TARGET_DISK=
+PROV_MANIFEST=/run/shrek/provisioning/manifest
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target-disk) TARGET_DISK="${2:-}"; shift 2 ;;
+        --provisioning-manifest) PROV_MANIFEST="${2:-}"; shift 2 ;;
+        *) usage ;;
+    esac
+done
+[ -n "$TARGET_DISK" ] || usage
+[ -x "$TARGET_BIN" ] || { echo "install writer not found or not executable: $TARGET_BIN" >&2; exit 69; }
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+: >"$LOG" 2>/dev/null || true
+
+emit "BEGIN target=$TARGET_DISK"
+
+# Stream the writer's stdout through a fifo so we can translate its @PHASE markers live AND still
+# recover its exit code (a plain pipe would swallow the exit status in POSIX sh).
+work="$(mktemp -d "${TMPDIR:-/tmp}/shrek-install-run.XXXXXX")"
+fifo="$work/writer.out"
+mkfifo "$fifo"
+cleanup() { rm -rf "$work" 2>/dev/null || true; }
+trap cleanup EXIT INT TERM
+
+set +e
+"$TARGET_BIN" --target-disk "$TARGET_DISK" --provisioning-manifest "$PROV_MANIFEST" >"$fifo" 2>>"$LOG" &
+writer_pid=$!
+
+cur_phase='-'
+while IFS= read -r line; do
+    # Full writer output (prose + markers) is preserved in the log for diagnosis.
+    printf '%s\n' "$line" >>"$LOG" 2>/dev/null || true
+    case "$line" in
+        '@PHASE '*)
+            set -- $line          # $2=id $3=state (markers are single-token fields by construction)
+            id="${2:-}"; state="${3:-}"
+            [ -n "$id" ] || continue
+            case "$state" in
+                begin) cur_phase="$id"; emit "STEP $id begin" ;;
+                done)  emit "STEP $id done"; cur_phase='-' ;;
+                *)     : ;;        # unknown state: ignore, don't leak to the UI
+            esac
+            ;;
+        *) : ;;                    # non-frame writer chatter stays in the log only
+    esac
+done <"$fifo"
+
+wait "$writer_pid"; rc=$?
+set -e
+
+if [ "$rc" -eq 0 ]; then
+    emit "DONE"
+else
+    emit "FAIL $cur_phase writer exited $rc (see $LOG)"
+fi
+exit "$rc"
