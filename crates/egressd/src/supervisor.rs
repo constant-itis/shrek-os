@@ -83,6 +83,12 @@ pub enum Request {
     Bless(String),
     Unbless(String),
     Repin(String),
+    /// Actuate an ALREADY-ceremony-blessed `web-browsing` record at browser launch (MF-7): install the
+    /// cgroup rule pair now that `shrek-browser.slice` exists. Grants NOTHING not already root-blessed
+    /// via the console ceremony — it only makes a persisted broad bless live — so it is tier-safe on the
+    /// uid-1000 socket (identity-gated, but authority already rests on the prior ceremony). Wire = verb
+    /// only (no cgroup path: the supervisor computes the deterministic slice path from the desktop uid).
+    BrowserUp,
 }
 
 impl Request {
@@ -95,11 +101,12 @@ impl Request {
             Request::Bless(_) => "bless",
             Request::Unbless(_) => "unbless",
             Request::Repin(_) => "repin",
+            Request::BrowserUp => "browser-up",
         }
     }
     pub fn profile(&self) -> &str {
         match self {
-            Request::Status => "-",
+            Request::Status | Request::BrowserUp => "-",
             Request::Bless(p) | Request::Unbless(p) | Request::Repin(p) => p,
         }
     }
@@ -140,6 +147,12 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
         "bless" => Ok(Request::Bless(want_profile(a)?)),
         "unbless" => Ok(Request::Unbless(want_profile(a)?)),
         "repin" => Ok(Request::Repin(want_profile(a)?)),
+        "browser-up" => {
+            if a.is_some() {
+                return Err("browser-up takes no argument");
+            }
+            Ok(Request::BrowserUp)
+        }
         _ => Err("unknown verb"),
     }
 }
@@ -190,6 +203,9 @@ pub fn authorize(peer_uid: u32, req: &Request, desktop_uid: u32) -> Decision {
     }
     match req {
         Request::Status => Decision::Allow,
+        // BrowserUp actuates an existing root-blessed record; it cannot manufacture authority (the
+        // handler no-ops unless web-browsing is already ceremony-blessed), so identity is the only gate.
+        Request::BrowserUp => Decision::Allow,
         Request::Bless(p) | Request::Repin(p) | Request::Unbless(p) => {
             if admits_socket_bless(p) {
                 Decision::Allow
@@ -363,6 +379,10 @@ impl Supervisor {
         resolver: &mut dyn PinResolver,
         at: u64,
     ) -> String {
+        // MF-4: serialize with the transient root `confirmed-*` process for every mutating op — their
+        // store writes / nft reconciles / `/run` projections must never interleave. Best-effort (a lock
+        // failure on a single-user appliance still proceeds), but both writers take it, so they queue.
+        let _lock = if req.is_mutating() { store::lock_store(&self.store).ok() } else { None };
         match req {
             Request::Status => {
                 let b = store::list_bless(&self.store).len();
@@ -379,6 +399,35 @@ impl Supervisor {
                 self.bless(cred, p, exec, resolver, at, true)
             }
             Request::Unbless(p) => self.unbless(cred, p, exec, at),
+            Request::BrowserUp => self.browser_up(cred, exec, at),
+        }
+    }
+
+    /// MF-7: actuate an ALREADY-ceremony-blessed `web-browsing` record at browser launch. Installs the
+    /// cgroup rule pair IFF web-browsing is blessed AND the slice now exists AND the rules aren't already
+    /// present — otherwise a legible no-op (never manufactures authority; never a fault for "not blessed"
+    /// or "slice not up"). The browser launch wrapper calls this after `systemd-run --slice`.
+    fn browser_up(&mut self, cred: &uapi::Ucred, exec: &mut dyn NftExec, at: u64) -> String {
+        if store::load_bless(&self.store, "web-browsing").is_none() {
+            journal(cred, "browser-up", "web-browsing", "noop", "-", "not blessed");
+            return "OK browser-up not-blessed".to_string();
+        }
+        match crate::confirmed::reconcile_web_browsing(&self.store, exec, self.desktop_uid) {
+            Ok(true) => {
+                let _ = store::project_state(&self.store, &self.run);
+                journal(cred, "browser-up", "web-browsing", "accept", "-", "rules installed");
+                let _ = append_event(&self.run, at, "browser-up", "web-browsing", "live");
+                "OK browser-up live".to_string()
+            }
+            Ok(false) => {
+                journal(cred, "browser-up", "web-browsing", "noop", "-", "slice absent or already live");
+                "OK browser-up pending".to_string()
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                journal(cred, "browser-up", "web-browsing", "apply-fail", "-", &msg);
+                "ERR apply-failed".to_string()
+            }
         }
     }
 
@@ -525,9 +574,35 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mu
             }
         }
     }
+
+    // S4: survive the CEREMONY tier across reboot (MF-3/Q4). Raw destinations re-resolve into the
+    // `@raw_pinned` union; a blessed `web-browsing` re-installs its cgroup rule IFF the slice exists yet
+    // (else it stays legibly pending and heals at browser launch via `browser-up`). Uses the production
+    // raw resolver — this is a boot path, not a unit seam (confirmed::reconcile_raw is unit-tested
+    // directly with a fake resolver). With no raw entries + no web-browsing bless this is inert (no
+    // network, no nft mutation), so it does not perturb the profile-tier reconcile above.
+    let mut raw_resolver = crate::confirmed::DotRawResolver;
+    let (raw_ok, raw_pending) = match crate::confirmed::reconcile_raw(store, exec, &mut raw_resolver, at) {
+        Ok((p, pend)) => (p, pend),
+        Err(e) => {
+            eprintln!("egressd[boot]: raw reconcile failed: {e:?}");
+            (0, 0)
+        }
+    };
+    let browser = match crate::confirmed::reconcile_web_browsing(store, exec, desktop_uid()) {
+        Ok(installed) => installed,
+        Err(e) => {
+            eprintln!("egressd[boot]: web-browsing reconcile failed: {e:?}");
+            false
+        }
+    };
+
     let _ = store::project_pinned(store, run);
     let _ = store::project_state(store, run);
-    let summary = format!("reconcile: {ok} restored, {healed} re-resolved, {failed} faulted");
+    let summary = format!(
+        "reconcile: {ok} restored, {healed} re-resolved, {failed} faulted; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
+        if browser { "installed" } else { "pending/na" }
+    );
     eprintln!("egressd[boot]: {summary}");
     summary
 }
@@ -584,7 +659,7 @@ pub fn serve(store: PathBuf, run: PathBuf) -> io::Result<()> {
 
 /// Wall-clock unix seconds for record/notification timestamps. Only the long-running daemon reads the
 /// clock (after NTP has set it); the store/policy libraries stay wall-clock-free (caller-provided).
-fn now_unix() -> u64 {
+pub fn now_unix() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())

@@ -28,10 +28,17 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::store;
+use shrek_policy::egress::Proto;
 
 /// The single baked table this applier mutates. Never created/flushed/deleted here — only its named
 /// set elements (+ the one browser rule) are touched.
 pub const TABLE: &str = "inet shrek_desktop_egress";
+
+/// The baked concatenated set for the advanced RAW tier (S4). Type `ipv4_addr . inet_proto .
+/// inet_service`, so ONE set encodes per-element (ip, proto, port) with ZERO runtime rules — the
+/// element-only invariant `[R2-MF-B]` holds for raw exactly as for the pinned profiles. The single baked
+/// rule `ip daddr . meta l4proto . th dport @raw_pinned accept` matches it.
+pub const RAW_SET: &str = "raw_pinned";
 
 /// Map a sealed profile to the baked nft set the applier pins into. `Some` ONLY for a uid-1000
 /// user-blessed PINNABLE profile: NOT baseline (system-uid egress, declarative), NOT broad (cgroup-
@@ -101,6 +108,28 @@ pub fn list_set(set: &str) -> NftCmd {
     NftCmd::of(&v)
 }
 
+/// One concatenated `@raw_pinned` element: `{ <ip> . <proto> . <port> }` (S4). nft joins argv with
+/// spaces, so the `.` concat separators are their own tokens. Idempotent; one element per command.
+pub fn add_raw_element(addr: Ipv4Addr, proto: Proto, port: u16) -> NftCmd {
+    raw_element_cmd("add", addr, proto, port)
+}
+
+/// `nft delete element inet shrek_desktop_egress raw_pinned { <ip> . <proto> . <port> }`.
+pub fn del_raw_element(addr: Ipv4Addr, proto: Proto, port: u16) -> NftCmd {
+    raw_element_cmd("delete", addr, proto, port)
+}
+
+fn raw_element_cmd(op: &str, addr: Ipv4Addr, proto: Proto, port: u16) -> NftCmd {
+    let addr = addr.to_string();
+    let proto = proto.label().to_string();
+    let port = port.to_string();
+    let mut v = vec![op, "element"];
+    v.extend(table_parts());
+    v.push(RAW_SET);
+    v.extend(["{", &addr, ".", &proto, ".", &port, "}"]);
+    NftCmd::of(&v)
+}
+
 /// `nft -a list chain inet shrek_desktop_egress output` — read rules WITH handles (to find rule 0's
 /// handle for the browser insert, and to find the browser rules' handles for teardown).
 pub fn list_chain() -> NftCmd {
@@ -164,6 +193,57 @@ pub fn parse_set_elements(listing: &str) -> BTreeSet<Ipv4Addr> {
                     if let Ok(a) = tok.trim().parse::<Ipv4Addr>() {
                         out.insert(a);
                     }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Parse the concatenated `(ip, proto, port)` elements out of `nft list set … raw_pinned` output. nft
+/// prints a concat element as `1.2.3.4 . tcp . 8443` — the separator is ` . ` (space-dot-space), NOT a
+/// bare `.` (an IPv4 literal contains dots), so we split each element on " . ". Malformed tuples are
+/// ignored (conservative — keeps the diff from spuriously deleting a well-formed live element).
+pub fn parse_raw_set_elements(listing: &str) -> BTreeSet<(Ipv4Addr, Proto, u16)> {
+    let mut out = BTreeSet::new();
+    let Some(open) = listing.find("elements") else { return out };
+    let tail = &listing[open..];
+    let (Some(lb), Some(rb)) = (tail.find('{'), tail.find('}')) else { return out };
+    if lb >= rb {
+        return out;
+    }
+    for elem in tail[lb + 1..rb].split(',') {
+        let parts: Vec<&str> = elem.trim().split(" . ").map(|s| s.trim()).collect();
+        if parts.len() != 3 {
+            continue;
+        }
+        let (Ok(ip), proto, Ok(port)) = (
+            parts[0].parse::<Ipv4Addr>(),
+            match parts[1] {
+                "tcp" => Some(Proto::Tcp),
+                "udp" => Some(Proto::Udp),
+                _ => None,
+            },
+            parts[2].parse::<u16>(),
+        ) else {
+            continue;
+        };
+        if let Some(proto) = proto {
+            out.insert((ip, proto, port));
+        }
+    }
+    out
+}
+
+/// Find every browser-cgroup rule handle (the `socket cgroupv2 … shrek-browser.slice` accepts inserted
+/// above rule 0) so teardown (`confirmed-unbless web-browsing`) can `delete rule` each by handle.
+pub fn parse_browser_handles(chain_listing: &str) -> Vec<u32> {
+    let mut out = Vec::new();
+    for line in chain_listing.lines() {
+        if line.contains("cgroupv2") && line.contains("shrek-browser.slice") {
+            if let Some(idx) = line.find("# handle ") {
+                if let Ok(h) = line[idx + "# handle ".len()..].trim().parse::<u32>() {
+                    out.push(h);
                 }
             }
         }
@@ -303,6 +383,54 @@ pub fn install_browser_rules(
     exec.run(&browser_stub_accept(handle, cgroup_path, level))
         .map_err(ApplyError::Nft)?;
     Ok(())
+}
+
+/// Remove ALL browser-cgroup rules currently in the chain (web-browsing teardown / `confirmed-unbless
+/// web-browsing`). Idempotent: zero handles ⇒ zero commands ⇒ Ok. Deletes by handle so it removes both
+/// the stub-accept and broad-accept of the pair (MF-5: the panel must not read "Disabled" while the
+/// browser keeps broad egress). A delete error surfaces so the caller parks a fault + keeps the record.
+pub fn uninstall_browser_rules(exec: &mut dyn NftExec) -> Result<usize, ApplyError> {
+    let listing = exec.run(&list_chain()).map_err(ApplyError::Nft)?;
+    let handles = parse_browser_handles(&listing);
+    let mut removed = 0usize;
+    for h in handles {
+        exec.run(&delete_rule(h)).map_err(ApplyError::Nft)?;
+        removed += 1;
+    }
+    Ok(removed)
+}
+
+/// Reconcile the concatenated `@raw_pinned` set to EXACTLY `desired` (the UNION over all blessed raw
+/// entries of their resolved `(ip, proto, port)` tuples — MF-5: computed as a whole set, so removing one
+/// raw destination can never drop another's element when the two share a tuple). Element-only, diffing
+/// against the LIVE set, with add-rollback on any nft error — identical fail-closed discipline to
+/// [`apply_pins`]. Returns the tuples present after the call.
+pub fn apply_raw(
+    exec: &mut dyn NftExec,
+    desired: &[(Ipv4Addr, Proto, u16)],
+) -> Result<Vec<(Ipv4Addr, Proto, u16)>, ApplyError> {
+    let want: BTreeSet<(Ipv4Addr, Proto, u16)> = desired.iter().copied().collect();
+    let live = parse_raw_set_elements(&exec.run(&list_set(RAW_SET)).map_err(ApplyError::Nft)?);
+
+    let to_add: Vec<_> = want.difference(&live).copied().collect();
+    let to_del: Vec<_> = live.difference(&want).copied().collect();
+
+    let mut added: Vec<(Ipv4Addr, Proto, u16)> = Vec::new();
+    for &(ip, proto, port) in &to_add {
+        if let Err(e) = exec.run(&add_raw_element(ip, proto, port)) {
+            for &(a, p, pt) in &added {
+                let _ = exec.run(&del_raw_element(a, p, pt)); // best-effort rollback
+            }
+            return Err(ApplyError::Nft(format!("add raw {ip}.{}.{port}: {e}", proto.label())));
+        }
+        added.push((ip, proto, port));
+    }
+    for &(ip, proto, port) in &to_del {
+        if let Err(e) = exec.run(&del_raw_element(ip, proto, port)) {
+            return Err(ApplyError::Nft(format!("delete raw {ip}.{}.{port}: {e}", proto.label())));
+        }
+    }
+    Ok(want.into_iter().collect())
 }
 
 #[cfg(test)]
@@ -461,5 +589,80 @@ mod tests {
         let e = install_browser_rules(&mut rec, "x/shrek-browser.slice", 2).unwrap_err();
         assert!(matches!(e, ApplyError::Nft(_)));
         assert!(rec.mutations().is_empty(), "no anchor ⇒ no rule inserted");
+    }
+
+    // ---- S4 raw concat set ----------------------------------------------------------------------
+
+    #[test]
+    fn raw_element_cmd_is_a_concat_add_element_never_a_rule() {
+        let c = add_raw_element("203.0.113.7".parse().unwrap(), Proto::Tcp, 8443);
+        assert_eq!(c.0[0], "add");
+        assert_eq!(c.0[1], "element");
+        assert!(c.0.contains(&"raw_pinned".to_string()));
+        // the concat tokens `{ 203.0.113.7 . tcp . 8443 }`
+        let joined = c.0.join(" ");
+        assert!(joined.contains("{ 203.0.113.7 . tcp . 8443 }"), "{joined}");
+        assert!(!c.0.iter().any(|t| t == "rule" || t == "flush"), "never a rule/flush");
+        // delete mirror + udp/port variety.
+        let d = del_raw_element("198.51.100.9".parse().unwrap(), Proto::Udp, 51820);
+        assert_eq!(d.0[0], "delete");
+        assert!(d.0.join(" ").contains("{ 198.51.100.9 . udp . 51820 }"));
+    }
+
+    #[test]
+    fn parse_raw_set_elements_splits_on_space_dot_space_not_ip_dots() {
+        // nft prints a concat set with ` . ` separators; the IP's own dots must NOT confuse the parse.
+        let listing = "table inet shrek_desktop_egress {\n  set raw_pinned {\n    type ipv4_addr . inet_proto . inet_service\n    elements = { 203.0.113.7 . tcp . 8443, 198.51.100.9 . udp . 51820 }\n  }\n}";
+        let got = parse_raw_set_elements(listing);
+        assert!(got.contains(&("203.0.113.7".parse().unwrap(), Proto::Tcp, 8443)));
+        assert!(got.contains(&("198.51.100.9".parse().unwrap(), Proto::Udp, 51820)));
+        assert_eq!(got.len(), 2);
+        // empty set ⇒ empty (inert, fail-closed), never a wildcard.
+        assert!(parse_raw_set_elements("set raw_pinned { type ipv4_addr . inet_proto . inet_service }").is_empty());
+    }
+
+    #[test]
+    fn apply_raw_reconciles_union_and_rolls_back_on_error() {
+        // Live set has one stale tuple; desired swaps it for two — add both, delete the stale, element-only.
+        let mut rec = Rec::new();
+        rec.live = "elements = { 10.0.0.9 . tcp . 443 }".into();
+        let desired = vec![
+            ("203.0.113.7".parse().unwrap(), Proto::Tcp, 8443),
+            ("198.51.100.9".parse().unwrap(), Proto::Udp, 53),
+        ];
+        let present = apply_raw(&mut rec, &desired).unwrap();
+        assert_eq!(present.len(), 2);
+        let muts = rec.mutations();
+        // 2 adds + 1 delete, no rule/flush anywhere.
+        assert_eq!(muts.iter().filter(|c| c.0[0] == "add").count(), 2);
+        assert_eq!(muts.iter().filter(|c| c.0[0] == "delete").count(), 1);
+        assert!(!muts.iter().any(|c| c.0.iter().any(|t| t == "rule" || t == "flush")));
+
+        // On an add failure, every add THIS call is rolled back (never half-open).
+        let mut rec2 = Rec::new();
+        rec2.live = String::new();
+        rec2.fail_on = Some(2); // fail the 2nd add
+        let e = apply_raw(&mut rec2, &desired).unwrap_err();
+        assert!(matches!(e, ApplyError::Nft(_)));
+        let adds = rec2.mutations().iter().filter(|c| c.0[0] == "add").count();
+        let dels = rec2.mutations().iter().filter(|c| c.0[0] == "delete").count();
+        assert_eq!(adds, 2, "attempted both adds");
+        assert_eq!(dels, 1, "rolled back the one successful add");
+    }
+
+    #[test]
+    fn parse_browser_handles_and_uninstall_by_handle() {
+        let listing = "\tchain output { # handle 1\n\t\tmeta skuid 1000 socket cgroupv2 level 2 \"user.slice/user-1000.slice/shrek-browser.slice\" accept # handle 11\n\t\tmeta skuid 1000 socket cgroupv2 level 2 \"user.slice/user-1000.slice/shrek-browser.slice\" ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 accept # handle 12\n\t\tmeta skuid 1000 ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 drop # handle 6\n\t}";
+        assert_eq!(parse_browser_handles(listing), vec![11, 12]);
+        let mut rec = Rec::new();
+        rec.chain = listing.into();
+        let removed = uninstall_browser_rules(&mut rec).unwrap();
+        assert_eq!(removed, 2);
+        let muts = rec.mutations();
+        assert!(muts.iter().all(|c| c.0[0] == "delete" && c.0.contains(&"rule".to_string())));
+        // idempotent: no browser rules ⇒ zero deletes.
+        let mut empty = Rec::new();
+        empty.chain = "meta skuid 1000 drop # handle 6".into();
+        assert_eq!(uninstall_browser_rules(&mut empty).unwrap(), 0);
     }
 }

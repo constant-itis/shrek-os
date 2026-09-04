@@ -173,6 +173,104 @@ pub fn admits_socket_bless(name: &str) -> bool {
     bless_tier(name) == Some(BlessTier::OneClick)
 }
 
+// ---- raw-destination tier (ADR-007 §8 advanced editor, S4) ---------------------------------------
+
+/// A user-added raw egress destination: `host:proto:port`. Unlike a sealed profile, the destination is
+/// authored by uid 1000 — so it may ONLY be added through the full console ceremony (ADR-007 §3/§7,
+/// tier-A), never the one-click socket. The host is resolve-and-pinned over sealed-DoT (or used verbatim
+/// if it is already a dotted-quad literal, mirroring `desktop-ntp`), so the enforced allow is always an
+/// IP the supervisor itself pinned — a ceremony approves the NAME, the sealed resolver supplies the IP.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawTriple {
+    pub host: String,
+    pub proto: Proto,
+    pub port: u16,
+}
+
+impl RawTriple {
+    /// True if `host` is already an IPv4 literal → pin verbatim, NO DoT resolution (like `desktop-ntp`).
+    pub fn is_ip_literal(&self) -> bool {
+        self.host.parse::<std::net::Ipv4Addr>().is_ok()
+    }
+    /// The canonical wire/store form: `host:proto:port`. Round-trips through [`parse_raw_triple`].
+    pub fn to_wire(&self) -> String {
+        format!("{}:{}:{}", self.host, self.proto.label(), self.port)
+    }
+    /// The store TSV line (`host\tproto\tport`) — the ADR §4 flat-file shape.
+    pub fn to_tsv(&self) -> String {
+        format!("{}\t{}\t{}", self.host, self.proto.label(), self.port)
+    }
+}
+
+/// THE one raw-triple grammar (MF-2: defined ONCE, enforced at BOTH the gatekeeperd precheck and the
+/// egressd `confirmed-add-raw` verb — the destination string originates from a uid-1000 socket request,
+/// so it is untrusted even after a ceremony proves human INTENT; the ceremony does not prove the string
+/// is well-formed). Fail-closed. Accepts `host:proto:port` where:
+///   * host — an IPv4 literal, OR an RFC-1123 hostname: dot-separated labels of `[a-z0-9-]`, each 1..=63
+///     and NOT starting/ending with `-`, total ≤ 253, at least one dot (no bare single-label names —
+///     they are LLMNR/mDNS-spoofable and the sealed `resolved.conf` disables those anyway). Lowercase
+///     only (case-folded input is rejected, not silently normalized, so the rendered ceremony diff and
+///     the stored line are byte-identical). Crucially, a host may NOT start with `-` (argv-option
+///     injection into the exec'd verb) and may contain NO whitespace/control (it lands verbatim in the
+///     world-readable `/run/shrek/egress/state` projection the UI trusts — an unescaped value would be a
+///     display-truth line injection).
+///   * proto — exactly `tcp` or `udp` (the concatenated `@raw_pinned` set matches `th dport`, which needs
+///     a transport header; icmp/other have no port and are refused here).
+///   * port — 1..=65535 (0 is not a dialable port).
+pub fn parse_raw_triple(s: &str) -> Result<RawTriple, &'static str> {
+    if s.len() > 300 {
+        return Err("raw destination too long");
+    }
+    if s.bytes().any(|b| b.is_ascii_whitespace() || b.is_ascii_control()) {
+        return Err("raw destination has whitespace/control");
+    }
+    // Split from the RIGHT twice so an (impossible-here) colon in the host can't confuse proto/port;
+    // exactly three colon-separated fields are required.
+    let mut parts = s.split(':');
+    let host = parts.next().ok_or("empty raw destination")?;
+    let proto = parts.next().ok_or("raw destination needs host:proto:port")?;
+    let port = parts.next().ok_or("raw destination needs host:proto:port")?;
+    if parts.next().is_some() {
+        return Err("raw destination has too many ':' fields");
+    }
+    let proto = match proto {
+        "tcp" => Proto::Tcp,
+        "udp" => Proto::Udp,
+        _ => return Err("raw proto must be tcp or udp"),
+    };
+    let port: u16 = port.parse().map_err(|_| "raw port not a number")?;
+    if port == 0 {
+        return Err("raw port must be 1..=65535");
+    }
+    if !valid_raw_host(host) {
+        return Err("raw host is not a valid IPv4 literal or RFC-1123 hostname");
+    }
+    Ok(RawTriple { host: host.to_string(), proto, port })
+}
+
+/// RFC-1123 hostname (or IPv4 literal) validation for a raw host. See [`parse_raw_triple`] for the rules.
+fn valid_raw_host(h: &str) -> bool {
+    if h.is_empty() || h.len() > 253 || h.starts_with('-') {
+        return false;
+    }
+    // An IPv4 literal is accepted verbatim (pinned without DoT).
+    if h.parse::<std::net::Ipv4Addr>().is_ok() {
+        return true;
+    }
+    // Otherwise an RFC-1123 hostname: ≥2 labels, each 1..=63 of [a-z0-9-], no leading/trailing '-'.
+    let labels: Vec<&str> = h.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    labels.iter().all(|l| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,5 +435,58 @@ mod tests {
         // Baseline set is exactly the two system-service profiles.
         let baseline: Vec<_> = DESKTOP_EGRESS_PROFILES.iter().filter(|p| is_baseline_profile(p.name)).collect();
         assert_eq!(baseline.len(), 2, "exactly two baseline profiles");
+    }
+
+    // ---- raw-triple grammar (S4) ----------------------------------------------------------------
+
+    #[test]
+    fn raw_triple_accepts_well_formed_names_and_literals() {
+        let t = parse_raw_triple("example.com:tcp:443").unwrap();
+        assert_eq!(t.host, "example.com");
+        assert_eq!(t.proto, Proto::Tcp);
+        assert_eq!(t.port, 443);
+        assert!(!t.is_ip_literal());
+        assert_eq!(t.to_wire(), "example.com:tcp:443");
+        assert_eq!(t.to_tsv(), "example.com\ttcp\t443");
+        // round-trips through the parser.
+        assert_eq!(parse_raw_triple(&t.to_wire()).unwrap(), t);
+
+        // udp + multi-label + digits + hyphen-interior labels are fine.
+        let u = parse_raw_triple("mqtt-1.iot.example.co.uk:udp:8883").unwrap();
+        assert_eq!(u.proto, Proto::Udp);
+        assert_eq!(u.port, 8883);
+
+        // an IPv4 literal is accepted and pins verbatim (no DoT).
+        let lit = parse_raw_triple("203.0.113.7:tcp:8443").unwrap();
+        assert!(lit.is_ip_literal());
+        assert_eq!(lit.port, 8443);
+    }
+
+    #[test]
+    fn raw_triple_rejects_the_hostile_and_malformed() {
+        for bad in [
+            "",                         // empty
+            "example.com",              // no proto/port
+            "example.com:tcp",          // no port
+            "example.com:tcp:443:x",    // too many fields
+            "example.com:sctp:443",     // proto not tcp/udp
+            "example.com:icmp:0",       // icmp has no port
+            "example.com:tcp:0",        // zero port
+            "example.com:tcp:70000",    // port overflow (>u16)
+            "example.com:tcp:-1",       // negative port
+            "-evil.com:tcp:443",        // leading '-' → argv-option injection
+            "EXAMPLE.com:tcp:443",      // uppercase not silently normalized
+            "under_score.com:tcp:443",  // '_' illegal in RFC-1123 label
+            "singlelabel:tcp:443",      // no dot → LLMNR/mDNS-spoofable, refused
+            "a..b.com:tcp:443",         // empty label
+            "-.com:tcp:443",            // label is just '-'
+            "e.com:tcp: 443",           // whitespace
+            "e.com:tcp:44\n3",          // control char (state-file line injection)
+        ] {
+            assert!(parse_raw_triple(bad).is_err(), "must reject {bad:?}");
+        }
+        // an over-long host (>253) is refused even if otherwise well-formed.
+        let long = format!("{}.com:tcp:443", "a".repeat(260));
+        assert!(parse_raw_triple(&long).is_err(), "over-long host must be refused");
     }
 }

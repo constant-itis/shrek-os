@@ -37,6 +37,12 @@ fn main() {
         Some("resolve") => resolve_cli(&args[1..]),
         Some("apply") => apply_cli(&args[1..]),
         Some("apply-browser") => apply_browser_cli(&args[1..]),
+        // S4 ceremony-commit surface — ROOT ONLY (gatekeeperd execs these after a confirmed SAK
+        // ceremony). `confirmed::cli` enforces geteuid()==0 + re-validation + the store lock.
+        Some("confirmed-bless") => egressd::confirmed::cli(&prepend("bless", &args[1..]), egressd::supervisor::now_unix()),
+        Some("confirmed-unbless") => egressd::confirmed::cli(&prepend("unbless", &args[1..]), egressd::supervisor::now_unix()),
+        Some("confirmed-add-raw") => egressd::confirmed::cli(&prepend("add-raw", &args[1..]), egressd::supervisor::now_unix()),
+        Some("confirmed-remove-raw") => egressd::confirmed::cli(&prepend("remove-raw", &args[1..]), egressd::supervisor::now_unix()),
         _ => {
             eprintln!("egressd: usage:");
             eprintln!("  egressd daemon                                          # run the supervisor (uid-1000 socket)");
@@ -45,10 +51,21 @@ fn main() {
             eprintln!("  egressd resolve --profile <p> [--at <secs>] [--apply]   # DoT-resolve + store pins (+apply)");
             eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
             eprintln!("  egressd apply-browser --path <cgroup> --level <n>       # insert browser-cgroup rules");
+            eprintln!("  egressd confirmed-bless <profile>                       # ROOT-ONLY ceremony commit (web-browsing)");
+            eprintln!("  egressd confirmed-unbless <profile>                     # ROOT-ONLY ceremony revoke");
+            eprintln!("  egressd confirmed-add-raw <host:proto:port>             # ROOT-ONLY ceremony raw add");
+            eprintln!("  egressd confirmed-remove-raw <host:proto:port>          # ROOT-ONLY ceremony raw remove");
             2
         }
     };
     exit(code);
+}
+
+/// Re-frame `confirmed-<verb> <arg>` as the `[verb, arg]` slice `confirmed::cli` expects.
+fn prepend(verb: &str, rest: &[String]) -> Vec<String> {
+    let mut v = vec![verb.to_string()];
+    v.extend_from_slice(rest);
+    v
 }
 
 /// Pull `--flag value` pairs and repeated `--pin name=ip` out of an arg slice. Minimal, dep-free.

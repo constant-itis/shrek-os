@@ -23,11 +23,13 @@
 //! (S2d) — timestamps are CALLER-PROVIDED (the sealed daemons avoid wall-clock reads, per bench_record).
 
 use shrek_policy::desktop_egress::{
-    bless_tier, is_broad_profile, is_prepinned_profile, resolve_desktop, DESKTOP_EGRESS_PROFILES,
+    bless_tier, is_broad_profile, is_prepinned_profile, parse_raw_triple, resolve_desktop, RawTriple,
+    DESKTOP_EGRESS_PROFILES,
 };
 use std::fs;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::path::{Path, PathBuf};
 
@@ -69,7 +71,10 @@ pub fn blessed_dir(store: &Path) -> PathBuf {
 pub fn pinned_dir(store: &Path) -> PathBuf {
     store.join("pinned")
 }
-pub fn raw_dir(store: &Path) -> PathBuf {
+/// The advanced raw-destinations file (ADR-007 §4: a flat `host<TAB>proto<TAB>port` TSV). S2 initially
+/// created `raw` as a directory; S4 corrects that to the ADR §4 flat file — the whole file IS the set,
+/// which is exactly what the union re-pin (MF-5) reads.
+pub fn raw_file(store: &Path) -> PathBuf {
     store.join("raw")
 }
 pub fn applied_dir(store: &Path) -> PathBuf {
@@ -103,16 +108,16 @@ pub fn ensure_store(store: &Path) -> io::Result<()> {
     fs::create_dir_all(store)?;
     let _ = fs::set_permissions(store, fs::Permissions::from_mode(0o700));
     let _ = chown(store, Some(0), Some(0));
-    for sub in [
-        blessed_dir(store),
-        raw_dir(store),
-        pinned_dir(store),
-        applied_dir(store),
-        fault_dir(store),
-    ] {
+    for sub in [blessed_dir(store), pinned_dir(store), applied_dir(store), fault_dir(store)] {
         fs::create_dir_all(&sub)?;
         let _ = fs::set_permissions(&sub, fs::Permissions::from_mode(0o700));
         let _ = chown(&sub, Some(0), Some(0));
+    }
+    // `raw` is a flat FILE now (ADR §4), not a dir. Migrate an S2-era empty `raw/` dir so a later
+    // `add_raw` rename onto the path can't fail with EISDIR (best-effort; only ever empty pre-S4).
+    let raw = raw_file(store);
+    if raw.is_dir() {
+        let _ = fs::remove_dir_all(&raw);
     }
     Ok(())
 }
@@ -498,6 +503,140 @@ pub fn clear_fault(store: &Path, profile: &str) -> io::Result<()> {
     remove_if_present(&fault_dir(store).join(profile))
 }
 
+// ---- raw destinations (S4 advanced ceremony tier; ADR-007 §4 flat TSV) --------------------------
+
+/// Read every raw destination (ADR-007 §4). Fail-closed PER LINE: a line that does not re-parse through
+/// the ONE sealed grammar ([`parse_raw_triple`]) is SKIPPED, never widened; the result is de-duplicated
+/// and preserves file order. A missing file ⇒ empty. This is the union set the raw re-pin reconciles to
+/// (MF-5): removing one entry can never drop another's live element because the whole set is recomputed.
+pub fn list_raw(store: &Path) -> Vec<RawTriple> {
+    let Ok(body) = fs::read_to_string(raw_file(store)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RawTriple> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // Stored TSV `host\tproto\tport`; the grammar splits on ':' (host never contains either).
+        if let Ok(t) = parse_raw_triple(&line.replace('\t', ":")) {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        }
+    }
+    out
+}
+
+/// Add a raw destination (idempotent). Re-validates through the sealed grammar (NEVER trusts the caller —
+/// the triple originated from a uid-1000 socket request even though a ceremony proved intent), then
+/// rewrites the whole file atomically. Caller MUST hold [`lock_store`].
+pub fn add_raw(store: &Path, t: &RawTriple) -> io::Result<()> {
+    if parse_raw_triple(&t.to_wire()).as_ref() != Ok(t) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid raw triple"));
+    }
+    let mut all = list_raw(store);
+    if !all.contains(t) {
+        all.push(t.clone());
+    }
+    write_raw_all(store, &all)
+}
+
+/// Remove a raw destination (idempotent). Rewrites the remaining set. Caller MUST hold [`lock_store`].
+pub fn remove_raw(store: &Path, t: &RawTriple) -> io::Result<()> {
+    let all: Vec<RawTriple> = list_raw(store).into_iter().filter(|x| x != t).collect();
+    write_raw_all(store, &all)
+}
+
+fn write_raw_all(store: &Path, all: &[RawTriple]) -> io::Result<()> {
+    let mut lines: Vec<String> = all.iter().map(|t| t.to_tsv()).collect();
+    lines.sort();
+    lines.dedup();
+    let body = if lines.is_empty() { String::new() } else { format!("{}\n", lines.join("\n")) };
+    // atomic_write(dir=store, leaf="raw") ⇒ writes store/raw via store/.raw.tmp (root:root 0600).
+    atomic_write(store, "raw", &body, 0o600).map(|_| ())
+}
+
+/// A raw destination's resolved cache entry: the IPs currently pinned for one `host:proto:port`. The
+/// applier splits the `@raw_pinned` union back per entry into this companion so the state view can show
+/// which raw destinations are LIVE (have pins) vs still "blessed, waiting" (intent present, no pins yet).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RawPin {
+    pub triple: RawTriple,
+    pub pins: Vec<Ipv4Addr>,
+    /// unix seconds the resolve happened, caller-provided.
+    pub resolved: u64,
+}
+
+/// The raw resolved-cache companion file (beside `raw`). Lines: `host\tproto\tport\tip,ip,…\tat`.
+pub fn raw_pins_file(store: &Path) -> PathBuf {
+    store.join("raw-pins")
+}
+
+/// Rewrite the raw resolved cache wholesale. Only entries whose triple re-parses AND that carry ≥1 pin
+/// are kept (a resolve-failed entry stays OUT, so the state view shows it pending). Caller holds the lock.
+pub fn write_raw_pins(store: &Path, entries: &[RawPin]) -> io::Result<()> {
+    let mut lines: Vec<String> = Vec::new();
+    for e in entries {
+        if e.pins.is_empty() || parse_raw_triple(&e.triple.to_wire()).as_ref() != Ok(&e.triple) {
+            continue;
+        }
+        let ips = e.pins.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",");
+        lines.push(format!("{}\t{}\t{}", e.triple.to_tsv(), ips, e.resolved));
+    }
+    lines.sort();
+    lines.dedup();
+    let body = if lines.is_empty() { String::new() } else { format!("{}\n", lines.join("\n")) };
+    atomic_write(store, "raw-pins", &body, 0o600).map(|_| ())
+}
+
+/// Read the raw resolved cache. Fail-closed per line (a malformed line is skipped).
+pub fn list_raw_pins(store: &Path) -> Vec<RawPin> {
+    let Ok(body) = fs::read_to_string(raw_pins_file(store)) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for line in body.lines() {
+        let f: Vec<&str> = line.split('\t').collect();
+        if f.len() != 5 {
+            continue;
+        }
+        let Ok(triple) = parse_raw_triple(&format!("{}:{}:{}", f[0], f[1], f[2])) else {
+            continue;
+        };
+        let pins: Vec<Ipv4Addr> = f[3].split(',').filter_map(|s| s.parse().ok()).collect();
+        let Ok(resolved) = f[4].parse::<u64>() else {
+            continue;
+        };
+        if !pins.is_empty() {
+            out.push(RawPin { triple, pins, resolved });
+        }
+    }
+    out
+}
+
+// ---- store lock (MF-4: serialize the two root writers) ------------------------------------------
+
+/// An exclusive advisory lock over the whole store, released when dropped. The long-running supervisor
+/// daemon and each transient root `confirmed-*` process both take it around any mutate+`nft`+project
+/// sequence, so their store writes, set reconciles, and `/run` projections can never interleave (torn
+/// display truth / lost `@raw_pinned` elements). The lock file is `root:root 0600` inside the `0700`
+/// store, so only root can contend for it. `flock` blocks (no `LOCK_NB`) → the second writer waits.
+pub struct StoreLock {
+    _f: fs::File,
+}
+
+pub fn lock_store(store: &Path) -> io::Result<StoreLock> {
+    fs::create_dir_all(store)?;
+    let path = store.join(".lock");
+    let f = fs::OpenOptions::new().create(true).write(true).open(&path)?;
+    let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    let _ = chown(&path, Some(0), Some(0));
+    crate::uapi::flock(f.as_raw_fd(), crate::uapi::LOCK_EX)?;
+    Ok(StoreLock { _f: f })
+}
+
 // ---- /run projection ----------------------------------------------------------------------------
 
 /// Project the store's pins into the world-readable `/run/shrek/egress/pinned` map the weather widget
@@ -580,6 +719,35 @@ pub fn project_state(store: &Path, run: &Path) -> io::Result<PathBuf> {
             "profile {name} tier={tier} blessed={blessed} pins={pins_str} refreshed={refreshed_str} fault={fault_str}\n"
         ));
     }
+
+    // Advanced raw-destination tier (S4): one `raw` line per blessed triple, from the intent file joined
+    // with the resolved cache. blessed=1 always (a raw entry is intent by construction); pins=- means
+    // "blessed, waiting for network" (intent-first before the DoT resolve converged), same legible
+    // pending state as a profile. Additive to schema/1 — the S3 reader filters on the `profile ` prefix
+    // and ignores these, so no schema bump is needed. Lines are sorted (deterministic view).
+    let cache = list_raw_pins(store);
+    let mut raw_lines: Vec<String> = Vec::new();
+    for t in list_raw(store) {
+        let rp = cache.iter().find(|r| r.triple == t);
+        let pins_str = match rp {
+            Some(r) if !r.pins.is_empty() => {
+                r.pins.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+            }
+            _ => "-".to_string(),
+        };
+        let refreshed_str = rp.map(|r| r.resolved.to_string()).unwrap_or_else(|| "-".to_string());
+        raw_lines.push(format!(
+            "raw host={} proto={} port={} blessed=1 pins={pins_str} refreshed={refreshed_str}",
+            t.host,
+            t.proto.label(),
+            t.port,
+        ));
+    }
+    raw_lines.sort();
+    for l in raw_lines {
+        body.push_str(&l);
+        body.push('\n');
+    }
     atomic_write(run, "state", &body, 0o644)
 }
 
@@ -634,11 +802,29 @@ mod tests {
     fn ensure_store_lays_out_0700_skeleton() {
         let d = fresh();
         assert_eq!(fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
-        for sub in ["blessed", "raw", "pinned", ".applied", "fault"] {
+        // `raw` is a flat TSV FILE now (ADR §4, S4), not a sub-dir — so the record sub-dirs are these.
+        for sub in ["blessed", "pinned", ".applied", "fault"] {
             let p = d.join(sub);
             assert!(p.is_dir(), "missing sub-dir {sub}");
             assert_eq!(fs::metadata(&p).unwrap().permissions().mode() & 0o777, 0o700);
         }
+        // `raw` must NOT be a directory (an add_raw rename onto it would fail with EISDIR).
+        assert!(!raw_file(&d).is_dir(), "raw must be a flat file, not a dir");
+    }
+
+    #[test]
+    fn ensure_store_migrates_an_s2_era_raw_dir_to_a_file() {
+        let d = tmp();
+        let _ = fs::remove_dir_all(&d);
+        // Simulate the S2-era layout: `raw/` created as a directory.
+        fs::create_dir_all(raw_file(&d)).unwrap();
+        assert!(raw_file(&d).is_dir());
+        ensure_store(&d).unwrap();
+        assert!(!raw_file(&d).is_dir(), "S2-era raw/ dir must be migrated away");
+        // and add_raw now works (the rename onto the path no longer hits EISDIR).
+        let t = shrek_policy::desktop_egress::parse_raw_triple("example.com:tcp:443").unwrap();
+        add_raw(&d, &t).unwrap();
+        assert_eq!(list_raw(&d), vec![t]);
     }
 
     #[test]
@@ -658,6 +844,77 @@ mod tests {
         assert!(write_bless(&d, &BlessRecord { profile: "evil".into(), tier: "weather".into(), blessed: 1 }).is_err());
         // ...and a traversal token never becomes a path.
         assert!(write_bless(&d, &BlessRecord { profile: "../escape".into(), tier: "t".into(), blessed: 1 }).is_err());
+    }
+
+    // ---- S4 raw destinations (flat TSV) ----------------------------------------------------------
+
+    fn raw(host: &str, proto: &str, port: u16) -> RawTriple {
+        shrek_policy::desktop_egress::parse_raw_triple(&format!("{host}:{proto}:{port}")).unwrap()
+    }
+
+    #[test]
+    fn raw_add_list_remove_roundtrips_and_dedups() {
+        let d = fresh();
+        let a = raw("example.com", "tcp", 443);
+        let b = raw("mqtt.example.org", "udp", 8883);
+        add_raw(&d, &a).unwrap();
+        add_raw(&d, &b).unwrap();
+        add_raw(&d, &a).unwrap(); // idempotent
+        let mut got = list_raw(&d);
+        got.sort_by_key(|t| t.to_tsv());
+        assert_eq!(got, vec![a.clone(), b.clone()]);
+        // on-disk shape is the ADR §4 flat TSV, one line per entry.
+        let body = std::fs::read_to_string(raw_file(&d)).unwrap();
+        assert!(body.contains("example.com\ttcp\t443"), "{body}");
+        assert_eq!(body.lines().count(), 2);
+        remove_raw(&d, &a).unwrap();
+        assert_eq!(list_raw(&d), vec![b]);
+    }
+
+    #[test]
+    fn list_raw_skips_malformed_lines_fail_closed() {
+        let d = fresh();
+        // hand-write a mix: one good, one option-injection host, one bad proto, one non-numeric port.
+        std::fs::write(
+            raw_file(&d),
+            "example.com\ttcp\t443\n-evil.com\ttcp\t443\nx.com\tsctp\t443\ny.com\ttcp\tNaN\n",
+        )
+        .unwrap();
+        assert_eq!(list_raw(&d), vec![raw("example.com", "tcp", 443)]);
+    }
+
+    #[test]
+    fn raw_pins_cache_roundtrips_only_nonempty() {
+        let d = fresh();
+        let a = raw("example.com", "tcp", 443);
+        let entries = vec![
+            RawPin { triple: a.clone(), pins: vec![Ipv4Addr::new(203, 0, 113, 7)], resolved: 99 },
+            // an empty-pin entry must NOT be persisted (that entry stays "pending" in the view).
+            RawPin { triple: raw("pending.com", "tcp", 443), pins: vec![], resolved: 99 },
+        ];
+        write_raw_pins(&d, &entries).unwrap();
+        let got = list_raw_pins(&d);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].triple, a);
+        assert_eq!(got[0].pins, vec![Ipv4Addr::new(203, 0, 113, 7)]);
+    }
+
+    #[test]
+    fn project_state_emits_raw_lines_live_and_pending() {
+        let d = fresh();
+        let run = d.join("run");
+        let live = raw("example.com", "tcp", 443);
+        let waiting = raw("later.example.org", "udp", 8883);
+        add_raw(&d, &live).unwrap();
+        add_raw(&d, &waiting).unwrap();
+        // only `live` has a resolved cache entry.
+        write_raw_pins(&d, &[RawPin { triple: live.clone(), pins: vec![Ipv4Addr::new(203, 0, 113, 7)], resolved: 77 }]).unwrap();
+        project_state(&d, &run).unwrap();
+        let state = std::fs::read_to_string(state_map(&run)).unwrap();
+        assert!(state.contains("raw host=example.com proto=tcp port=443 blessed=1 pins=203.0.113.7 refreshed=77"), "{state}");
+        assert!(state.contains("raw host=later.example.org proto=udp port=8883 blessed=1 pins=- refreshed=-"), "{state}");
+        // web-browsing (ceremony tier) still projects via the sealed-table loop, shown-not-toggled.
+        assert!(state.contains("profile web-browsing tier=ceremony blessed=0"), "{state}");
     }
 
     #[test]

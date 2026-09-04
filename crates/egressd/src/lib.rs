@@ -26,6 +26,7 @@
 
 pub mod apply;
 pub mod client;
+pub mod confirmed;
 pub mod dot;
 pub mod store;
 pub mod supervisor;
