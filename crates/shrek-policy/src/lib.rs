@@ -33,6 +33,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod desktop_egress;
 pub mod egress;
 pub mod provenance;
 pub mod swamp;

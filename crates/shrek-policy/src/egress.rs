@@ -19,9 +19,10 @@
 
 /// L4 protocol of a sealed egress grant. Egress enforcement is IPv4-only: gatekeeperd pre-resolves
 /// each grant's host to pinned A-records and shells to a sealed nftables rule matching dst-IP +
-/// proto + dport. `Udp` exists for grammar completeness (`host:proto:port`), but NO sealed profile
-/// uses it today — DNS egress is deliberately absent (hosts are pre-resolved into `/etc/hosts`,
-/// there is no in-sandbox resolver), and the enforcement path proven in the oracle is tcp-dport.
+/// proto + dport. No AGENT profile ([`EGRESS_PROFILES`]) uses `Udp` — DNS egress is deliberately
+/// absent there (hosts are pre-resolved into `/etc/hosts`, no in-sandbox resolver) and the oracle-
+/// proven path is tcp-dport. The DESKTOP baseline is the first `Udp` user: [`crate::desktop_egress`]'s
+/// `desktop-ntp` is SNTP over udp/123 (ADR-007), enforced by the desktop supervisor's own nft table.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
 pub enum Proto {
     Tcp,
