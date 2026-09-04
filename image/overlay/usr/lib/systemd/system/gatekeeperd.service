@@ -18,7 +18,7 @@ ExecStart=/usr/libexec/shrek/gatekeeperd
 Restart=always
 RestartSec=1
 # Scoped privilege: runs as root but bounded to a fixed capability set — a compromised broker still cannot
-# load kernel modules, change net config, raw-socket the network, ptrace, or reboot. What it CAN do:
+# load kernel modules, raw-socket the network (no CAP_NET_RAW), ptrace, or reboot. What it CAN do:
 #   CAP_SYS_ADMIN        the merge (mount / overlayfs / dm-verity / loop) + Bench grant bind-mounts + setquota
 #   CAP_SYS_TTY_CONFIG   the consent ceremony's VT_ACTIVATE/VT_DISALLOCATE on the reserved console VT
 #   CAP_DAC_OVERRIDE     traverse/read `dev`'s 0700 home anchor (/home/dev) + the 0700 Bench pool to
@@ -30,6 +30,14 @@ RestartSec=1
 #   CAP_SYS_RESOURCE     assign a Bench's ext4 project id (quota accounting) and stay quota-exempt itself
 #   CAP_SETUID/SETGID    drop to the `dev` uid (`runuser -u dev`) to write an exported .desktop AS DEV and to
 #                        launch the rootless-podman workload — export/run over the socket EPERM without these.
+#   CAP_NET_ADMIN        the ADR-007 desktop-egress CEREMONY COMMIT: a confirmed `add-raw`/`remove-raw` execs
+#                        `egressd confirmed-*` (still the SOLE nft mutator — apply.rs), which edits the
+#                        ROOT-netns `shrek_desktop_egress` table, so the exec context needs GLOBAL
+#                        CAP_NET_ADMIN. (The agent-egress plane's nft runs in a per-sandbox netns where the
+#                        broker is namespace-root, so it did NOT need this before — the desktop table is the
+#                        host netns. Surfaced by the S6 sealed-VM proof; the S4 oracle ran the commit as
+#                        unrestricted root and missed it.) Marginal cost is ~nil: CAP_SYS_ADMIN already makes
+#                        a compromised broker root-equivalent (HONEST NOTE below).
 # These file-broker caps were added when the ADR-003 Part-2 authz slice moved the Bench file operations on
 # `dev`'s private home onto this socket (they were absent while the broker only merged sysexts) — see
 # docs/bench-authz-consent-slice.md. HONEST NOTE: with CAP_SYS_ADMIN + CAP_DAC_OVERRIDE + CAP_SETUID and no
@@ -38,7 +46,7 @@ RestartSec=1
 # not the cap set. A tighter design — drop to the dev uid for the pure file-side ops, keep only mount +
 # quota + VT as root — is a FILED follow-up (removes DAC_OVERRIDE/CHOWN/most of FOWNER).
 User=root
-CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_RESOURCE CAP_SETUID CAP_SETGID
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_SYS_TTY_CONFIG CAP_DAC_OVERRIDE CAP_CHOWN CAP_FOWNER CAP_SYS_RESOURCE CAP_SETUID CAP_SETGID CAP_NET_ADMIN
 NoNewPrivileges=no
 # IMPORTANT: do NOT add ProtectHome/ProtectSystem/PrivateMounts/ReadOnlyPaths or any sandbox directive
 # that creates a private MOUNT NAMESPACE — the sysext overlay must overmount the HOST /usr and

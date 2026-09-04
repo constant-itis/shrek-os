@@ -151,10 +151,15 @@ pub fn list_chain() -> NftCmd {
 pub fn browser_stub_accept(rule0_handle: u32, path: &str, level: u32) -> NftCmd {
     let h = rule0_handle.to_string();
     let lvl = level.to_string();
+    // nft's lexer treats the cgroup path as a STRING literal — a bare token like
+    // `user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice` fails to parse (it chokes on the
+    // `1000` after `user@`), so the path MUST be passed QUOTED. Verified against the live kernel: bare =>
+    // `syntax error, unexpected number`; quoted => loads clean. (S6 sealed-VM finding.)
+    let qpath = format!("\"{path}\"");
     let mut v = vec!["insert", "rule"];
     v.extend(table_parts());
     v.extend(["output", "handle", &h]);
-    v.extend(["meta", "skuid", "1000", "socket", "cgroupv2", "level", &lvl, path]);
+    v.extend(["meta", "skuid", "1000", "socket", "cgroupv2", "level", &lvl, &qpath]);
     v.extend(["ip", "daddr", "{", "127.0.0.53,", "127.0.0.54", "}", "th", "dport", "53", "accept"]);
     NftCmd::of(&v)
 }
@@ -162,10 +167,11 @@ pub fn browser_stub_accept(rule0_handle: u32, path: &str, level: u32) -> NftCmd 
 pub fn browser_broad_accept(rule0_handle: u32, path: &str, level: u32) -> NftCmd {
     let h = rule0_handle.to_string();
     let lvl = level.to_string();
+    let qpath = format!("\"{path}\""); // quoted string literal — see browser_stub_accept.
     let mut v = vec!["insert", "rule"];
     v.extend(table_parts());
     v.extend(["output", "handle", &h]);
-    v.extend(["meta", "skuid", "1000", "socket", "cgroupv2", "level", &lvl, path, "accept"]);
+    v.extend(["meta", "skuid", "1000", "socket", "cgroupv2", "level", &lvl, &qpath, "accept"]);
     NftCmd::of(&v)
 }
 
@@ -290,7 +296,11 @@ pub struct ShellNft;
 
 impl NftExec for ShellNft {
     fn run(&mut self, cmd: &NftCmd) -> Result<String, String> {
-        let out = Command::new("nft")
+        // ABSOLUTE path, not bare `nft`: the confirmed-* ceremony-commit path is exec'd by gatekeeperd with
+        // env_clear() (empty PATH), so a bare-name spawn fails with ENOENT ("spawn nft: No such file or
+        // directory") and the raw-add ceremony silently declines at commit. The daemon path had a PATH and
+        // masked it. /usr/sbin/nft is the sealed location (Debian usr-merge). (S6 sealed-VM finding.)
+        let out = Command::new("/usr/sbin/nft")
             .args(&cmd.0)
             .output()
             .map_err(|e| format!("spawn nft: {e}"))?;
