@@ -68,6 +68,15 @@ pub fn is_provider_token(token: &str) -> bool {
     provider_host(token).is_some()
 }
 
+/// Is `host` a SEALED ALIAS — a name a daemon resolves through the ROOT-owned `/etc/hosts` (an owner
+/// model binding) or a fixed local bridge, NEVER through public DNS/DoT? The 4 model-provider sealed
+/// names plus the swamp-query broker ([`crate::egress::SWAMP_QUERY_HOST`]). ADR-008 S4 uses this so
+/// gatekeeperd resolves an UNBOUND alias fail-closed (no brain connected) instead of leaking its label
+/// to a public resolver: the public-name egress path is sealed DoT; the alias path is the hosts file.
+pub fn is_sealed_alias_host(host: &str) -> bool {
+    PROVIDER_BINDINGS.iter().any(|b| b.host == host) || host == crate::egress::SWAMP_QUERY_HOST
+}
+
 /// The sealed bind-address grammar: a STRICT IPv4 dotted-quad, or `None`. Rejects hostnames, IPv6, and
 /// anything with whitespace, control, or non-`[0-9.]` bytes BEFORE parsing (so `inet_aton` hex like
 /// `0x7f000001`, octal, and short forms like `127.1` are refused decisively). Returns the parsed
@@ -129,6 +138,19 @@ mod tests {
     fn swamp_broker_is_not_owner_bindable() {
         assert!(PROVIDER_BINDINGS.iter().all(|b| b.host != crate::egress::SWAMP_QUERY_HOST));
         assert_eq!(provider_host("swamp"), None);
+    }
+
+    #[test]
+    fn sealed_aliases_are_the_model_hosts_plus_swamp() {
+        // the 4 model broker names + the swamp broker resolve via /etc/hosts, never public DoT.
+        for h in ["shrek-model", "shrek-model-proxy", "shrek-claude-cli", "shrek-codex-cli"] {
+            assert!(is_sealed_alias_host(h), "{h} must be a sealed alias");
+        }
+        assert!(is_sealed_alias_host(crate::egress::SWAMP_QUERY_HOST));
+        // public DNS names are NOT aliases — they take the sealed-DoT path.
+        for h in ["github.com", "deb.debian.org", "pypi.org", "crates.io", "localhost"] {
+            assert!(!is_sealed_alias_host(h), "{h} must NOT be a sealed alias");
+        }
     }
 
     #[test]

@@ -20,8 +20,10 @@
 //! (as the onion broker shells to `mount`/`systemd-sysext`) and reads `/proc` directly.
 
 use shrek_policy::egress::{EgressProfile, Proto};
+use shrek_policy::provider_bind::is_sealed_alias_host;
+use std::collections::HashMap;
 use std::io::{self, Write};
-use std::net::{Ipv4Addr, ToSocketAddrs};
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -255,6 +257,74 @@ impl Resolved {
     }
 }
 
+/// The DoT query id + timeout for gatekeeperd's privileged public-name resolution (ADR-008 S4). A fixed
+/// id is safe over the authenticated single-query TLS stream (see `shrek_dot`); the timeout fails a hung
+/// resolver closed rather than wedging a sandbox construct.
+const DOT_ID: u16 = 0x9a7e;
+const DOT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The ROOT-owned `/etc/hosts` projection ADR-008 composes (`/run/shrek/hosts`). Overridable ONLY in the
+/// oracle build via `SHREK_HOSTS_PROJECTION` (mirrors the `oracle-env` discipline); the sealed image
+/// compiles the override out and always reads the baked path.
+fn hosts_projection_path() -> PathBuf {
+    #[cfg(feature = "oracle-env")]
+    if let Ok(p) = std::env::var("SHREK_HOSTS_PROJECTION") {
+        if !p.is_empty() {
+            return p.into();
+        }
+    }
+    "/run/shrek/hosts".into()
+}
+
+/// Parse the root-owned hosts projection into a name→IPv4s map. Lines are `<addr> <name…>`; a non-IPv4
+/// address (the `::1 localhost` line) or a comment is skipped. A missing/unreadable file ⇒ empty map (a
+/// sealed alias then fails closed as "unbound", exactly the no-brain-connected path). This is the ONLY
+/// name source gatekeeperd trusts for aliases — root-authored, uid-1000-unwritable (#3121 fixed).
+fn read_hosts_projection() -> HashMap<String, Vec<Ipv4Addr>> {
+    std::fs::read_to_string(hosts_projection_path())
+        .map(|b| parse_hosts_projection(&b))
+        .unwrap_or_default()
+}
+
+/// Pure parse of a hosts-file body into a name→IPv4s map (unit-testable, no I/O). Lines are
+/// `<addr> <name…>`; a non-IPv4 address (`::1 localhost`), a comment, or a blank is skipped.
+fn parse_hosts_projection(body: &str) -> HashMap<String, Vec<Ipv4Addr>> {
+    let mut map: HashMap<String, Vec<Ipv4Addr>> = HashMap::new();
+    for line in body.lines() {
+        let mut it = line.split_whitespace();
+        let Some(addr_s) = it.next() else { continue };
+        let Ok(ip) = addr_s.parse::<Ipv4Addr>() else { continue }; // skips `::1`, comments, blanks
+        for name in it {
+            map.entry(name.to_string()).or_default().push(ip);
+        }
+    }
+    map
+}
+
+/// Resolve ONE egress rule host to its IPv4 A-records — ADR-008 S4, WITHOUT ever consulting `resolved`
+/// (which a uid-1000 NM DNS edit can steer). The #3121 principle applied to gatekeeperd's privileged pin
+/// path: don't harden the owner-controlled resolver, stop using it as a security oracle. The host's
+/// CLASS decides the path — the two are disjoint, so neither can steer the other:
+///   * a sealed ALIAS ([`is_sealed_alias_host`] — the 4 owner-bindable model brokers + the swamp broker)
+///     resolves ONLY from the root-owned `/etc/hosts` projection; absent there ⇒ FAIL-CLOSED (unbound
+///     "no brain connected"), never leaking the alias label to a public resolver;
+///   * every OTHER (public DNS) name resolves ONLY over the shared sealed-DoT client — the hosts file is
+///     NOT consulted, so a poisoned hosts line (or a uid-1000 NM DNS edit) can NEVER steer a public pin.
+/// Fail-closed: an unbound alias, or a public name that won't resolve, ⇒ `Err` (the whole construct aborts).
+fn resolve_host_v4(host: &str, hosts: &HashMap<String, Vec<Ipv4Addr>>) -> io::Result<Vec<Ipv4Addr>> {
+    if is_sealed_alias_host(host) {
+        return match hosts.get(host) {
+            Some(ips) if !ips.is_empty() => Ok(ips.clone()),
+            _ => Err(io::Error::new(
+                io::ErrorKind::Other,
+                format!("sealed alias {host:?} is unbound (no brain connected) — fail closed"),
+            )),
+        };
+    }
+    shrek_dot::resolve_over_dot(host, DOT_ID, DOT_TIMEOUT)
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("sealed-DoT resolve of {host:?} failed: {e}")))
+}
+
 /// Resolve a sealed profile's `host:proto:port` rules to PINNED IPv4. Fail-closed: a rule whose host
 /// yields NO A-record (AAAA-only, NXDOMAIN, resolver error) aborts the whole construct — egress is
 /// IPv4-only and we never silently drop a destination the policy intended to allow.
@@ -271,39 +341,30 @@ pub fn resolve_profile_v4(profile: &EgressProfile) -> io::Result<Resolved> {
 /// per-destination identity (e.g. the swamp broker for the no-SNAT carve-out) survives the union because
 /// its host name is preserved in `hosts` and recognized by [`Resolved::no_masquerade_ips`].
 pub fn resolve_profiles_v4(profiles: &[&EgressProfile]) -> io::Result<Resolved> {
+    // Read the root-owned /etc/hosts projection ONCE (ADR-008 S4): aliases resolve from it, public names
+    // over sealed DoT — `resolved` is never in this privileged path.
+    let hosts_map = read_hosts_projection();
     let mut endpoints: Vec<Endpoint> = Vec::new();
     let mut hosts: Vec<(&'static str, Ipv4Addr)> = Vec::new();
     for profile in profiles {
         for r in profile.rules {
-            let mut first: Option<Ipv4Addr> = None;
-            // getaddrinfo via std; the `:port` makes it a SocketAddr iterator.
-            for sa in (r.host, r.port).to_socket_addrs()? {
-                if let std::net::SocketAddr::V4(v4) = sa {
-                    let ip = *v4.ip();
-                    first.get_or_insert(ip);
-                    let dup = endpoints.iter().any(|o| {
-                        o.ip == ip && o.port == r.port
-                            && matches!((o.proto, r.proto), (Proto::Tcp, Proto::Tcp) | (Proto::Udp, Proto::Udp))
-                    });
-                    if !dup {
-                        endpoints.push(Endpoint { ip, proto: r.proto, port: r.port });
-                    }
+            // Resolve off `resolved`: files (root /etc/hosts) for aliases, sealed DoT for public names.
+            // Non-empty on Ok (fail-closed on a no-A-record host — IPv4-only — aborting the construct).
+            let addrs = resolve_host_v4(r.host, &hosts_map)?;
+            for ip in &addrs {
+                // Every A-record becomes an nft endpoint so the allow-list covers all of a CDN's IPs.
+                let dup = endpoints.iter().any(|o| {
+                    o.ip == *ip && o.port == r.port
+                        && matches!((o.proto, r.proto), (Proto::Tcp, Proto::Tcp) | (Proto::Udp, Proto::Udp))
+                });
+                if !dup {
+                    endpoints.push(Endpoint { ip: *ip, proto: r.proto, port: r.port });
                 }
             }
-            match first {
-                // One pinned IP per name for /etc/hosts (nft still allows every resolved A-record).
-                // Dedupe by name so two profiles naming the same host yield a single hosts line.
-                Some(ip) => {
-                    if !hosts.iter().any(|(h, _)| *h == r.host) {
-                        hosts.push((r.host, ip));
-                    }
-                }
-                None => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::Other,
-                        format!("egress host {:?} has no IPv4 (A) record — fail closed (IPv4-only)", r.host),
-                    ))
-                }
+            // One pinned IP per name for the sandbox's /etc/hosts (nft still allows every A-record).
+            // Dedupe by name so two profiles naming the same host yield a single hosts line.
+            if !hosts.iter().any(|(h, _)| *h == r.host) {
+                hosts.push((r.host, addrs[0]));
             }
         }
     }
@@ -418,6 +479,44 @@ impl Barrier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- ADR-008 S4: resolve off `resolved` (files for aliases, sealed DoT for public names) ----
+
+    #[test]
+    fn parse_hosts_projection_maps_names_and_skips_v6() {
+        let m = parse_hosts_projection("127.0.0.1 localhost\n::1 localhost\n1.2.3.4 shrek-model\n# c\n\n");
+        assert_eq!(m.get("localhost"), Some(&vec![Ipv4Addr::new(127, 0, 0, 1)])); // ::1 line skipped
+        assert_eq!(m.get("shrek-model"), Some(&vec![Ipv4Addr::new(1, 2, 3, 4)]));
+        assert_eq!(m.get("github.com"), None);
+    }
+
+    #[test]
+    fn resolve_alias_comes_only_from_the_root_hosts_file() {
+        // A bound alias resolves from the projection — no network, no DoT.
+        let mut map = HashMap::new();
+        map.insert("shrek-model".to_string(), vec![Ipv4Addr::new(192, 168, 1, 152)]);
+        assert_eq!(resolve_host_v4("shrek-model", &map).unwrap(), vec![Ipv4Addr::new(192, 168, 1, 152)]);
+    }
+
+    #[test]
+    fn unbound_alias_fails_closed_without_touching_dot() {
+        // An alias absent from the projection fails closed IMMEDIATELY (is_sealed_alias_host short-circuits
+        // before any DoT), so the alias label never leaks to a public resolver and the test can't hang.
+        let empty = HashMap::new();
+        let err = resolve_host_v4("shrek-claude-cli", &empty).unwrap_err();
+        assert!(err.to_string().contains("unbound"), "{err}");
+    }
+
+    #[test]
+    fn public_names_never_consult_the_hosts_file() {
+        // The security property: a public name is classified NON-alias, so resolve_host_v4 takes the DoT
+        // branch and NEVER reads the map — a poisoned hosts line for github.com cannot steer the pin. We
+        // assert the classification here (the live DoT resolve + poison-ignored proof is the host oracle's,
+        // which has network); this keeps the unit test fast and network-free.
+        for h in ["github.com", "deb.debian.org", "pypi.org", "crates.io"] {
+            assert!(!is_sealed_alias_host(h), "{h} must take the DoT path, never the hosts file");
+        }
+    }
 
     #[test]
     fn subnet_and_names_are_pure_and_bounded() {

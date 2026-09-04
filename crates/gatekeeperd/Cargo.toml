@@ -5,6 +5,11 @@ edition.workspace = true
 
 [dependencies]
 shrek-policy = { path = "../shrek-policy" }
+# ADR-008 S4: gatekeeperd resolves its PRIVILEGED public-egress-profile pins (github/debian/pypi/crates)
+# over the shared sealed-DoT client — off `resolved` entirely — so a uid-1000 NM DNS edit cannot steer
+# egress policy (the #3121 "don't use the owner-controlled resolver as a security oracle" principle).
+# Owner-bound sealed aliases still resolve from the root-owned /etc/hosts; only public names hit DoT.
+shrek-dot = { path = "../shrek-dot" }
 
 [features]
 # `spike` gates the fs-verity FIXTURE surface (pin-verity CLI + FS_IOC_ENABLE_VERITY) used ONLY by the
@@ -17,5 +22,6 @@ spike = []
 # /run base, seed) to the host/container oracle ONLY. It is DEFAULT-OFF: the shipped image build compiles
 # them out, so root `gatekeeperd bench …` ALWAYS uses the sealed defaults and a redirected environment
 # crossing the sudo boundary can never point it at a dev-writable records/anchor dir (ADR-003 step-7
-# must-fix 1 — the Bench trust anchor). The oracle opts in with `--features oracle-env`.
-oracle-env = []
+# must-fix 1 — the Bench trust anchor). The oracle opts in with `--features oracle-env`. Passes through
+# to shrek-dot (sealed-CA override) + gates the ADR-008 S4 hosts-projection path override.
+oracle-env = ["shrek-dot/oracle-env"]
