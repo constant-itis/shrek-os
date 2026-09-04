@@ -18,8 +18,14 @@
 //!   * S2d — [`supervisor`]: the root daemon — bless/unbless/re-pin over a `SO_PEERCRED`-gated,
 //!     Tier-B-admitted, rate-limited, journaled uid-1000 socket; flush-free startup reconcile. Uses
 //!     [`uapi`] for the one raw syscall (peer creds). ← landed
+//!   * S3  — the bless UX backend: [`client`] (`egressd ask` — the unprivileged uid-1000 socket front
+//!     door the DMS panel/onboarding exec) + [`store::project_state`] (the legible `/run/shrek/egress/
+//!     state` read view). The supervisor's bless is now INTENT-FIRST (a resolve failure leaves the
+//!     profile legibly "blessed, pin-deferred", not silently unblessed) and [`supervisor::reconcile`]
+//!     re-resolves a blessed-but-pinless profile at boot (the first-run self-heal). ← this slice
 
 pub mod apply;
+pub mod client;
 pub mod dot;
 pub mod store;
 pub mod supervisor;

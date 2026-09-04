@@ -22,7 +22,9 @@
 //! S2a scope: state layout + records + projection. NO nft (S2b), NO DoT resolution (S2c), NO socket
 //! (S2d) — timestamps are CALLER-PROVIDED (the sealed daemons avoid wall-clock reads, per bench_record).
 
-use shrek_policy::desktop_egress::{is_broad_profile, resolve_desktop};
+use shrek_policy::desktop_egress::{
+    bless_tier, is_broad_profile, is_prepinned_profile, resolve_desktop, DESKTOP_EGRESS_PROFILES,
+};
 use std::fs;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
@@ -80,6 +82,12 @@ pub fn fault_dir(store: &Path) -> PathBuf {
 /// The world-readable pinned map the weather widget reads (`--resolve` source). `root:root 0644`.
 pub fn pinned_map(run: &Path) -> PathBuf {
     run.join("pinned")
+}
+
+/// The world-readable per-profile STATE view the DMS Connectivity panel + onboarding read (ADR-007 S3).
+/// `root:root 0644` in the `0755` run dir, beside the pinned map.
+pub fn state_map(run: &Path) -> PathBuf {
+    run.join("state")
 }
 
 /// Create the store skeleton: the `root:root 0700` store dir and its five sub-dirs
@@ -517,6 +525,64 @@ pub fn project_pinned(store: &Path, run: &Path) -> io::Result<PathBuf> {
     atomic_write(run, "pinned", &body, 0o644)
 }
 
+/// Project a LEGIBLE per-profile state view to `/run/shrek/egress/state` — the read model the DMS
+/// Connectivity panel + first-run onboarding render (ADR-007 S3), so the UI never reads the `0700` store
+/// and the mutation socket stays write-only (no polling contention). One line per SEALED
+/// `DESKTOP_EGRESS_PROFILES` entry, in the policy's declared order (deterministic), each annotated from
+/// the store. `root:root 0644` in the `0755` run dir, atomic replace — same `[R2-MF-A]` curated-view
+/// discipline as [`project_pinned`]. Call this at EVERY store-mutation site (beside `project_pinned` and
+/// after fault writes), so a CLI/timer re-pin never leaves this view stale.
+///
+/// Line format (schema `shrek-egress-state/1`):
+/// ```text
+/// profile <name> tier=<baseline|one-click|ceremony> blessed=<0|1> pins=<ip,ip,…|-> refreshed=<unix|-> fault=<kind|->
+/// ```
+/// Deliberately projected: only the CLOSED tier + fault-KIND tokens, never the free-text fault reason
+/// (that stays in the journal + `0700` store) — a closed set crossing a parse boundary, fail-closed for
+/// the QML reader `[Fable S3 fix #1/#4]`. A pre-pinned baseline (`desktop-ntp`) surfaces its sealed
+/// LITERAL IPs from policy (they are baked verbatim, never resolved into the store); everything else
+/// surfaces its stored pins. `blessed=1` with `pins=-`/`fault=resolve-fail` is the legible "blessed,
+/// waiting for network/clock" state that intent-first bless + boot reconcile converge.
+pub fn project_state(store: &Path, run: &Path) -> io::Result<PathBuf> {
+    fs::create_dir_all(run)?;
+    let _ = fs::set_permissions(run, fs::Permissions::from_mode(0o755));
+    let _ = chown(run, Some(0), Some(0));
+
+    let mut body = String::from("schema shrek-egress-state/1\n");
+    for prof in DESKTOP_EGRESS_PROFILES {
+        let name = prof.name;
+        // tier is sealed policy (never None here — we iterate the sealed table).
+        let tier = bless_tier(name).map(|t| t.as_str()).unwrap_or("unknown");
+        let blessed = if load_bless(store, name).is_some() { 1 } else { 0 };
+
+        // Pins + last-refresh: a pre-pinned baseline shows its sealed literal IPs (baked verbatim, no
+        // resolve, so nothing in the store); a resolvable profile shows what actually resolved.
+        let (pins, refreshed): (Vec<Ipv4Addr>, Option<u64>) = if is_prepinned_profile(name) {
+            let ips = prof.rules.iter().filter_map(|r| r.host.parse::<Ipv4Addr>().ok()).collect();
+            (ips, None)
+        } else {
+            match load_pin(store, name) {
+                Some(rec) if !rec.pins.is_empty() => {
+                    (rec.pins.iter().map(|p| p.addr).collect(), Some(rec.resolved))
+                }
+                _ => (Vec::new(), None),
+            }
+        };
+        let pins_str = if pins.is_empty() {
+            "-".to_string()
+        } else {
+            pins.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(",")
+        };
+        let refreshed_str = refreshed.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
+        let fault_str = load_fault(store, name).map(|f| f.kind.as_str()).unwrap_or("-");
+
+        body.push_str(&format!(
+            "profile {name} tier={tier} blessed={blessed} pins={pins_str} refreshed={refreshed_str} fault={fault_str}\n"
+        ));
+    }
+    atomic_write(run, "state", &body, 0o644)
+}
+
 // ---- dir listing --------------------------------------------------------------------------------
 
 /// Names of the regular files directly in `dir` (skips the `.<leaf>.tmp` write-temporaries and any
@@ -685,6 +751,71 @@ mod tests {
         let _ = fs::remove_dir_all(&run);
         let map = project_pinned(&d, &run).unwrap();
         assert_eq!(fs::read_to_string(&map).unwrap(), "");
+    }
+
+    #[test]
+    fn state_projection_annotates_every_sealed_profile() {
+        let d = fresh();
+        let run = tmp();
+        let _ = fs::remove_dir_all(&run);
+        // weather blessed + pinned (the happy one-click case).
+        write_bless(&d, &BlessRecord { profile: "weather".into(), tier: "one-click".into(), blessed: 50 }).unwrap();
+        write_pin(&d, &PinRecord {
+            profile: "weather".into(),
+            pins: vec![Pin { name: "api.open-meteo.com".into(), addr: Ipv4Addr::new(5, 6, 7, 8) }],
+            resolved: 99,
+        }).unwrap();
+
+        let map = project_state(&d, &run).unwrap();
+        let body = fs::read_to_string(&map).unwrap();
+        let mut lines = body.lines();
+        assert_eq!(lines.next().unwrap(), "schema shrek-egress-state/1");
+        // One line per sealed profile, in policy order: ntp, updates, weather, web-browsing.
+        assert_eq!(
+            lines.next().unwrap(),
+            "profile desktop-ntp tier=baseline blessed=0 pins=162.159.200.1,162.159.200.123 refreshed=- fault=-",
+            "pre-pinned baseline surfaces its sealed LITERAL IPs from policy"
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "profile desktop-updates tier=baseline blessed=0 pins=- refreshed=- fault=-",
+            "the empty-stub baseline shows no pins"
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "profile weather tier=one-click blessed=1 pins=5.6.7.8 refreshed=99 fault=-",
+            "blessed+pinned weather shows its resolved IP + refresh time"
+        );
+        assert_eq!(
+            lines.next().unwrap(),
+            "profile web-browsing tier=ceremony blessed=0 pins=- refreshed=- fault=-",
+            "the broad profile is ceremony-tier, unblessed here"
+        );
+        assert_eq!(lines.next(), None, "exactly one line per sealed profile + the schema header");
+        // World-readable view; the store stays 0700.
+        assert_eq!(fs::metadata(&map).unwrap().permissions().mode() & 0o777, 0o644);
+        assert_eq!(fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o700);
+        // Atomic: no write-temp left behind.
+        assert!(!run.join(".state.tmp").exists());
+    }
+
+    #[test]
+    fn state_projection_shows_blessed_but_pending_when_pin_deferred() {
+        // Intent-first bless: a bless record with NO pin (resolve deferred until network/clock) renders
+        // "blessed, waiting" — blessed=1, pins=-, fault=resolve-fail — NOT a silently-unblessed profile.
+        let d = fresh();
+        let run = tmp();
+        let _ = fs::remove_dir_all(&run);
+        write_bless(&d, &BlessRecord { profile: "weather".into(), tier: "one-click".into(), blessed: 10 }).unwrap();
+        write_fault(&d, "weather", FaultKind::ResolveFail, "resolver unreachable", 10).unwrap();
+
+        let body = fs::read_to_string(project_state(&d, &run).unwrap()).unwrap();
+        assert!(
+            body.contains("profile weather tier=one-click blessed=1 pins=- refreshed=- fault=resolve-fail"),
+            "pending weather line missing in:\n{body}"
+        );
+        // Only the CLOSED fault KIND token crosses the boundary — never the free-text reason.
+        assert!(!body.contains("resolver unreachable"), "free-text fault reason must not leak into /run/state");
     }
 
     #[test]

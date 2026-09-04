@@ -32,6 +32,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("daemon") => daemon_cli(&args[1..]),
+        Some("ask") => egressd::client::ask(&args[1..]),
         Some("store") => store_cli(&args[1..]),
         Some("resolve") => resolve_cli(&args[1..]),
         Some("apply") => apply_cli(&args[1..]),
@@ -39,6 +40,7 @@ fn main() {
         _ => {
             eprintln!("egressd: usage:");
             eprintln!("  egressd daemon                                          # run the supervisor (uid-1000 socket)");
+            eprintln!("  egressd ask <status|bless|unbless|repin> [profile]      # uid-1000 socket client (the UI front door)");
             eprintln!("  egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
             eprintln!("  egressd resolve --profile <p> [--at <secs>] [--apply]   # DoT-resolve + store pins (+apply)");
             eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
@@ -126,6 +128,7 @@ fn apply_cli(args: &[String]) -> i32 {
         return match apply::unapply(&store, &mut exec, &profile) {
             Ok(()) => {
                 let _ = store::project_pinned(&store, &run);
+                let _ = store::project_state(&store, &run);
                 println!("egressd: unblessed+unpinned {profile}");
                 0
             }
@@ -147,17 +150,20 @@ fn apply_cli(args: &[String]) -> i32 {
         Ok(addrs) => {
             let _ = store::clear_fault(&store, &profile);
             let _ = store::project_pinned(&store, &run);
+            let _ = store::project_state(&store, &run);
             println!("egressd: applied {profile} -> {} element(s)", addrs.len());
             0
         }
         Err(ApplyError::Unmanaged(p)) => {
             // unknown/broad/baseline/pre-pinned: park a fault, install NO element (fail-closed).
             let _ = store::write_fault(&store, &p, FaultKind::UnknownProfile, "not a pinnable set-managed profile", at);
+            let _ = store::project_state(&store, &run);
             eprintln!("egressd apply: {p} is not pinnable — parked unknown-profile fault, no element written");
             1
         }
         Err(ApplyError::Nft(msg)) => {
             let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
+            let _ = store::project_state(&store, &run);
             eprintln!("egressd apply: nft failure (rolled back, deny skeleton stands): {msg}");
             1
         }
@@ -215,6 +221,7 @@ fn resolve_cli(args: &[String]) -> i32 {
         Ok(p) => p,
         Err(e) => {
             let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &e.to_string(), at);
+            let _ = store::project_state(&store, &run);
             eprintln!("egressd resolve: {e} — parked resolve-fail fault, no pin written");
             return 1;
         }
@@ -224,10 +231,12 @@ fn resolve_cli(args: &[String]) -> i32 {
         // write_pin re-validates every name against the sealed profile; a rejection here is a seal/bug
         // fault, not a steer. Fail-closed.
         let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &format!("store: {e}"), at);
+        let _ = store::project_state(&store, &run);
         eprintln!("egressd resolve: store pin rejected: {e}");
         return 1;
     }
     let _ = store::clear_fault(&store, &profile);
+    let _ = store::project_state(&store, &run);
     println!("egressd: resolved {profile} -> {} IP(s) over sealed DoT", pins.len());
     for p in &pins {
         println!("  {} {}", p.name, p.addr);
@@ -239,12 +248,14 @@ fn resolve_cli(args: &[String]) -> i32 {
         return match apply::apply_pins(&store, &mut exec, &profile, &desired) {
             Ok(a) => {
                 let _ = store::project_pinned(&store, &run);
+                let _ = store::project_state(&store, &run);
                 println!("egressd: applied {profile} -> {} element(s)", a.len());
                 0
             }
             Err(e) => {
                 let msg = format!("{e:?}");
                 let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
+                let _ = store::project_state(&store, &run);
                 eprintln!("egressd resolve --apply: {msg}");
                 1
             }
@@ -363,7 +374,9 @@ fn store_cli(args: &[String]) -> i32 {
         }
         "project" => {
             let p = store::project_pinned(&store, &run).map_err(|e| e.to_string())?;
+            let s = store::project_state(&store, &run).map_err(|e| e.to_string())?;
             println!("egressd: projected pinned map -> {}", p.display());
+            println!("egressd: projected state view -> {}", s.display());
             Ok(0)
         }
         "list" => {

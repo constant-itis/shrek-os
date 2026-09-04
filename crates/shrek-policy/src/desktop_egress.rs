@@ -139,6 +139,19 @@ pub enum BlessTier {
     Ceremony,
 }
 
+impl BlessTier {
+    /// The sealed tier as a stable, closed-set token — the ONLY tier representation that crosses the
+    /// `/run/shrek/egress/state` projection boundary to the uid-1000 UI (ADR-007 S3). A closed set (never
+    /// free text), so the QML parser matches it exactly and fails closed on anything else.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BlessTier::Baseline => "baseline",
+            BlessTier::OneClick => "one-click",
+            BlessTier::Ceremony => "ceremony",
+        }
+    }
+}
+
 /// Resolve a desktop profile to its sealed [`BlessTier`]. `None` ⇒ unknown profile (fail-closed).
 pub fn bless_tier(name: &str) -> Option<BlessTier> {
     resolve_desktop(name)?;

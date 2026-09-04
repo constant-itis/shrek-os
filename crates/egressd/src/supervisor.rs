@@ -268,6 +268,36 @@ pub fn append_event(run: &Path, at: u64, verb: &str, profile: &str, result: &str
     std::fs::rename(&tmp, &path)
 }
 
+// ---- resolution seam ----------------------------------------------------------------------------
+
+/// The DoT-resolution seam, mirroring [`NftExec`]: the real supervisor resolves a profile's SEALED
+/// name(s) over the baked sealed-DoT client, but bless/reconcile take this trait so the intent-first
+/// ordering and the boot re-resolve retry are unit-testable WITHOUT a live network (a test double
+/// returns canned pins or a failure). Correctness of the boundary does not depend on the transport;
+/// only the real impl does.
+pub trait PinResolver {
+    /// Resolve `profile`'s own sealed hosts. Returns `(pins, resolver-label)` — the label is the
+    /// resolver IP used, for the journal (`"-"` if unknown). `Err` is a resolution failure (fail-closed:
+    /// the caller parks a `resolve-fail` fault and keeps the deny floor).
+    fn resolve(&mut self, profile: &str) -> Result<(Vec<store::Pin>, String), String>;
+}
+
+/// The production resolver: the sealed DoT client (S2c). Never consults `resolved`/NM/`resolv.conf`/
+/// `getaddrinfo` — the `[R1-MF1]`+`[R2-MF-C]` bypass of uid-1000's name-resolution authority.
+pub struct DotResolver;
+impl PinResolver for DotResolver {
+    fn resolve(&mut self, profile: &str) -> Result<(Vec<store::Pin>, String), String> {
+        // Fixed query id (see dot:: docs — over authenticated single-query TLS the transport is the
+        // security, not the id). Short timeout so a hung resolver fails closed.
+        match dot::resolve_profile_pins_logged(profile, 0x7e57, Duration::from_secs(5)) {
+            Ok((pins, resolver)) => {
+                Ok((pins, resolver.map(|r| r.to_string()).unwrap_or_else(|| "-".into())))
+            }
+            Err(e) => Err(e.to_string()),
+        }
+    }
+}
+
 // ---- the supervisor -----------------------------------------------------------------------------
 
 /// Handler state: the store + run dirs, the sealed desktop uid, and the rate limiter (mutating-attempt
@@ -297,6 +327,7 @@ impl Supervisor {
         cred: &uapi::Ucred,
         raw: &str,
         exec: &mut dyn NftExec,
+        resolver: &mut dyn PinResolver,
         now: Instant,
         at: u64,
     ) -> String {
@@ -320,11 +351,18 @@ impl Supervisor {
                 journal(cred, req.verb(), req.profile(), "deny", "-", reason);
                 format!("ERR denied: {reason}")
             }
-            Decision::Allow => self.execute(cred, &req, exec, at),
+            Decision::Allow => self.execute(cred, &req, exec, resolver, at),
         }
     }
 
-    fn execute(&mut self, cred: &uapi::Ucred, req: &Request, exec: &mut dyn NftExec, at: u64) -> String {
+    fn execute(
+        &mut self,
+        cred: &uapi::Ucred,
+        req: &Request,
+        exec: &mut dyn NftExec,
+        resolver: &mut dyn PinResolver,
+        at: u64,
+    ) -> String {
         match req {
             Request::Status => {
                 let b = store::list_bless(&self.store).len();
@@ -332,51 +370,73 @@ impl Supervisor {
                 journal(cred, "status", "-", "accept", "-", &format!("blessed={b} pinned={p}"));
                 format!("OK status blessed={b} pinned={p}")
             }
-            Request::Bless(p) => self.bless(cred, p, exec, at, false),
+            Request::Bless(p) => self.bless(cred, p, exec, resolver, at, false),
             Request::Repin(p) => {
                 if store::load_bless(&self.store, p).is_none() {
                     journal(cred, "repin", p, "deny", "-", "not blessed");
                     return "ERR not-blessed".to_string();
                 }
-                self.bless(cred, p, exec, at, true)
+                self.bless(cred, p, exec, resolver, at, true)
             }
             Request::Unbless(p) => self.unbless(cred, p, exec, at),
         }
     }
 
-    /// Shared bless / re-pin body: DoT-resolve the profile's SEALED name(s) (never a supplied name),
-    /// store the pins, apply them element-only. Fail-closed at each step with a parked fault.
-    fn bless(&mut self, cred: &uapi::Ucred, profile: &str, exec: &mut dyn NftExec, at: u64, repin: bool) -> String {
+    /// Refresh BOTH `/run` projections after a store change (curated pinned map + legible state view),
+    /// so the uid-1000 UI never reads a stale panel and the weather widget's `--resolve` map stays in
+    /// step. Best-effort: a projection failure never fails the bless it reports.
+    fn reproject(&self) {
+        let _ = store::project_pinned(&self.store, &self.run);
+        let _ = store::project_state(&self.store, &self.run);
+    }
+
+    /// Shared bless / re-pin body. INTENT-FIRST `[Fable S3 fix #4]`: record the durable bless BEFORE
+    /// resolving, so a resolve/apply failure (typically a first-run bless before the clock/network is up)
+    /// leaves the profile legibly "blessed, pin deferred" — boot [`reconcile`] re-resolves it — instead
+    /// of a silently-unblessed profile that never retries. Then DoT-resolve the profile's SEALED name(s)
+    /// (never a supplied name), store the pins, apply element-only. Fail-closed at each step with a
+    /// parked fault + a refreshed state projection (so the panel shows the pending/fault state at once).
+    fn bless(
+        &mut self,
+        cred: &uapi::Ucred,
+        profile: &str,
+        exec: &mut dyn NftExec,
+        resolver: &mut dyn PinResolver,
+        at: u64,
+        repin: bool,
+    ) -> String {
         let verb = if repin { "repin" } else { "bless" };
-        // 1. resolve over sealed DoT (the profile's own sealed hosts — looked up internally).
-        let (pins, resolver) = match dot::resolve_profile_pins_logged(profile, 0x7e57, Duration::from_secs(5)) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = store::write_fault(&self.store, profile, FaultKind::ResolveFail, &e.to_string(), at);
-                journal(cred, verb, profile, "resolve-fail", "-", &e.to_string());
-                let _ = append_event(&self.run, at, verb, profile, "resolve-failed");
-                return "ERR resolve-failed".to_string();
-            }
-        };
-        let rip = resolver.map(|r| r.to_string()).unwrap_or_else(|| "-".into());
-        // 2. persist the pin record (re-validated against the sealed profile by the store).
-        let rec = PinRecord { profile: profile.to_string(), pins: pins.clone(), resolved: at };
-        if let Err(e) = store::write_pin(&self.store, &rec) {
-            let _ = store::write_fault(&self.store, profile, FaultKind::ResolveFail, &format!("store: {e}"), at);
-            journal(cred, verb, profile, "store-fail", &rip, &e.to_string());
-            return "ERR store".to_string();
-        }
-        // 3. record the bless intent (durable across reboot; reconcile re-applies from it).
+        // 0. durable intent FIRST. `repin` only reaches here for an already-blessed profile, so the
+        //    rewrite is a no-op-shaped refresh; a fresh bless persists even if the resolve below fails.
         let _ = store::write_bless(
             &self.store,
             &BlessRecord { profile: profile.to_string(), tier: "one-click".into(), blessed: at },
         );
-        // 4. apply element-only (reconcile @set to the resolved addrs).
+        // 1. resolve over the sealed-DoT seam (the profile's own sealed hosts — looked up internally).
+        let (pins, rip) = match resolver.resolve(profile) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = store::write_fault(&self.store, profile, FaultKind::ResolveFail, &e, at);
+                self.reproject(); // panel now shows blessed=1 pins=- fault=resolve-fail (pending)
+                journal(cred, verb, profile, "resolve-fail", "-", &e);
+                let _ = append_event(&self.run, at, verb, profile, "resolve-failed");
+                return "ERR resolve-failed".to_string();
+            }
+        };
+        // 2. persist the pin record (re-validated against the sealed profile by the store).
+        let rec = PinRecord { profile: profile.to_string(), pins: pins.clone(), resolved: at };
+        if let Err(e) = store::write_pin(&self.store, &rec) {
+            let _ = store::write_fault(&self.store, profile, FaultKind::ResolveFail, &format!("store: {e}"), at);
+            self.reproject();
+            journal(cred, verb, profile, "store-fail", &rip, &e.to_string());
+            return "ERR store".to_string();
+        }
+        // 3. apply element-only (reconcile @set to the resolved addrs).
         let desired: Vec<Ipv4Addr> = pins.iter().map(|p| p.addr).collect();
         match apply::apply_pins(&self.store, exec, profile, &desired) {
             Ok(a) => {
                 let _ = store::clear_fault(&self.store, profile);
-                let _ = store::project_pinned(&self.store, &self.run);
+                self.reproject();
                 let detail = format!("{} ip(s)", a.len());
                 journal(cred, verb, profile, "accept", &rip, &detail);
                 let _ = append_event(&self.run, at, verb, profile, &detail);
@@ -385,6 +445,7 @@ impl Supervisor {
             Err(e) => {
                 let msg = format!("{e:?}");
                 let _ = store::write_fault(&self.store, profile, FaultKind::ApplyFail, &msg, at);
+                self.reproject();
                 journal(cred, verb, profile, "apply-fail", &rip, &msg);
                 let _ = append_event(&self.run, at, verb, profile, "apply-failed");
                 "ERR apply-failed".to_string()
@@ -401,7 +462,7 @@ impl Supervisor {
                 let _ = store::remove_bless(&self.store, profile);
                 let _ = store::remove_pin(&self.store, profile);
                 let _ = store::clear_fault(&self.store, profile);
-                let _ = store::project_pinned(&self.store, &self.run);
+                self.reproject();
                 journal(cred, "unbless", profile, "accept", "-", "revoked");
                 let _ = append_event(&self.run, at, "unbless", profile, "revoked");
                 format!("OK unbless {profile}")
@@ -409,6 +470,7 @@ impl Supervisor {
             Err(e) => {
                 let msg = format!("{e:?}");
                 let _ = store::write_fault(&self.store, profile, FaultKind::ApplyFail, &msg, at);
+                self.reproject();
                 journal(cred, "unbless", profile, "apply-fail", "-", &msg);
                 "ERR apply-failed".to_string()
             }
@@ -419,17 +481,42 @@ impl Supervisor {
 /// Startup reconcile: re-add every blessed profile's stored pins as ELEMENTS into the existing baked
 /// sets. Element-only (never flush/recreate), so a daemon restart or reboot restores runtime allows
 /// without touching the S1 deny floor. A profile whose baked set is absent (the oneshot didn't run)
-/// fails its apply and parks a fault — fail-closed. Returns a one-line summary for the journal.
-pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, at: u64) -> String {
+/// fails its apply and parks a fault — fail-closed.
+///
+/// SELF-HEAL `[Fable S3 fix #4]`: a blessed one-click profile with NO stored pin — the intent-first
+/// residue of a first-run bless made before the clock/network converged — gets a fresh DoT re-resolve
+/// here (the ONLY place a root-side retry belongs; a UI/socket retry would starve the owner's own
+/// clicks against the rate limiter). So a weather bless from the sealed onboarding eventually becomes a
+/// live allow on a later boot without the user re-discovering the Settings toggle, and stays a legible
+/// pending until then. Returns a one-line summary for the journal.
+pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mut dyn PinResolver, at: u64) -> String {
     let mut ok = 0usize;
     let mut failed = 0usize;
+    let mut healed = 0usize;
     for b in store::list_bless(store) {
         if !admits_socket_bless(&b.profile) {
             continue; // only pinnable one-click profiles carry runtime elements
         }
-        let desired: Vec<Ipv4Addr> = store::load_pin(store, &b.profile)
+        let mut desired: Vec<Ipv4Addr> = store::load_pin(store, &b.profile)
             .map(|r| r.pins.iter().map(|p| p.addr).collect())
             .unwrap_or_default();
+        if desired.is_empty() {
+            // Blessed but pin-deferred: try to complete it now that (maybe) the network/clock are up.
+            match resolver.resolve(&b.profile) {
+                Ok((pins, _)) if !pins.is_empty() => {
+                    let rec = PinRecord { profile: b.profile.clone(), pins: pins.clone(), resolved: at };
+                    if store::write_pin(store, &rec).is_ok() {
+                        desired = pins.iter().map(|p| p.addr).collect();
+                        let _ = store::clear_fault(store, &b.profile);
+                        healed += 1;
+                    }
+                }
+                _ => {
+                    // still unreachable — keep the profile legibly pending, retry next boot.
+                    let _ = store::write_fault(store, &b.profile, FaultKind::ResolveFail, "reconcile: deferred", at);
+                }
+            }
+        }
         match apply::apply_pins(store, exec, &b.profile, &desired) {
             Ok(_) => ok += 1,
             Err(e) => {
@@ -439,7 +526,8 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, at: u64) -> S
         }
     }
     let _ = store::project_pinned(store, run);
-    let summary = format!("reconcile: {ok} restored, {failed} faulted");
+    let _ = store::project_state(store, run);
+    let summary = format!("reconcile: {ok} restored, {healed} re-resolved, {failed} faulted");
     eprintln!("egressd[boot]: {summary}");
     summary
 }
@@ -463,7 +551,8 @@ pub fn serve(store: PathBuf, run: PathBuf) -> io::Result<()> {
 
     // Reconcile stored blesses into the (already baked + loaded) named sets. Never flushes the table.
     let mut boot_exec = ShellNft;
-    reconcile(&store, &run, &mut boot_exec, now_unix());
+    let mut boot_resolver = DotResolver;
+    reconcile(&store, &run, &mut boot_exec, &mut boot_resolver, now_unix());
 
     let mut sup = Supervisor::new(store, run, duid);
     for conn in listener.incoming() {
@@ -480,7 +569,8 @@ pub fn serve(store: PathBuf, run: PathBuf) -> io::Result<()> {
         let resp = match read_request(&mut stream) {
             Ok(line) => {
                 let mut exec = ShellNft;
-                sup.handle(&cred, &line, &mut exec, Instant::now(), now_unix())
+                let mut resolver = DotResolver;
+                sup.handle(&cred, &line, &mut exec, &mut resolver, Instant::now(), now_unix())
             }
             Err(e) => {
                 journal(&cred, "?", "-", "read-error", "-", e);
@@ -590,7 +680,8 @@ mod tests {
         let mut denied = 0;
         let mut limited = 0;
         for _ in 0..(RATE_MAX + 3) {
-            let r = sup.handle(&cred, "bless web-browsing", &mut exec, t0, 0);
+            // web-browsing is denied at the tier gate BEFORE resolve/nft, so both doubles must go untouched.
+            let r = sup.handle(&cred, "bless web-browsing", &mut exec, &mut NoopResolver, t0, 0);
             if r.starts_with("ERR denied") {
                 denied += 1;
             } else if r == "ERR rate-limited" {
@@ -607,6 +698,117 @@ mod tests {
         fn run(&mut self, _cmd: &apply::NftCmd) -> Result<String, String> {
             panic!("nft must not be invoked on a rejected/denied request");
         }
+    }
+
+    /// A resolver that must never be called (rejected/denied paths short-circuit before resolution).
+    struct NoopResolver;
+    impl PinResolver for NoopResolver {
+        fn resolve(&mut self, _profile: &str) -> Result<(Vec<store::Pin>, String), String> {
+            panic!("resolver must not be invoked on a rejected/denied request");
+        }
+    }
+
+    /// A recording nft double that always succeeds — lets the bless success/apply path run in tests.
+    struct OkExec;
+    impl NftExec for OkExec {
+        fn run(&mut self, _cmd: &apply::NftCmd) -> Result<String, String> {
+            Ok(String::new())
+        }
+    }
+
+    /// A canned resolver: `Ok(pins)` or `Err(reason)`, deterministic and network-free.
+    struct FakeResolver(Result<Vec<store::Pin>, String>);
+    impl PinResolver for FakeResolver {
+        fn resolve(&mut self, _profile: &str) -> Result<(Vec<store::Pin>, String), String> {
+            self.0.clone().map(|pins| (pins, "203.0.113.53".to_string()))
+        }
+    }
+
+    /// Distinct store + run dirs (the store has its own `pinned/` sub-dir, so the run projection's
+    /// `pinned` FILE must live in a separate dir — mirrors the real `/home` store vs `/run` split).
+    fn sup_dirs(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let base = std::env::var("CARGO_TARGET_TMPDIR").unwrap_or_else(|_| "/tmp".into());
+        let root = std::path::PathBuf::from(base).join(format!("egressd-s3-{}-{}", std::process::id(), tag));
+        let _ = std::fs::remove_dir_all(&root);
+        let store = root.join("store");
+        let run = root.join("run");
+        store::ensure_store(&store).unwrap();
+        (store, run)
+    }
+
+    #[test]
+    fn bless_is_intent_first_when_resolve_fails() {
+        // A resolve failure (first-run before clock/network) must leave the profile BLESSED-but-pending,
+        // not silently unblessed: the bless record persists, a resolve-fail fault is parked, and the
+        // /run/state view renders blessed=1 pins=- fault=resolve-fail.
+        let (store_d, run) = sup_dirs("intent-first");
+        let mut sup = Supervisor::new(store_d.clone(), run.clone(), 1000);
+        let cred = uapi::Ucred { pid: 1, uid: 1000, gid: 1000 };
+        let mut exec = OkExec;
+        let mut resolver = FakeResolver(Err("resolver unreachable".into()));
+
+        let r = sup.handle(&cred, "bless weather", &mut exec, &mut resolver, Instant::now(), 10);
+        assert_eq!(r, "ERR resolve-failed");
+        assert!(store::load_bless(&store_d, "weather").is_some(), "bless intent must persist through resolve failure");
+        assert_eq!(store::load_fault(&store_d, "weather").unwrap().kind, FaultKind::ResolveFail);
+        let state = std::fs::read_to_string(store::state_map(&run)).unwrap();
+        assert!(
+            state.contains("profile weather tier=one-click blessed=1 pins=- refreshed=- fault=resolve-fail"),
+            "pending state not projected:\n{state}"
+        );
+    }
+
+    #[test]
+    fn bless_success_projects_pins_and_clears_fault() {
+        let (store_d, run) = sup_dirs("bless-ok");
+        let mut sup = Supervisor::new(store_d.clone(), run.clone(), 1000);
+        let cred = uapi::Ucred { pid: 1, uid: 1000, gid: 1000 };
+        let mut exec = OkExec;
+        let pins = vec![store::Pin { name: "api.open-meteo.com".into(), addr: "5.6.7.8".parse().unwrap() }];
+        let mut resolver = FakeResolver(Ok(pins));
+
+        let r = sup.handle(&cred, "bless weather", &mut exec, &mut resolver, Instant::now(), 42);
+        assert_eq!(r, "OK bless weather 1");
+        assert!(store::load_fault(&store_d, "weather").is_none());
+        let state = std::fs::read_to_string(store::state_map(&run)).unwrap();
+        assert!(state.contains("profile weather tier=one-click blessed=1 pins=5.6.7.8 refreshed=42 fault=-"), "{state}");
+        // the curated pinned map (weather widget --resolve source) is refreshed too.
+        assert_eq!(std::fs::read_to_string(store::pinned_map(&run)).unwrap(), "api.open-meteo.com 5.6.7.8\n");
+    }
+
+    #[test]
+    fn reconcile_reresolves_a_blessed_but_pinless_profile() {
+        // The self-heal: a blessed weather with no pin (first-run residue) becomes live once the resolver
+        // succeeds at a later boot — without any UI/socket action.
+        let (store_d, run) = sup_dirs("reconcile-heal");
+        store::write_bless(&store_d, &BlessRecord { profile: "weather".into(), tier: "one-click".into(), blessed: 1 }).unwrap();
+        store::write_fault(&store_d, "weather", FaultKind::ResolveFail, "was offline", 1).unwrap();
+        assert!(store::load_pin(&store_d, "weather").is_none());
+
+        let mut exec = OkExec;
+        let pins = vec![store::Pin { name: "api.open-meteo.com".into(), addr: "9.9.9.9".parse().unwrap() }];
+        let mut resolver = FakeResolver(Ok(pins));
+        let summary = reconcile(&store_d, &run, &mut exec, &mut resolver, 77);
+
+        assert!(summary.contains("1 re-resolved"), "summary={summary}");
+        assert_eq!(store::load_pin(&store_d, "weather").unwrap().pins[0].addr, "9.9.9.9".parse::<Ipv4Addr>().unwrap());
+        assert!(store::load_fault(&store_d, "weather").is_none(), "fault cleared once the pin lands");
+        let state = std::fs::read_to_string(store::state_map(&run)).unwrap();
+        assert!(state.contains("profile weather tier=one-click blessed=1 pins=9.9.9.9 refreshed=77 fault=-"), "{state}");
+    }
+
+    #[test]
+    fn reconcile_keeps_pinless_profile_pending_when_still_offline() {
+        let (store_d, run) = sup_dirs("reconcile-offline");
+        store::write_bless(&store_d, &BlessRecord { profile: "weather".into(), tier: "one-click".into(), blessed: 1 }).unwrap();
+        let mut exec = OkExec;
+        let mut resolver = FakeResolver(Err("still offline".into()));
+        let summary = reconcile(&store_d, &run, &mut exec, &mut resolver, 5);
+
+        assert!(summary.contains("0 re-resolved"), "summary={summary}");
+        assert!(store::load_bless(&store_d, "weather").is_some(), "still blessed (intent preserved)");
+        assert!(store::load_pin(&store_d, "weather").is_none(), "no pin yet");
+        assert_eq!(store::load_fault(&store_d, "weather").unwrap().kind, FaultKind::ResolveFail);
     }
 
     #[test]
