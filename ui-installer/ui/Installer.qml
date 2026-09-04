@@ -13,12 +13,18 @@ import "../state"
 ShellRoot {
     id: root
     property bool fault: (Quickshell.env("SHREK_INSTALLER_FAULT") || "") === "1"
-    property bool firstrunMode: (Quickshell.env("SHREK_INSTALLER_SCREEN") || "") === "firstrun"
+    // First-run is a small 2-step flow (ADR-007 S3): owner enroll -> Connectivity onboarding. Both the
+    // plain `firstrun` and `firstrun-connectivity` env pins select first-run mode (the latter jumps the
+    // render harness straight to the onboarding step).
+    property bool firstrunMode: (Quickshell.env("SHREK_INSTALLER_SCREEN") || "").indexOf("firstrun") === 0
+    property int firstrunStep: 0   // 0 = owner enroll, 1 = Connectivity onboarding
 
     Component.onCompleted: {
         var e = Quickshell.env("SHREK_INSTALLER_SCREEN") || ""
-        if (e.length > 0 && e !== "firstrun") Intent.jumpTo(e)   // harness: pin a flow screen; real run starts at welcome
-        console.log("SHREK-INSTALLER surfaces instantiated: screen=" + (root.firstrunMode ? "firstrun" : Intent.screen) + " fault=" + root.fault)
+        if (e === "firstrun-connectivity") root.firstrunStep = 1
+        else if (e.length > 0 && e.indexOf("firstrun") !== 0) Intent.jumpTo(e)  // harness: pin a flow screen; real run starts at welcome
+        console.log("SHREK-INSTALLER surfaces instantiated: screen="
+            + (root.firstrunMode ? ("firstrun[" + root.firstrunStep + "]") : Intent.screen) + " fault=" + root.fault)
     }
 
     PanelWindow {
@@ -32,7 +38,7 @@ ShellRoot {
         Loader {
             anchors.fill: parent
             sourceComponent: {
-                if (root.firstrunMode) return cFirstrun
+                if (root.firstrunMode) return root.firstrunStep === 1 ? cFirstrunConn : cFirstrun
                 switch (Intent.screen) {
                 case "locale":   return cLocale
                 case "name":     return cName
@@ -52,6 +58,7 @@ ShellRoot {
         Component { id: cErase;    EraseConfirm {} }
         Component { id: cProgress; Progress {} }
         Component { id: cDone;     Done {} }
-        Component { id: cFirstrun; OwnerEnroll { fault: root.fault } }
+        Component { id: cFirstrun; OwnerEnroll { fault: root.fault; onContinued: root.firstrunStep = 1 } }
+        Component { id: cFirstrunConn; FirstrunConnectivity { onBack: root.firstrunStep = 0 } }
     }
 }

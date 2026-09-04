@@ -80,6 +80,7 @@ shot progress-details progress "" 1
 shot done           done
 shot firstrun       firstrun
 shot firstrun-fault firstrun 1
+shot firstrun-connectivity firstrun-connectivity
 
 echo "=== grim.log ==="; cat /tmp/grim.log 2>/dev/null || true
 chown -R "${HOST_UID}:${HOST_GID}" /work/out/preview-installer 2>/dev/null || true

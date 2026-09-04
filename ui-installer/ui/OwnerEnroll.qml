@@ -12,6 +12,8 @@ import "../theme"
 Item {
     id: screen
     property bool fault: false
+    // Advance to the first-run Connectivity onboarding step (ADR-007 S3). Static screen otherwise.
+    signal continued()
 
     ColumnLayout {
         anchors.fill: parent
@@ -99,6 +101,7 @@ Item {
             Layout.fillWidth: true
             asideText: "Password already set at the text screen"
             primaryText: "Confirm & continue"
+            onPrimaryClicked: screen.continued()
         }
     }
 }
