@@ -60,10 +60,21 @@ impl RawResolver for DotRawResolver {
 // ---- browser cgroup convention (MF-7) -----------------------------------------------------------
 
 /// The deterministic cgroup path + ancestor level for the browser slice under the desktop user's
-/// session (`user.slice/user-<uid>.slice/shrek-browser.slice`). Deterministic from the uid, so the
-/// `browser-up` socket verb needs NO path on the wire (wire = verb only, per the S2 discipline).
+/// session. Deterministic from the uid, so the `browser-up` socket verb needs NO path on the wire
+/// (wire = verb only, per the S2 discipline) — a uid-1000-supplied path would be a spoof of "which
+/// cgroup is the browser," so the daemon derives it and never trusts one.
+///
+/// The launch path is `systemd-run --user --scope --slice=shrekbrowser.slice` (S6a), which places the
+/// scope INSIDE the user manager's own cgroup, so the real, measured path is FOUR components:
+///   `user.slice/user-<uid>.slice/user@<uid>.service/shrekbrowser.slice`  →  nft ancestor level 4
+/// (nft `socket cgroupv2 level N` is 1-indexed from the root and N == the component count). The slice
+/// name is DELIBERATELY un-hyphenated: systemd treats `-` as a cgroup hierarchy separator, so a
+/// `shrek-browser.slice` would be forced under a synthetic `shrek.slice` parent (5 components, fragile);
+/// `shrekbrowser.slice` lands flat. `user@<uid>.service` is the user manager's own cgroup — stable and
+/// identical in the sealed-VM autologin session and on the installed product. S6b asserts the LIVE path
+/// equals this constant before trusting the matcher.
 pub fn browser_cgroup(uid: u32) -> (String, u32) {
-    (format!("user.slice/user-{uid}.slice/shrek-browser.slice"), 2)
+    (format!("user.slice/user-{uid}.slice/user@{uid}.service/shrekbrowser.slice"), 4)
 }
 
 /// Does the browser slice exist yet? The cgroupv2 rule can only be inserted once the slice does (nft

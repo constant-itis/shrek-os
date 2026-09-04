@@ -1,0 +1,18 @@
+#!/bin/sh
+# Shrek OS — ADR-007 S6a: the browser launcher that routes Firefox into shrekbrowser.slice.
+#
+# web-browsing egress is unpinnable, so it is enforced by a cgroup match (Q7) on the desktop user's
+# shrekbrowser.slice — NOT a destination set. For that match to ever fire, the browser must actually run
+# INSIDE that slice. Firefox's stock .desktop Execs firefox directly (lands in the session scope, matches
+# nothing), so this launcher (wired as the .desktop Exec) starts it as a transient --user --scope inside
+# the slice. A --scope (not --service) execs the payload itself, so the full session env — WAYLAND_DISPLAY,
+# DBUS_SESSION_BUS_ADDRESS, XDG_RUNTIME_DIR, portals — is inherited verbatim (a --service would run under
+# the user manager's bare env and fall back to X11 → no display → fail). Scope names auto-generate, so a
+# second launch never collides.
+#
+# The slice name is DELIBERATELY un-hyphenated: systemd treats `-` as a cgroup hierarchy separator, so
+# `shrek-browser.slice` would nest under a synthetic `shrek.slice`; `shrekbrowser.slice` lands flat at
+# user.slice/user-<uid>.slice/user@<uid>.service/shrekbrowser.slice (the exact path egressd's
+# browser_cgroup() bakes into the nft matcher). A static shrekbrowser.slice user unit (shipped alongside)
+# keeps that cgroup id alive for the whole login.
+exec systemd-run --user --scope --slice=shrekbrowser.slice -- /usr/lib/shrek/shrek-browser-inner "$@"

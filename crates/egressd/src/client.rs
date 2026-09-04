@@ -37,7 +37,7 @@ pub fn ask(args: &[String]) -> i32 {
     let verb = match args.first() {
         Some(v) => v.as_str(),
         None => {
-            eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin> [profile]");
+            eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin|browser-up> [profile]");
             return 2;
         }
     };
@@ -107,6 +107,16 @@ fn build_line(verb: &str, profile: Option<&str>) -> Result<String, String> {
             }
             Ok("status\n".into())
         }
+        // valueless verb — the browser launcher fires it AFTER the scope joins shrekbrowser.slice, so the
+        // supervisor installs the cgroup accept-pair (no-op unless web-browsing is already blessed). No
+        // argument: the daemon derives the cgroup path from the peer uid, never from the wire (a supplied
+        // path would be a spoof of "which cgroup is the browser").
+        "browser-up" => {
+            if profile.is_some() {
+                return Err("`browser-up` takes no argument".into());
+            }
+            Ok("browser-up\n".into())
+        }
         "bless" | "unbless" | "repin" => {
             let p = profile.ok_or_else(|| format!("`{verb}` needs a profile (e.g. `egressd ask {verb} weather`)"))?;
             if !valid_client_token(p) {
@@ -118,7 +128,7 @@ fn build_line(verb: &str, profile: Option<&str>) -> Result<String, String> {
             }
             Ok(line)
         }
-        other => Err(format!("unknown verb `{other}` (want status|bless|unbless|repin)")),
+        other => Err(format!("unknown verb `{other}` (want status|bless|unbless|repin|browser-up)")),
     }
 }
 
@@ -143,6 +153,14 @@ mod tests {
         assert_eq!(build_line("bless", Some("weather")).unwrap(), "bless weather\n");
         assert_eq!(build_line("unbless", Some("weather")).unwrap(), "unbless weather\n");
         assert_eq!(build_line("repin", Some("weather")).unwrap(), "repin weather\n");
+        assert_eq!(build_line("browser-up", None).unwrap(), "browser-up\n");
+    }
+
+    #[test]
+    fn build_line_browser_up_is_valueless() {
+        // mirrors the daemon: browser-up carries NO argument (the cgroup is derived from the peer uid).
+        assert!(build_line("browser-up", Some("web-browsing")).is_err());
+        assert!(build_line("browser-up", Some("anything")).is_err());
     }
 
     #[test]

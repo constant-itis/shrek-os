@@ -306,7 +306,7 @@ fn resolve_cli(args: &[String]) -> i32 {
 
 /// `egressd apply-browser --path <cgroup> --level <n>` — insert the sole runtime rule pair
 /// (browser-cgroup accept + browser-scope stub-accept) above rule 0. Driven at browser launch / by the
-/// oracle when the `shrek-browser.slice` cgroup exists.
+/// oracle when the `shrekbrowser.slice` cgroup exists.
 fn apply_browser_cli(args: &[String]) -> i32 {
     let opts = match parse_opts(args) {
         Ok(o) => o,

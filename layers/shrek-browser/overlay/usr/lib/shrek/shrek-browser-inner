@@ -1,0 +1,12 @@
+#!/bin/sh
+# Shrek OS — ADR-007 S6a: the in-slice payload of the browser launcher.
+#
+# This runs INSIDE shrekbrowser.slice (the --scope has already joined it before exec'ing us), so the
+# slice's cgroup exists by the time we ask the supervisor to install the matcher — the "slice not up yet"
+# race is dead by construction, no polling. `egressd ask browser-up` is a valueless request over the
+# uid-1000 socket; the root supervisor derives the cgroup path from our uid (never from the wire) and
+# installs the cgroup accept-pair IFF web-browsing is already ceremony-blessed. It is a safe no-op when
+# unblessed ("OK browser-up not-blessed"), so we never block the browser on it — `|| true` swallows any
+# unreachable-supervisor / rate-limited reply. Then exec the real Firefox in the same cgroup.
+/usr/libexec/shrek/egressd ask browser-up || true
+exec /usr/bin/firefox-esr "$@"

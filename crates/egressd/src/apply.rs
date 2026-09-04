@@ -13,7 +13,7 @@
 //!     (the real kernel truth), adding the new, deleting the stale. On any nft error it ROLLS BACK the
 //!     elements it added this call, so a partial apply never half-opens an allow.
 //!   * BROAD profile (`web-browsing`): unpinnable, so instead of a set element the supervisor inserts a
-//!     cgroup-scoped accept pair ABOVE rule 0 (the stub-drop), matched on `shrek-browser.slice`. nft
+//!     cgroup-scoped accept pair ABOVE rule 0 (the stub-drop), matched on `shrekbrowser.slice`. nft
 //!     resolves the cgroup PATH to an id at load time, so this rule can only be inserted once the slice
 //!     EXISTS (at browser launch) — its live matcher is validated in the sealed-VM dogfood, not a bare
 //!     netns. Removed by handle on teardown. It is the SOLE runtime rule insert.
@@ -140,7 +140,7 @@ pub fn list_chain() -> NftCmd {
 }
 
 /// The cgroup-scoped browser rule pair, inserted ABOVE rule 0 by handle (`[Q7]`). `path` is the
-/// `shrek-browser.slice` cgroupv2 path as it exists at launch; `level` is its ancestor level. Two rules:
+/// `shrekbrowser.slice` cgroupv2 path as it exists at launch; `level` is its ancestor level. Two rules:
 ///   1. stub-ACCEPT — lets the browser cgroup reach the resolved stubs (so it resolves names normally),
 ///      inserted above rule 0's stub-DROP so it wins for browser-scoped traffic only.
 ///   2. broad ACCEPT — the browser cgroup reaches arbitrary hosts (web-browsing is unpinnable).
@@ -235,12 +235,20 @@ pub fn parse_raw_set_elements(listing: &str) -> BTreeSet<(Ipv4Addr, Proto, u16)>
     out
 }
 
-/// Find every browser-cgroup rule handle (the `socket cgroupv2 … shrek-browser.slice` accepts inserted
+/// Find every browser-cgroup rule handle (the `socket cgroupv2 … shrekbrowser.slice` accepts inserted
 /// above rule 0) so teardown (`confirmed-unbless web-browsing`) can `delete rule` each by handle.
+///
+/// Matched by STRUCTURAL SHAPE — `socket cgroupv2` + `skuid 1000` + an `accept` verdict — NOT by the
+/// slice path string: nft reverse-walks `/sys/fs/cgroup` to print the path back, so after the slice's
+/// cgroup is GC'd it prints a bare numeric id instead, and a path-string match would go blind to its own
+/// rules (leaking them past teardown and past the idempotence check). The two browser accepts are the
+/// only `skuid 1000` + `cgroupv2` + `accept` rules in the chain (rule 0 is a `drop`), so the shape is
+/// unambiguous whether the path or an id is printed. Ships with the static `shrekbrowser.slice` unit
+/// (S6a) that keeps the id alive for the login, so the id-only case is a belt-and-braces fallback.
 pub fn parse_browser_handles(chain_listing: &str) -> Vec<u32> {
     let mut out = Vec::new();
     for line in chain_listing.lines() {
-        if line.contains("cgroupv2") && line.contains("shrek-browser.slice") {
+        if line.contains("cgroupv2") && line.contains("skuid 1000") && line.contains("accept") {
             if let Some(idx) = line.find("# handle ") {
                 if let Ok(h) = line[idx + "# handle ".len()..].trim().parse::<u32>() {
                     out.push(h);
@@ -570,7 +578,7 @@ mod tests {
     fn browser_rules_insert_above_rule0_by_handle_never_flush() {
         let mut rec = Rec::new();
         rec.chain = "meta skuid 1000 ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 drop # handle 6".into();
-        install_browser_rules(&mut rec, "user.slice/user-1000.slice/shrek-browser.slice", 2).unwrap();
+        install_browser_rules(&mut rec, "user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice", 4).unwrap();
         let muts = rec.mutations();
         assert_eq!(muts.len(), 2);
         for c in &muts {
@@ -586,7 +594,7 @@ mod tests {
     fn browser_insert_refuses_without_anchor() {
         let mut rec = Rec::new();
         rec.chain = "no rule-0 here".into();
-        let e = install_browser_rules(&mut rec, "x/shrek-browser.slice", 2).unwrap_err();
+        let e = install_browser_rules(&mut rec, "x/shrekbrowser.slice", 4).unwrap_err();
         assert!(matches!(e, ApplyError::Nft(_)));
         assert!(rec.mutations().is_empty(), "no anchor ⇒ no rule inserted");
     }
@@ -652,7 +660,7 @@ mod tests {
 
     #[test]
     fn parse_browser_handles_and_uninstall_by_handle() {
-        let listing = "\tchain output { # handle 1\n\t\tmeta skuid 1000 socket cgroupv2 level 2 \"user.slice/user-1000.slice/shrek-browser.slice\" accept # handle 11\n\t\tmeta skuid 1000 socket cgroupv2 level 2 \"user.slice/user-1000.slice/shrek-browser.slice\" ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 accept # handle 12\n\t\tmeta skuid 1000 ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 drop # handle 6\n\t}";
+        let listing = "\tchain output { # handle 1\n\t\tmeta skuid 1000 socket cgroupv2 level 4 \"user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice\" accept # handle 11\n\t\tmeta skuid 1000 socket cgroupv2 level 4 \"user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice\" ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 accept # handle 12\n\t\tmeta skuid 1000 ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 drop # handle 6\n\t}";
         assert_eq!(parse_browser_handles(listing), vec![11, 12]);
         let mut rec = Rec::new();
         rec.chain = listing.into();

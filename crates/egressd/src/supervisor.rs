@@ -84,7 +84,7 @@ pub enum Request {
     Unbless(String),
     Repin(String),
     /// Actuate an ALREADY-ceremony-blessed `web-browsing` record at browser launch (MF-7): install the
-    /// cgroup rule pair now that `shrek-browser.slice` exists. Grants NOTHING not already root-blessed
+    /// cgroup rule pair now that `shrekbrowser.slice` exists. Grants NOTHING not already root-blessed
     /// via the console ceremony — it only makes a persisted broad bless live — so it is tier-safe on the
     /// uid-1000 socket (identity-gated, but authority already rests on the prior ceremony). Wire = verb
     /// only (no cgroup path: the supervisor computes the deterministic slice path from the desktop uid).

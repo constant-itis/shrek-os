@@ -1,0 +1,16 @@
+# Shrek OS — ADR-007 S6a: the static browser cgroup slice.
+#
+# Shipped so the slice — and its cgroupv2 id — exists for the WHOLE login, not just while a browser scope
+# is running. Two payoffs (MF-3): (1) the nft cgroup-match rule references a STABLE id, so a second browser
+# launch after the first exits still hits ACCEPT (an implicitly-created transient slice would be GC'd when
+# its last scope exits, minting a fresh id and silently dropping the next launch); (2) it pre-empts the
+# slice-not-yet-there race. Firefox launches join this slice as transient --user --scope units (see
+# shrek-browser-launch). Un-hyphenated name so systemd does not nest it under a synthetic shrek.slice.
+[Unit]
+Description=Shrek desktop browser egress slice (ADR-007 web-browsing cgroup scope)
+Before=default.target
+
+[Slice]
+
+[Install]
+WantedBy=default.target

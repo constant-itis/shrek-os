@@ -30,7 +30,7 @@
 //!   * PINNABLE vs BROAD ([`is_broad_profile`]). `web-browsing` reaches ARBITRARY hosts, so it is
 //!     unpinnable by construction: its rule-set is empty NOT because it "reaches nothing" (that is the
 //!     `none`/stub meaning) but because its breadth is enforced by an nft cgroup-scope accept on
-//!     `shrek-browser.slice`, not by a pinned destination set. `resolve_desktop` still returns it so
+//!     `shrekbrowser.slice`, not by a pinned destination set. `resolve_desktop` still returns it so
 //!     the console ceremony can validate the name; `is_broad_profile` is how the supervisor learns to
 //!     install the cgroup rule instead of a pin.
 
@@ -70,7 +70,7 @@ const WEATHER: &[EgressRule] = &[
 
 // web-browsing — the BROAD grant. Deliberately EMPTY of pin rules because a browser reaches arbitrary
 // hosts: it CANNOT be pin-scoped, so its breadth is enforced by an nft cgroup accept on the browser's
-// own `shrek-browser.slice` (ADR-007 §7, Q7), NOT by a destination set here. Present in the table so
+// own `shrekbrowser.slice` (ADR-007 §7, Q7), NOT by a destination set here. Present in the table so
 // `resolve_desktop("web-browsing")` succeeds (the console ceremony validates the name), and flagged by
 // `is_broad_profile` so the supervisor installs the cgroup rule rather than treating an empty set as
 // "reaches nothing". This empty-but-broad state is WHY `is_broad_profile` exists as an explicit

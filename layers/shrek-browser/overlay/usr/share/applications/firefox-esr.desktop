@@ -1,0 +1,29 @@
+[Desktop Entry]
+# Shrek OS — ADR-007 S6a: overrides the stock firefox-esr.desktop so EVERY launch path (main entry + the
+# new-window / private-window actions) routes through shrek-browser-launch, which places Firefox inside
+# shrekbrowser.slice for the web-browsing cgroup egress match (Q7). Without this override Firefox lands in
+# the session scope and the matcher never fires. Same path as the package's .desktop, so the ExtraTrees
+# overlay wins at merge time.
+Version=1.0
+Name=Firefox ESR
+GenericName=Web Browser
+Comment=Browse the World Wide Web
+Keywords=Internet;WWW;Browser;Web;Explorer
+Exec=/usr/lib/shrek/shrek-browser-launch %u
+Terminal=false
+X-MultipleArgs=false
+Type=Application
+Icon=firefox-esr
+Categories=Network;WebBrowser;
+MimeType=text/html;text/xml;application/xhtml+xml;application/xml;application/vnd.mozilla.xul+xml;application/rss+xml;application/rdf+xml;image/gif;image/jpeg;image/png;x-scheme-handler/http;x-scheme-handler/https;
+StartupNotify=true
+StartupWMClass=firefox-esr
+Actions=new-window;new-private-window;
+
+[Desktop Action new-window]
+Name=Open a New Window
+Exec=/usr/lib/shrek/shrek-browser-launch --new-window %u
+
+[Desktop Action new-private-window]
+Name=Open a New Private Window
+Exec=/usr/lib/shrek/shrek-browser-launch --private-window %u
