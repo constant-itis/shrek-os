@@ -381,8 +381,21 @@ table inet shrek_desktop_egress {
   **already on and explained** (time, updates) and **weather** / **web-browsing** as opt-in cards. Blessing
   weather here is the low-friction path (tier-B); blessing web-browsing triggers the console ceremony.
 - **DMS Settings → Connectivity panel** (steady-state): the same list, plus the **advanced raw-destination
-  editor** (add `host:proto:port`; each add is ceremony-blessed and resolve-and-pinned). Shows per-profile
-  status (blessed / pinned-IPs / last-refresh / fault) — legible, matching the store.
+  editor** (add `host:proto:port`; each add is ceremony-blessed and resolve-and-pinned — **S4**). Shows
+  per-profile status (blessed / pinned-IPs / last-refresh / fault) — legible, matching the store.
+- **[S3] How the UI reads + writes.** Per-profile status is a **root-written `/run/shrek/egress/state`
+  projection** (`root:root 0644`, one line per sealed profile: tier + blessed + pinned-IPs + last-refresh +
+  fault-**kind**; closed tokens only, never the free-text fault reason), refreshed at every store mutation.
+  The UI polls that file — it never reads the `0700` store and never polls the socket. Mutations go the
+  other way, through the unprivileged **`egressd ask <verb> [profile]`** client (fixed argv, no shell) to
+  the S2 supervisor socket; the daemon stays the sole authority. The state file is the **only** display
+  truth — the panel never flips a control on an action's reply; it marks the control busy until the next
+  poll confirms. A blessed-but-unpinned profile (a first-run bless before the clock/network converged)
+  renders as **"Blessed — waiting for network,"** with a single user-initiated *Try now* (re-pin) — never a
+  UI auto-retry (the rate limiter would starve the owner's own clicks). Baseline and `web-browsing` are
+  **shown but not toggled** here (baseline revoke + `web-browsing` bless are the console ceremony, S4); the
+  baseline status is explanation-only and never wired to `unbless` (defense in depth — the daemon refuses a
+  baseline/broad socket bless regardless).
 - **Baseline visibility (Q8):** `desktop-ntp` / `desktop-updates` appear as **"System baseline — on,"**
   inspectable (pinned IPs, last-refresh) exactly like any profile — not hidden. They are **revocable only
   through the console ceremony**, with an explicit consequence warning (clock-skew cert breakage, unpatched
@@ -435,8 +448,15 @@ table inet shrek_desktop_egress {
    fail to steer the pin** (sealed-DoT proof); **non-browser uid-1000 stub = DROP, browser-scope stub =
    ACCEPT** `[R2-MF-A]`; unknown profile → fault, no element; apply-fail → baked drop + empty sets stand
    (fail-closed); `getent passwd systemd-timesync` resolves + `nft -c` parses the named-uid rule.
-3. **S3 — bless UX**: onboarding Connectivity step + DMS Settings Connectivity panel (static Quickshell
-   first, headless-render proof), wired to the supervisor. Tier-B path for `weather`.
+3. **S3 — bless UX** — **DONE (2026-09-04)**: onboarding Connectivity step + DMS Settings Connectivity
+   panel (Quickshell), wired to the supervisor. Tier-B path for `weather`. **Shipped** (see §14 S3 entry):
+   the unprivileged `egressd ask` socket client (the UI's fixed-argv front door); a root-written
+   `/run/shrek/egress/state` read projection (closed tier + fault-kind tokens only) so the panel is
+   legible without reading the `0700` store or polling the socket; **intent-first bless** + a boot
+   re-resolve self-heal so a first-run weather bless made before the clock/network is up persists as
+   "blessed, waiting" and completes later rather than failing dark; the ui-v2 `Egress` service + panel;
+   and the ui-installer first-run onboarding step. Proven headless: `scripts/desktop-connectivity-proof.sh`
+   (panel renders + real client↔supervisor round-trip) and `scripts/installer-preview.sh`.
 4. **S4 — ceremony tier**: `web-browsing` + raw-destination adds through the console ceremony
    (`consent.rs` reuse), with the persistence bolt-on (write `blessed` after a confirmed ceremony).
 5. **S5 — baseline wiring**: ship `timesyncd.conf` with `NTP=` set to the **sealed literal Cloudflare IPs**
@@ -519,6 +539,25 @@ table inet shrek_desktop_egress {
   to break the DoT↔clock circular dependency (clock-from-NTP must precede DoT-needs-clock).
 - Nice-to-haves folded: superseded §5 option-(i) detail annotated; browser stub covers tcp+udp+`.54`; sealed
   `resolved.conf` also `LLMNR=no`/`MulticastDNS=no`; cite drift `egress.rs:14,20-21`, `shrek-desktop-ready.service:25`.
+
+**S3 — bless UX (2026-09-04): built after a Fable design pass (GO-WITH-FIXES → folded).**
+- **State read model, not a socket read.** A root-written `/run/shrek/egress/state` projection (0644, closed
+  `tier`/`blessed`/`pins`/`refreshed`/fault-**kind** tokens — never the free-text fault reason) is the panel's
+  legible view, refreshed at *every* store mutation (supervisor + the resolve/apply CLIs), so a timer/CLI
+  re-pin can't leave it stale. Keeps the socket mutation-only (no single-accept-loop poll contention) and the
+  `0700` store unread. `BlessTier` carries the three-way tier so S4's ceremony distinction is already encoded.
+- **`egressd ask` client.** The unprivileged uid-1000 socket front door (fixed argv, no shell) the DMS panel +
+  onboarding exec. Convenience, not capability — the daemon re-validates everything; the client only rejects
+  obvious garbage locally and uses the oracle-gated socket path (compiled out of the shipped build).
+- **Intent-first bless + boot self-heal.** The supervisor now records the durable bless *before* resolving, so
+  a resolve failure (a first-run bless before the clock/network is up) leaves the profile legibly "blessed,
+  pin-deferred" instead of silently unblessed; boot `reconcile` re-resolves a blessed-but-pinless one-click
+  profile — the only place a root-side retry belongs (a UI/socket retry would starve the owner's own clicks
+  against the rate limiter). DoT resolution is an injectable seam so this is unit-tested without a network.
+- **Accepted uid-1000 residuals (by design, all visible in the events log, none crossing the boundary):** a
+  malicious uid-1000 process can silently `unbless weather` (deny-direction), burn the 6/30s budget to annoy
+  the owner's real clicks, or trigger ≤6 DoT re-pins/30s (bounded traffic to sealed resolvers). The weather
+  dashTab / display truth binds to the root-written state file, not spoofable by uid 1000.
 
 **CROSS-CUTTING SECURITY DEFECT (filed separately as mycelium #3121, NOT owned by this ADR):**
 `image/overlay/etc/hosts` is a baked symlink into `/home/.shrek-system/hosts`, which
