@@ -1,0 +1,10 @@
+#!/bin/sh
+# Shrek OS — ADR-007 S1: load the sealed deny-by-default desktop egress nft table.
+#
+# Applies the baked static ruleset (/usr/lib/shrek/desktop-egress.nft) in a single atomic `nft -f`
+# transaction. FAIL-CLOSED by design: any nonzero exit fails shrek-desktop-egress.service, which the
+# getty@tty1 drop-in Requires=, so the uid-1000 desktop session never starts without the deny-by-default
+# boundary in place. The S2 supervisor only ever ADDs set-elements / the one browser rule on top of this
+# baked skeleton; it never flushes it (ADR-007 §7 [R2-MF-B]).
+set -eu
+exec nft -f /usr/lib/shrek/desktop-egress.nft

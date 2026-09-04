@@ -93,6 +93,11 @@
 /image/overlay/etc/systemd/system/getty@tty1.service.d/50-owner-provision.conf
 /image/overlay/etc/shrek/owner-provision.env
 /image/overlay/etc/shrek/owner-seed
+# ADR-007 desktop egress plane (S1): the deny-by-default table's ENABLEMENT is a getty@tty1 drop-in staged
+# ONLY for INSTALLABLE/DOGFOOD (source of truth: image/desktop-egress/getty-desktop-egress.conf). The
+# oneshot unit + apply helper + .nft ruleset under image/overlay are tracked; only this generated copy is
+# gitignored so LIVE_INSTALLER (§9: no plane) / plain-CI trees stay byte-clean.
+/image/overlay/etc/systemd/system/getty@tty1.service.d/20-desktop-egress.conf
 # ADR-005 provisioning plane: the validate-gate + locale/keymap applier ENABLE symlinks are build inputs
 # staged ONLY for INSTALLABLE/DOGFOOD (the unit FILES under image/overlay/usr/lib are tracked source). The
 # DOGFOOD test-manifest + its gate-seed env are baked build inputs too (DOGFOOD has no installer to

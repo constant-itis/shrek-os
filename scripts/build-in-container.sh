@@ -229,6 +229,23 @@ else
   :
 fi
 
+# ── ADR-007 desktop egress plane (S1: the sealed deny-by-default nft table) — variant-gated ───────────
+# The static table's oneshot is enabled ONLY where there is a real uid-1000 desktop session to govern:
+# the INSTALLABLE product and the DOGFOOD proof. Enablement lives ENTIRELY in a getty@tty1 drop-in that
+# Requires=+After= the oneshot (fail-closed: a failed nft load fails the login, so uid 1000 never comes up
+# ungoverned — the same getty Requires= precedent ADR-005 uses for the credential path). The unit FILE +
+# apply helper + .nft ruleset ship in the sealed overlay unconditionally (tracked); only this generated
+# drop-in is variant-gated + gitignored, so LIVE_INSTALLER (ADR-007 §9: no plane) and plain-CI stay
+# byte-clean and can never brick their tty1 on a load failure. (Reuses $OP_DROPIN_DIR from above.)
+DE_DROPIN="$OP_DROPIN_DIR/20-desktop-egress.conf"
+DE_TEMPLATE="image/desktop-egress/getty-desktop-egress.conf"
+rm -f "$DE_DROPIN"
+if [ "${DOGFOOD:-0}" = "1" ] || [ "$INSTALLABLE" = "1" ]; then
+  install -d "$OP_DROPIN_DIR"
+  install -m0644 "$DE_TEMPLATE" "$DE_DROPIN"
+  echo "!!! desktop egress plane (ADR-007 S1): enabling shrek-desktop-egress.service (getty@tty1 Requires it) !!!"
+fi
+
 # ── ADR-005 provisioning plane (gate + locale/keymap appliers) — variant-gated like home.mount above ───
 # The re-validation gate + domain appliers are enabled ONLY where a manifest is provisioned onto a writable
 # /home: the INSTALLABLE product and the DOGFOOD proof. The unit FILES ship in the overlay unconditionally

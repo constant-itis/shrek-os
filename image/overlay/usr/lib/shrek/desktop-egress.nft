@@ -1,0 +1,56 @@
+# Shrek OS — ADR-007 S1: the sealed, deny-by-default DESKTOP egress table.
+#
+# ONE static baked table (ADR-007 §7 [R2-MF-B]) loaded once at boot by shrek-desktop-egress.service,
+# strictly before the uid-1000 desktop session (getty@tty1 autologin). Every allow references an nft
+# NAMED SET; the S2 supervisor only ever ADDs set-elements (bless/re-pin) — it never rebuilds a rule,
+# never flushes this table, so an apply error leaves the deny-by-default skeleton exactly in place
+# (fail-closed by construction). The one runtime *rule* the supervisor inserts is the browser-cgroup
+# pair (Q7), placed ABOVE rule 0 by handle at browser launch — not baked here.
+#
+# Governs uid 1000 ONLY (policy accept + explicit skuid-1000 drops); it does NOT seize the host's global
+# egress policy, so system daemons and the agent/bench plane's own nft tables are unaffected.
+
+# Atomic idempotent replace: `add` guarantees the table exists so `delete` cannot error on the first
+# load, then the fresh definition follows — all in a single `nft -f` transaction (net effect = the
+# definition below), so a re-run can never leave a half-open ruleset.
+add table inet shrek_desktop_egress
+delete table inet shrek_desktop_egress
+
+table inet shrek_desktop_egress {
+	# Named sets the S2 supervisor populates by ELEMENT. `ntp_pinned` is pre-populated with desktop-ntp's
+	# SEALED LITERAL IPs [R2-MF-C] — Cloudflare anycast, known at bake time, NEVER resolved (the clock
+	# bootstrap that lets the later sealed-DoT re-pin of weather succeed). `updates_pinned`/`weather_pinned`
+	# start EMPTY: an empty set matches nothing = inert = fail-closed, NOT accept-all.
+	set ntp_pinned     { type ipv4_addr; elements = { 162.159.200.1, 162.159.200.123 } }
+	set updates_pinned { type ipv4_addr; }
+	set weather_pinned { type ipv4_addr; }
+
+	chain output {
+		type filter hook output priority 0; policy accept;
+
+		# rule 0 [R2-MF-A] — STUB DROP, MUST precede the loopback accept below, or uid 1000 gets whole-
+		# session DNS via the resolved stubs (the MF-2 exfil channel). Both stub IPs (resolved >= v252
+		# adds .54), udp AND tcp (`th dport`). The supervisor inserts the browser-scope stub-ACCEPT ABOVE
+		# this rule at browser launch; nothing else opens uid-1000 DNS.
+		meta skuid 1000 ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 drop
+
+		# loopback for the session — family-agnostic, covers 127/8 AND ::1 (the stub is already dropped above).
+		meta skuid 1000 oif "lo" accept
+
+		# blessed weather — INERT until the supervisor adds an element to @weather_pinned on bless. IPv4-only
+		# pinning (agent-plane parity); the widget reaches the pinned v4 IP via the /run/shrek/egress map.
+		meta skuid 1000 ip daddr @weather_pinned tcp dport 443 accept
+
+		# default-deny for the desktop session — everything else uid 1000 tries is dropped, v4 AND v6
+		# (the skuid-1000 match is family-agnostic, so a v6 escape is caught here too [R1-MF4]).
+		meta skuid 1000 drop
+	}
+}
+
+# BASELINE (desktop-ntp / desktop-updates) is DECLARATIVE, not enforced here, and deliberately so:
+# timesyncd and the updater do NOT run as uid 1000, so their egress already passes on `policy accept` and
+# needs no allow rule — and matching them by service uid is brittle (timesyncd may run under a dynamic
+# uid, which would fail this ruleset's load and brick tty1). The @ntp_pinned/@updates_pinned sets are baked
+# so S5 can add explicit *documentation* rules once the service identities are pinned; today they enforce
+# nothing. (Fable round-3: "baseline rules are declarative; non-uid-1000 traffic passes on policy accept
+# regardless." Making the sole enforced drops uid-1000-scoped keeps the plane from seizing global policy.)

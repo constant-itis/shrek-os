@@ -1,0 +1,31 @@
+# Shrek OS — desktop egress plane (ADR-007 S1): load the sealed deny-by-default nft table.
+#
+# Loads the ONE static baked table (/usr/lib/shrek/desktop-egress.nft) via the apply helper, strictly
+# before the uid-1000 desktop session (getty@tty1 autologin), so the deny-by-default boundary is in place
+# before uid 1000 can emit a single packet. The table + helper + ruleset are baked in the sealed base
+# /usr and reference EMPTY named sets; there is NO /home dependency — the S2 supervisor populates elements
+# later. Deny-by-default is fully in force from this unit alone.
+#
+# ENABLEMENT is variant-gated and lives ENTIRELY in a getty@tty1 drop-in (Requires= + After= this unit),
+# staged by build-in-container.sh ONLY for INSTALLABLE/DOGFOOD — the same "ship the unit, gate the
+# enablement" split as home.mount / shrek-owner-provision. This unit FILE ships in the sealed overlay
+# unconditionally but stays inert on LIVE_INSTALLER (ADR-007 §9: no plane) and plain-CI (nothing pulls it
+# in). There is deliberately no [Install] section.
+#
+# FAIL-CLOSED [R1-MF3/R2-MF-B]: because the getty@tty1 drop-in Requires= this unit, a failed nft load
+# FAILS getty@tty1 — the uid-1000 desktop session can never come up without the boundary. This reuses the
+# exact getty Requires= precedent ADR-005 carves out for the credential path. (tty2+ stay ungoverned as
+# the accepted recovery path — ADR-007 §7.)
+[Unit]
+Description=Load the sealed deny-by-default desktop egress table (ADR-007 S1)
+Documentation=file:///usr/share/doc/shrek/adr-007-desktop-egress.md
+# Ordered strictly before the autologin desktop session. No /home / no Onion dependency: the ruleset and
+# `nft` are in the sealed base /usr, present from the dm-verity root.
+Before=getty@tty1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/shrek/desktop-egress-apply
+StandardOutput=journal
+StandardError=journal+console
