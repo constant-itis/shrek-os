@@ -146,14 +146,16 @@ fi
 [ -n "$task" ] || { echo "shrek-agent: a --task is required to launch (or run in a terminal for a prompt)" >&2; exit 2; }
 
 # --- pre-flight: is a brain hooked up? Shrek ships with NO model wired. If this provider's sealed name
-# has no binding in the writable /home store (which /etc/hosts symlinks to, so getaddrinfo reads it), the
-# launch would reach gatekeeperd and fail-closed with a bare "no A record". Guide the user instead. This
-# is ADVISORY (checks the store, same file gatekeeperd resolves through); the seal still enforces. ------
-HOSTS_STORE="${SHREK_HOSTS:-/home/.shrek-system/hosts}"
+# has no binding, the launch would reach gatekeeperd and fail-closed with a bare "no A record". Guide the
+# user instead. ADR-008: read the ROOT-owned /run/shrek/hosts projection (root:root 0644) — the exact
+# file gatekeeperd resolves through (/etc/hosts symlinks to it). The persistent binding store is now
+# root:root 0600 (unreadable to this uid-1000 process by design), so the projection is the right read
+# surface. ADVISORY only; the seal still enforces. ------
+HOSTS_PROJECTION="${SHREK_HOSTS:-/run/shrek/hosts}"
 host="$(host_for "$provider")"
-if ! awk -v h="$host" '$2==h{ok=1} END{exit !ok}' "$HOSTS_STORE" 2>/dev/null; then
+if ! awk -v h="$host" '$2==h{ok=1} END{exit !ok}' "$HOSTS_PROJECTION" 2>/dev/null; then
     echo "shrek-agent: no brain connected for '$provider' ($host is unbound)." >&2
-    echo "  hook one up:  shrek-connect $provider <addr>   (a LAN IP, a tailnet 100.x, or a hostname)" >&2
+    echo "  hook one up:  shrek-connect $provider <ipv4>   (a LAN IP or a tailnet 100.x address)" >&2
     echo "  see bindings: shrek-connect --list" >&2
     exit 3
 fi

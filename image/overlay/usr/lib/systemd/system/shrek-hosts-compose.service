@@ -1,0 +1,34 @@
+# Shrek OS — ADR-008: compose the ROOT-AUTHORITATIVE /etc/hosts (the #3121 fix).
+#
+# Replaces shrek-hosts-seed.service. That unit chowned the hosts store to uid 1000 every boot, so a
+# compromised desktop user held name-resolution authority over every root daemon (glibc NSS reads
+# /etc/hosts via `files` before DNS). ADR-008 makes ROOT the sole author: `/etc/hosts` is a baked symlink
+# to /run/shrek/hosts, which THIS oneshot composes from a sealed-in-code baseline (localhost) plus the
+# owner's provider bindings (root:root /home/.shrek-system/hosts-bindings). uid 1000's ONLY influence is
+# the egressd `bind`/`unbind` verb, bounded to the 4 sealed model-provider names — never an NTP/CA/public
+# host. See docs/adr-008-name-resolution.md.
+#
+# `egressd compose-hosts` ALSO migrates + re-owns a pre-fix uid-1000 legacy hosts file (absorbs only the 4
+# model lines, strips the rest, leaves a root localhost baseline for rollback) — idempotent, every boot.
+#
+# UNCONDITIONAL projection (ADR-008 [R2-MF1]): localhost is installed even if the binding store is absent
+# or hostile, so a fresh box resolves localhost. Ordered exactly like the old seed (and var-lib-swamp):
+# After=home.mount (bindings live on /home), Before=local-fs.target + nss-lookup.target (before anything
+# resolves names). Standalone `egressd compose-hosts` — no CAP_NET_ADMIN, no nft, no daemon required (the
+# egressd bless supervisor is a separate, variant-gated unit).
+[Unit]
+Description=Compose the root-authoritative Shrek /etc/hosts (/run/shrek/hosts)
+Documentation=file:///usr/share/doc/shrek/adr-008-name-resolution.md
+DefaultDependencies=no
+After=home.mount
+Before=local-fs.target nss-lookup.target
+Conflicts=umount.target
+Before=umount.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/shrek/egressd compose-hosts
+
+[Install]
+WantedBy=local-fs.target
