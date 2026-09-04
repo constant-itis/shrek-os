@@ -33,6 +33,7 @@ fn main() {
     let code = match args.first().map(String::as_str) {
         Some("daemon") => daemon_cli(&args[1..]),
         Some("reconcile") => reconcile_cli(),
+        Some("compose-hosts") => compose_hosts_cli(),
         Some("ask") => egressd::client::ask(&args[1..]),
         Some("store") => store_cli(&args[1..]),
         Some("resolve") => resolve_cli(&args[1..]),
@@ -41,7 +42,8 @@ fn main() {
         _ => {
             eprintln!("egressd: usage:");
             eprintln!("  egressd daemon                                          # run the supervisor (uid-1000 socket)");
-            eprintln!("  egressd ask <status|bless|unbless|repin> [profile]      # uid-1000 socket client (the UI front door)");
+            eprintln!("  egressd compose-hosts                                   # ADR-008: (re)compose root-owned /run/shrek/hosts");
+            eprintln!("  egressd ask <status|bless|unbless|repin|bind|unbind> [args]  # uid-1000 socket client (the UI front door)");
             eprintln!("  egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
             eprintln!("  egressd resolve --profile <p> [--at <secs>] [--apply]   # DoT-resolve + store pins (+apply)");
             eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
@@ -192,6 +194,28 @@ fn reconcile_cli() -> i32 {
     let summary = egressd::supervisor::reconcile(&store, &run, &mut exec, &mut resolver, egressd::supervisor::now_unix());
     println!("egressd: {summary}");
     0
+}
+
+/// `egressd compose-hosts` — ADR-008 S2/S3: (re)compose the root-owned `/run/shrek/hosts` projection from
+/// the sealed baseline + the owner's provider bindings, migrating + re-owning a pre-fix legacy hosts file
+/// on the way. Run by the base `shrek-hosts-compose` oneshot at boot AND in-process by the daemon after a
+/// `bind`/`unbind`. UNCONDITIONAL: localhost is always installed even if the binding store is absent or
+/// hostile (`[R2-MF1]`). Takes the hosts lock (shared with the daemon). Root in production; the oracle
+/// build redirects the paths via `SHREK_HOSTS_HOME` / `SHREK_HOSTS_RUN`.
+fn compose_hosts_cli() -> i32 {
+    let home = egressd::hosts::hosts_home_dir();
+    let run = egressd::hosts::hosts_run_dir();
+    let _lock = egressd::hosts::lock_hosts(&home).ok();
+    match egressd::hosts::compose_hosts(&home, &run) {
+        Ok(p) => {
+            println!("egressd: composed hosts -> {}", p.display());
+            0
+        }
+        Err(e) => {
+            eprintln!("egressd compose-hosts: {e}");
+            1
+        }
+    }
 }
 
 /// `egressd daemon` — run the S2d supervisor: bind the uid-1000 socket, reconcile blessed pins into the

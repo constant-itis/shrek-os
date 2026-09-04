@@ -36,6 +36,7 @@ use shrek_policy::desktop_egress::{admits_socket_bless, bless_tier, is_broad_pro
 
 use crate::apply::{self, NftExec, ShellNft};
 use crate::dot;
+use crate::hosts;
 use crate::store::{self, BlessRecord, FaultKind, PinRecord};
 use crate::uapi;
 
@@ -95,6 +96,17 @@ pub enum Request {
     /// only (no cgroup path: the supervisor computes the deterministic slice path from the desktop uid).
     BrowserUp,
 
+    // ---- ADR-008: the owner's bounded provider hook-up (uid-1000, identity-gated) ----
+    /// Bind a model-provider TOKEN to an IPv4 literal — the owner's `/etc/hosts` hook-up. The ONLY
+    /// uid-1000 verb carrying a SECOND field (the address): a deliberate, bounded relaxation of the
+    /// "verb + token only" grammar. It is safe because the token is a CLOSED provider set (mapped to a
+    /// sealed name server-side, never a free hostname) and the address only sets which IP one of 4 sealed
+    /// model names resolves to — it opens NO firewall aperture and touches no name a root daemon looks up
+    /// beyond the sandbox's own model endpoint (ADR-008 §3). Both fields are re-validated by shrek-policy.
+    Bind(String, String), // (provider-token, canonical IPv4 literal)
+    /// Remove a provider binding (idempotent — an unbound provider is a clean `OK`).
+    Unbind(String), // (provider-token)
+
     // ---- PRIVILEGED ceremony-commit verbs (ADR-007 S6 fix #4 redesign) ----
     // These are the CONFIRMED result of a console SAK/VT ceremony. They carry the very things the
     // uid-1000 verbs forbid — a broad profile or a raw `host:proto:port` destination — so they are gated
@@ -124,6 +136,11 @@ impl Request {
                 | Request::ConfirmedRemoveRaw(_)
         )
     }
+    /// An ADR-008 hosts verb (`bind`/`unbind`) — mutates the HOSTS store/projection, not the egress
+    /// store, so [`Supervisor::execute`] takes the hosts lock in the handler, not the egress store lock.
+    pub fn is_hosts(&self) -> bool {
+        matches!(self, Request::Bind(..) | Request::Unbind(_))
+    }
     pub fn verb(&self) -> &'static str {
         match self {
             Request::Status => "status",
@@ -131,6 +148,8 @@ impl Request {
             Request::Unbless(_) => "unbless",
             Request::Repin(_) => "repin",
             Request::BrowserUp => "browser-up",
+            Request::Bind(..) => "bind",
+            Request::Unbind(_) => "unbind",
             Request::ConfirmedBless(_) => "confirmed-bless",
             Request::ConfirmedUnbless(_) => "confirmed-unbless",
             Request::ConfirmedAddRaw(_) => "confirmed-add-raw",
@@ -141,6 +160,8 @@ impl Request {
         match self {
             Request::Status | Request::BrowserUp => "-",
             Request::Bless(p) | Request::Unbless(p) | Request::Repin(p) => p,
+            // the hosts verbs journal under their provider token.
+            Request::Bind(t, _) | Request::Unbind(t) => t,
             Request::ConfirmedBless(p) | Request::ConfirmedUnbless(p) => p,
             // raw ops journal under a fixed "raw" label, not the destination (which the audit line + the
             // events projection carry separately); keeps the profile column stable.
@@ -168,8 +189,15 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
     let verb = tok.next().ok_or("empty request")?;
     let a = tok.next();
     let b = tok.next();
-    if b.is_some() {
-        return Err("too many fields"); // never accept a 3rd field (a smuggled destination/param)
+    let c = tok.next();
+    // `bind` is the SOLE verb that takes a 3rd whitespace field (the address); ADR-008 [R1-MF8b]. Every
+    // OTHER verb still hard-rejects `b` — the "verb + token only" invariant — and `bind` itself rejects a
+    // 4th field, so no verb can smuggle an extra destination/parameter.
+    if verb != "bind" && b.is_some() {
+        return Err("too many fields");
+    }
+    if verb == "bind" && c.is_some() {
+        return Err("too many fields");
     }
     let want_profile = |p: Option<&str>| -> Result<String, &'static str> {
         let p = p.ok_or("verb needs a profile")?;
@@ -201,6 +229,26 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
                 return Err("browser-up takes no argument");
             }
             Ok(Request::BrowserUp)
+        }
+        // ADR-008 hosts verbs. `bind` carries verb + provider-token + IPv4; the token must be one of the
+        // CLOSED provider set (mapped server-side to a sealed name) and the address a strict IPv4 literal,
+        // canonicalized here so the store/projection is unambiguous. `unbind` carries verb + token only.
+        "bind" => {
+            let token = a.ok_or("bind needs a provider token")?;
+            let addr = b.ok_or("bind needs an address")?;
+            if !store::valid_token(token) || shrek_policy::provider_bind::provider_host(token).is_none() {
+                return Err("unknown provider token");
+            }
+            let ip = shrek_policy::provider_bind::valid_bind_addr(addr)
+                .ok_or("address must be an IPv4 literal")?;
+            Ok(Request::Bind(token.to_string(), ip.to_string()))
+        }
+        "unbind" => {
+            let token = a.ok_or("unbind needs a provider token")?;
+            if !store::valid_token(token) || shrek_policy::provider_bind::provider_host(token).is_none() {
+                return Err("unknown provider token");
+            }
+            Ok(Request::Unbind(token.to_string()))
         }
         "confirmed-bless" => Ok(Request::ConfirmedBless(want_profile(a)?)),
         "confirmed-unbless" => Ok(Request::ConfirmedUnbless(want_profile(a)?)),
@@ -284,6 +332,11 @@ pub fn authorize(peer_uid: u32, req: &Request, desktop_uid: u32) -> Decision {
                 Decision::Deny("profile not one-click blessable (baseline/broad/unknown)")
             }
         }
+        // ADR-008 hosts verbs: identity is the ONLY gate (no bless tier). The parser already bounded the
+        // token to the closed provider set and the address to an IPv4 literal; a provider bind carries no
+        // firewall-plane authority (§3), so there is no Tier-B check to make — the closed token IS the
+        // authority. The engine re-validates both in the handler (defense in depth).
+        Request::Bind(..) | Request::Unbind(_) => Decision::Allow,
         // privileged verbs handled above; unreachable but keep the match exhaustive + fail-closed.
         _ => Decision::Deny("unexpected verb"),
     }
@@ -460,7 +513,13 @@ impl Supervisor {
         // MF-4: serialize with the transient root `confirmed-*` process for every mutating op — their
         // store writes / nft reconciles / `/run` projections must never interleave. Best-effort (a lock
         // failure on a single-user appliance still proceeds), but both writers take it, so they queue.
-        let _lock = if req.is_mutating() { store::lock_store(&self.store).ok() } else { None };
+        // ADR-008 hosts verbs mutate the HOSTS store, not the egress store — they take the hosts lock in
+        // their own handler (shared with the boot `compose-hosts` oneshot), so they are excluded here.
+        let _lock = if req.is_mutating() && !req.is_hosts() {
+            store::lock_store(&self.store).ok()
+        } else {
+            None
+        };
         match req {
             Request::Status => {
                 let b = store::list_bless(&self.store).len();
@@ -478,6 +537,9 @@ impl Supervisor {
             }
             Request::Unbless(p) => self.unbless(cred, p, exec, at),
             Request::BrowserUp => self.browser_up(cred, exec, at),
+            // ADR-008 hosts verbs (uid-1000 identity-gated). They touch the hosts store + projection only.
+            Request::Bind(token, addr) => self.do_bind(cred, token, addr, at),
+            Request::Unbind(token) => self.do_unbind(cred, token, at),
             // PRIVILEGED ceremony-commit (root peer only — already gated in `authorize`). The daemon does
             // the store write + nft mutation in-process (it holds CAP_NET_ADMIN), so no transient root
             // process runs nft and gatekeeperd needs no net capability.
@@ -512,6 +574,49 @@ impl Supervisor {
                 let msg = format!("{e:?}");
                 journal(cred, "browser-up", "web-browsing", "apply-fail", "-", &msg);
                 "ERR apply-failed".to_string()
+            }
+        }
+    }
+
+    // ---- ADR-008 hosts handlers (uid-1000 identity-gated) -------------------------------------------
+
+    /// Bind a provider token → IPv4 in the hosts store and recompose `/run/shrek/hosts`. The parser
+    /// already validated the token (closed set) + the address (IPv4 literal); [`hosts::write_binding`]
+    /// re-validates (defense in depth). The journal + the downstream event carry the ADDRESS `[R1-MF8c]`.
+    /// Takes the HOSTS lock (shared with the base `compose-hosts` oneshot) — NOT the egress store lock.
+    fn do_bind(&mut self, cred: &uapi::Ucred, token: &str, addr: &str, at: u64) -> String {
+        let home = hosts::hosts_home_dir();
+        let run = hosts::hosts_run_dir();
+        let _lock = hosts::lock_hosts(&home).ok();
+        match hosts::write_binding(&home, token, addr) {
+            Ok(ip) => {
+                let _ = hosts::compose_hosts(&home, &run);
+                journal(cred, "bind", token, "accept", "-", &ip.to_string());
+                let _ = append_event(&self.run, at, "bind", token, &ip.to_string());
+                format!("OK bind {token} {ip}")
+            }
+            Err(e) => {
+                journal(cred, "bind", token, "store-fail", "-", &e.to_string());
+                "ERR store".to_string()
+            }
+        }
+    }
+
+    /// Remove a provider binding and recompose. Idempotent — unbinding an unbound provider is a clean OK.
+    fn do_unbind(&mut self, cred: &uapi::Ucred, token: &str, at: u64) -> String {
+        let home = hosts::hosts_home_dir();
+        let run = hosts::hosts_run_dir();
+        let _lock = hosts::lock_hosts(&home).ok();
+        match hosts::remove_binding(&home, token) {
+            Ok(()) => {
+                let _ = hosts::compose_hosts(&home, &run);
+                journal(cred, "unbind", token, "accept", "-", "unbound");
+                let _ = append_event(&self.run, at, "unbind", token, "unbound");
+                format!("OK unbind {token}")
+            }
+            Err(e) => {
+                journal(cred, "unbind", token, "store-fail", "-", &e.to_string());
+                "ERR store".to_string()
             }
         }
     }
@@ -908,6 +1013,52 @@ mod tests {
         assert!(parse_request("bless ../escape").is_err()); // traversal token
         assert!(parse_request("bless we\x00ather").is_err()); // control char
         assert!(parse_request(&format!("bless {}", "x".repeat(200))).is_err()); // oversized + bad token
+    }
+
+    #[test]
+    fn parse_accepts_and_bounds_the_hosts_verbs() {
+        // ADR-008: `bind` is the SOLE 3-token verb; the address is canonicalized.
+        assert_eq!(
+            parse_request("bind local 192.168.1.152"),
+            Ok(Request::Bind("local".into(), "192.168.1.152".into()))
+        );
+        assert_eq!(parse_request("unbind anthropic\n"), Ok(Request::Unbind("anthropic".into())));
+        // a non-canonical-but-parseable octet form is re-rendered canonically into the Request.
+        // (`Ipv4Addr::from_str` is strict, so this is really just the round-trip of a normal quad.)
+        assert_eq!(
+            parse_request("bind codex 10.0.0.4"),
+            Ok(Request::Bind("codex".into(), "10.0.0.4".into()))
+        );
+        // token must be one of the CLOSED provider set — not a sealed egress name, not a public host.
+        assert!(parse_request("bind swamp 1.2.3.4").is_err());
+        assert!(parse_request("bind shrek-model 1.2.3.4").is_err());
+        assert!(parse_request("unbind github 1.2.3.4").is_err()); // (also: 3rd field on unbind)
+        // address must be a strict IPv4 literal (hostnames never resolve via NSS files; hex/short forms).
+        assert!(parse_request("bind local myhost.lan").is_err());
+        assert!(parse_request("bind local 0x7f000001").is_err());
+        assert!(parse_request("bind local 127.1").is_err());
+        assert!(parse_request("bind local ::1").is_err());
+        // arity: bind needs BOTH fields and rejects a 4th; unbind rejects a 2nd.
+        assert!(parse_request("bind local").is_err()); // missing address
+        assert!(parse_request("bind").is_err()); // missing both
+        assert!(parse_request("bind local 1.2.3.4 extra").is_err()); // smuggled 4th field
+        assert!(parse_request("unbind local extra").is_err()); // unbind takes one token
+    }
+
+    #[test]
+    fn authorize_hosts_verbs_are_identity_gated_only() {
+        let owner = 1000;
+        let bind = Request::Bind("local".into(), "1.2.3.4".into());
+        let unbind = Request::Unbind("local".into());
+        // the desktop owner may bind/unbind (no bless tier — the closed token is the authority).
+        assert_eq!(authorize(owner, &bind, owner), Decision::Allow);
+        assert_eq!(authorize(owner, &unbind, owner), Decision::Allow);
+        // any OTHER uid — including root — is refused: bind/unbind are the OWNER's verbs, and the root
+        // ceremony path is a disjoint set (they are not `is_privileged`).
+        assert!(matches!(authorize(1001, &bind, owner), Decision::Deny(_)));
+        assert!(matches!(authorize(0, &bind, owner), Decision::Deny(_)));
+        assert!(!bind.is_privileged() && !unbind.is_privileged());
+        assert!(bind.is_hosts() && unbind.is_hosts());
     }
 
     #[test]

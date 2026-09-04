@@ -48,11 +48,12 @@ pub fn ask(args: &[String]) -> i32 {
         Some(v) => v.as_str(),
         None => {
             eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin|browser-up> [profile]");
+            eprintln!("             egressd ask bind <provider> <ipv4>   |   egressd ask unbind <provider>");
             eprintln!("             (ROOT only) egressd ask confirmed-<bless|unbless|add-raw|remove-raw> <arg>");
             return 2;
         }
     };
-    let line = match build_line(verb, args.get(1).map(String::as_str)) {
+    let line = match build_line(verb, args.get(1).map(String::as_str), args.get(2).map(String::as_str)) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("egressd ask: {e}");
@@ -110,13 +111,48 @@ pub fn ask(args: &[String]) -> i32 {
 /// Build the one wire line, mirroring the daemon's allowlist for friendly local errors. The daemon is
 /// still authoritative — this only spares an obviously-bad request the round-trip and gives a clear
 /// message. Rejects a whitespace/control/oversize profile so a smuggled second token can't even be typed.
-fn build_line(verb: &str, profile: Option<&str>) -> Result<String, String> {
+fn build_line(verb: &str, a: Option<&str>, b: Option<&str>) -> Result<String, String> {
+    // `bind` is the sole verb with a second argument (the address). Reject a stray second arg on every
+    // other verb up front, mirroring the daemon's grammar (ADR-008 [R1-MF8b]).
+    if verb != "bind" && b.is_some() {
+        return Err(format!("`{verb}` takes at most one argument"));
+    }
+    let profile = a;
     match verb {
         "status" => {
             if profile.is_some() {
                 return Err("`status` takes no profile".into());
             }
             Ok("status\n".into())
+        }
+        // ADR-008 hosts verbs. `bind <provider> <ipv4>` carries a second field; `unbind <provider>` one.
+        // The address is validated by the SAME sealed grammar the daemon uses (strict IPv4 literal) —
+        // shrek-policy is the single source of truth — so an obvious mistake is caught before the socket.
+        "bind" => {
+            let p = a.ok_or("`bind` needs a provider (local|anthropic|claude|codex)")?;
+            let addr = b.ok_or("`bind` needs an address (e.g. `egressd ask bind local 192.168.1.152`)")?;
+            if !valid_client_token(p) {
+                return Err(format!("invalid provider token {p:?}"));
+            }
+            if shrek_policy::provider_bind::valid_bind_addr(addr).is_none() {
+                return Err(format!("address {addr:?} must be an IPv4 literal (e.g. 192.168.1.152)"));
+            }
+            let line = format!("bind {p} {addr}\n");
+            if line.len() > LINE_MAX {
+                return Err("request too large".into());
+            }
+            Ok(line)
+        }
+        "unbind" => {
+            let p = a.ok_or("`unbind` needs a provider (local|anthropic|claude|codex)")?;
+            if !valid_client_token(p) {
+                return Err(format!("invalid provider token {p:?}"));
+            }
+            let line = format!("unbind {p}\n");
+            if line.len() > LINE_MAX {
+                return Err("request too large".into());
+            }
+            Ok(line)
         }
         // valueless verb — the browser launcher fires it AFTER the scope joins shrekbrowser.slice, so the
         // supervisor installs the cgroup accept-pair (no-op unless web-browsing is already blessed). No
@@ -187,46 +223,65 @@ mod tests {
 
     #[test]
     fn build_line_accepts_the_allowed_verbs() {
-        assert_eq!(build_line("status", None).unwrap(), "status\n");
-        assert_eq!(build_line("bless", Some("weather")).unwrap(), "bless weather\n");
-        assert_eq!(build_line("unbless", Some("weather")).unwrap(), "unbless weather\n");
-        assert_eq!(build_line("repin", Some("weather")).unwrap(), "repin weather\n");
-        assert_eq!(build_line("browser-up", None).unwrap(), "browser-up\n");
+        assert_eq!(build_line("status", None, None).unwrap(), "status\n");
+        assert_eq!(build_line("bless", Some("weather"), None).unwrap(), "bless weather\n");
+        assert_eq!(build_line("unbless", Some("weather"), None).unwrap(), "unbless weather\n");
+        assert_eq!(build_line("repin", Some("weather"), None).unwrap(), "repin weather\n");
+        assert_eq!(build_line("browser-up", None, None).unwrap(), "browser-up\n");
+    }
+
+    #[test]
+    fn build_line_encodes_the_hosts_verbs() {
+        // ADR-008: bind carries provider + IPv4; unbind carries provider only.
+        assert_eq!(build_line("bind", Some("local"), Some("192.168.1.152")).unwrap(), "bind local 192.168.1.152\n");
+        assert_eq!(build_line("unbind", Some("anthropic"), None).unwrap(), "unbind anthropic\n");
+        // a non-IPv4 address is refused before the socket is opened (the daemon re-validates too).
+        assert!(build_line("bind", Some("local"), Some("myhost.lan")).is_err());
+        assert!(build_line("bind", Some("local"), Some("0x7f000001")).is_err());
+        assert!(build_line("bind", Some("local"), Some("::1")).is_err());
+        // missing pieces
+        assert!(build_line("bind", Some("local"), None).is_err()); // no address
+        assert!(build_line("bind", None, None).is_err()); // no provider
+        assert!(build_line("unbind", None, None).is_err()); // no provider
+        // a smuggled token can't be encoded (space rejected as a bad token).
+        assert!(build_line("bind", Some("local evil"), Some("1.2.3.4")).is_err());
     }
 
     #[test]
     fn build_line_browser_up_is_valueless() {
         // mirrors the daemon: browser-up carries NO argument (the cgroup is derived from the peer uid).
-        assert!(build_line("browser-up", Some("web-browsing")).is_err());
-        assert!(build_line("browser-up", Some("anything")).is_err());
+        assert!(build_line("browser-up", Some("web-browsing"), None).is_err());
+        assert!(build_line("browser-up", Some("anything"), None).is_err());
     }
 
     #[test]
     fn build_line_encodes_the_confirmed_relay_verbs() {
         // profile-arg ceremony verbs
-        assert_eq!(build_line("confirmed-bless", Some("web-browsing")).unwrap(), "confirmed-bless web-browsing\n");
-        assert_eq!(build_line("confirmed-unbless", Some("web-browsing")).unwrap(), "confirmed-unbless web-browsing\n");
+        assert_eq!(build_line("confirmed-bless", Some("web-browsing"), None).unwrap(), "confirmed-bless web-browsing\n");
+        assert_eq!(build_line("confirmed-unbless", Some("web-browsing"), None).unwrap(), "confirmed-unbless web-browsing\n");
         // raw-triple ceremony verbs: validated + canonicalized through the sealed grammar
-        assert_eq!(build_line("confirmed-add-raw", Some("example.com:tcp:8443")).unwrap(), "confirmed-add-raw example.com:tcp:8443\n");
-        assert_eq!(build_line("confirmed-remove-raw", Some("203.0.113.7:udp:8883")).unwrap(), "confirmed-remove-raw 203.0.113.7:udp:8883\n");
+        assert_eq!(build_line("confirmed-add-raw", Some("example.com:tcp:8443"), None).unwrap(), "confirmed-add-raw example.com:tcp:8443\n");
+        assert_eq!(build_line("confirmed-remove-raw", Some("203.0.113.7:udp:8883"), None).unwrap(), "confirmed-remove-raw 203.0.113.7:udp:8883\n");
         // a malformed destination is refused before the socket is even opened (the daemon re-checks too).
-        assert!(build_line("confirmed-add-raw", Some("singlelabel:tcp:443")).is_err());
-        assert!(build_line("confirmed-add-raw", Some("e.com:icmp:0")).is_err());
-        assert!(build_line("confirmed-add-raw", None).is_err());
-        assert!(build_line("confirmed-bless", None).is_err());
+        assert!(build_line("confirmed-add-raw", Some("singlelabel:tcp:443"), None).is_err());
+        assert!(build_line("confirmed-add-raw", Some("e.com:icmp:0"), None).is_err());
+        assert!(build_line("confirmed-add-raw", None, None).is_err());
+        assert!(build_line("confirmed-bless", None, None).is_err());
     }
 
     #[test]
     fn build_line_rejects_abuse_locally() {
-        assert!(build_line("status", Some("weather")).is_err()); // status takes no arg
-        assert!(build_line("bless", None).is_err()); // missing profile
-        assert!(build_line("bogus", Some("weather")).is_err()); // unknown verb
+        assert!(build_line("status", Some("weather"), None).is_err()); // status takes no arg
+        assert!(build_line("bless", None, None).is_err()); // missing profile
+        assert!(build_line("bogus", Some("weather"), None).is_err()); // unknown verb
+        // a stray second argument on a single-arg verb is rejected up front.
+        assert!(build_line("bless", Some("weather"), Some("evil")).is_err());
         // a smuggled destination / second token can't be encoded — the space is rejected as a bad token
-        assert!(build_line("bless", Some("weather evil.example")).is_err());
-        assert!(build_line("bless", Some("6.6.6.6 extra")).is_err());
-        assert!(build_line("bless", Some("../escape")).is_err()); // traversal
-        assert!(build_line("bless", Some("we\nather")).is_err()); // embedded newline
-        assert!(build_line("bless", Some("we\0ather")).is_err()); // control byte
-        assert!(build_line("bless", Some(&"x".repeat(200))).is_err()); // oversize
+        assert!(build_line("bless", Some("weather evil.example"), None).is_err());
+        assert!(build_line("bless", Some("6.6.6.6 extra"), None).is_err());
+        assert!(build_line("bless", Some("../escape"), None).is_err()); // traversal
+        assert!(build_line("bless", Some("we\nather"), None).is_err()); // embedded newline
+        assert!(build_line("bless", Some("we\0ather"), None).is_err()); // control byte
+        assert!(build_line("bless", Some(&"x".repeat(200)), None).is_err()); // oversize
     }
 }
