@@ -19,6 +19,10 @@
 //!   * [`provenance`] — `Evidence → TrustBand` (B1, slice-7): the band is DERIVED from an
 //!                  integrity-checked measurement of the code object, not asserted by the caller. The
 //!                  pure lattice lives here; gatekeeperd does the measuring.
+//!   * [`provider_bind`] — the sealed CLOSED SET of model-provider hook-up tokens (ADR-008, S1): the
+//!                  `token → sealed-name` map behind the egressd `bind` verb + the strict-IPv4
+//!                  bind-address grammar. Makes "uid 1000 may name only the 4 model brokers" true by
+//!                  construction; root is the sole author of `/etc/hosts` (security-model.md, #3121).
 //!   * [`swamp`]   — the sealed indexable-domain allow-set + human-only exclusion (Phase-6 Swamp
 //!                  slice-1): the default-DENY read-scope `swampd` Landlocks itself to, and the
 //!                  per-domain ceiling the query gate intersects. Pure policy DATA, resolved
@@ -36,6 +40,7 @@
 pub mod desktop_egress;
 pub mod egress;
 pub mod provenance;
+pub mod provider_bind;
 pub mod swamp;
 pub mod tier;
 
