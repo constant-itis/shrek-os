@@ -5,8 +5,8 @@
 #   1. the dev NOPASSWD sudoers is baked into the sealed base /etc ONLY for LIVE_INSTALLER builds;
 #   2. the DOGFOOD-only root debug-shell enable is present ONLY for DOGFOOD builds;
 #   3. the live-installer template parses as sudoers;
-#   4. the companion no-sudo paths hold (hosts-seed owns the binding store to the box owner; shrek-connect
-#      has no sudo fallback; build-installer-payload.sh gates the product artifact).
+#   4. the companion no-sudo paths hold (ADR-008: the hosts store is ROOT-owned and shrek-connect is
+#      SOCKET-mediated — no chowned store, no sudo fallback; build-installer-payload.sh gates the product).
 # The sealed-artifact gate (build-installer-payload.sh) and the sealed-VM dogfood are the runtime proofs;
 # this is the fast, root-free, build-free unit gate.
 set -euo pipefail
@@ -71,10 +71,15 @@ echo "=== template + companion no-sudo paths ==="
 visudo -cf "$TEMPLATE" >/dev/null 2>&1 && ok "live-installer template parses as sudoers" || bad "template failed visudo"
 grep -q 'LIVE INSTALLER ONLY' "$TEMPLATE" && ok "template header marks it live-installer-only" || bad "template header missing warning"
 
+# ADR-008 (#3121 fix): the uid-1000 chown of the hosts store is GONE — hosts-seed was deleted, and the
+# no-sudo hook-up is now the root-mediated egressd socket (shrek-connect sends `egressd ask bind`), so the
+# store stays root-owned. Assert BOTH: the defective chown script is removed, and shrek-connect is socket-
+# mediated with no sudo path.
 HS=image/overlay/usr/lib/shrek/hosts-seed
-grep -Eq 'chown +"?\$?owner' "$HS" && ok "hosts-seed re-owns the binding store to the box owner (no root:root)" || bad "hosts-seed does not chown the store to the owner"
+[ ! -e "$HS" ] && ok "hosts-seed removed (ADR-008: no uid-1000 chown of the root-owned hosts store)" || bad "hosts-seed still present — the #3121 chown defect is not removed"
 
 SC=layers/shrek-desktop/overlay/usr/bin/shrek-connect
+grep -q 'egressd ask bind' "$SC" && ok "shrek-connect is socket-mediated (egressd ask bind — no-sudo hook-up)" || bad "shrek-connect does not use the egressd socket"
 grep -q 'sudo shrek-connect' "$SC" && bad "shrek-connect still suggests 'sudo shrek-connect'" || ok "shrek-connect has no sudo fallback"
 
 PG=scripts/build-installer-payload.sh

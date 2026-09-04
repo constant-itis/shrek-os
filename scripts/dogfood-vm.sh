@@ -466,11 +466,11 @@ grep -qa 'SHREK-DOGFOOD Sconnect unbound-guard=ok' "$LOG" \
   && ok "shrek-agent fail-closes with a hook-up hint when the provider is unbound" \
   || bad "unbound-provider guard did not fire ($(grep -a 'SHREK-DOGFOOD Sconnect unbound-guard=' "$LOG" | tail -1 | tr -d '\r'))"
 grep -qa 'SHREK-DOGFOOD Sconnect etc-hosts-wired=ok' "$LOG" \
-  && ok "/etc/hosts is the baked symlink to the writable /home binding store" \
+  && ok "/etc/hosts is the baked symlink to the root-owned /run/shrek/hosts projection (ADR-008)" \
   || bad "/etc/hosts symlink not wired ($(grep -a 'SHREK-DOGFOOD Sconnect etc-hosts-wired=' "$LOG" | tail -1 | tr -d '\r'))"
-grep -qa 'SHREK-DOGFOOD Sconnect seed-service=active' "$LOG" \
-  && ok "the boot-time hosts-seed oneshot ran (localhost resolvable on a fresh box)" \
-  || bad "shrek-hosts-seed.service not active ($(grep -a 'SHREK-DOGFOOD Sconnect seed-service=' "$LOG" | tail -1 | tr -d '\r'))"
+grep -qa 'SHREK-DOGFOOD Sconnect compose-service=active' "$LOG" \
+  && ok "the boot-time hosts-compose oneshot ran (localhost resolvable on a fresh box)" \
+  || bad "shrek-hosts-compose.service not active ($(grep -a 'SHREK-DOGFOOD Sconnect compose-service=' "$LOG" | tail -1 | tr -d '\r'))"
 
 # --- ADR-003 Part 1: baseline-application MERGE proof (scored only when the Part-1 Onions are merged).
 # The browser (shrek-browser) and app set (shrek-apps) are independent layers, so score each on its own
