@@ -10,6 +10,7 @@ members = [
     "crates/agentd",      # agent identity + tier/caps resolver    (Phase 8)
     "crates/shrek-policy", # sealed compiled-in policy: tier + egress (Phase 5)
     "crates/gatekeeperd", # privileged broker; only sandbox builder (Phase 4/5)
+    "crates/egressd",     # desktop-egress supervisor: bless/pin store + applier (ADR-007 S2)
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
     "crates/shrekctl",    # operator CLI
     "crates/shrek",       # user-facing CLI: `shrek run` front door       (Phase 6)
@@ -38,6 +39,7 @@ default-members = [
     "crates/agentd",
     "crates/shrek-policy",
     "crates/gatekeeperd",
+    "crates/egressd",
     "crates/oniond",
     "crates/shrekctl",
     "crates/shrek",

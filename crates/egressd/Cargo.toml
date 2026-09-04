@@ -1,0 +1,17 @@
+[package]
+name = "egressd"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+shrek-policy = { path = "../shrek-policy" }
+
+[features]
+# `oracle-env` gates the `SHREK_EGRESS_*` path overrides (store dir, /run projection dir) to the
+# host/container oracle ONLY. It is DEFAULT-OFF: the shipped sealed image compiles them out, so the
+# root supervisor ALWAYS uses the sealed defaults (`/home/.shrek-system/egress`, `/run/shrek/egress`)
+# and no environment crossing the sudo boundary can redirect the bless/pin store at a uid-1000-writable
+# dir. The host oracle (S2e, no systemd/VM) opts in with `--features oracle-env`. Mirrors gatekeeperd's
+# `oracle-env` (bench_record.rs) discipline. Core store fns take an explicit `&Path`, so `cargo test`
+# never touches the real store regardless of this feature.
+oracle-env = []
