@@ -5,7 +5,14 @@
 //! socket. It runs UNPRIVILEGED as uid 1000: opening `/run/shrek/egress/sock` and writing one request
 //! line needs no capability. It adds convenience, not capability — any uid-1000 process could already
 //! open that socket; the DAEMON is the sole authority (uid gate, sealed Tier-B gate, verb allowlist,
-//! third-field rejection, rate limit). So the client is a dumb, single-shot pipe:
+//! third-field rejection, rate limit). So the client is a dumb, single-shot pipe.
+//!
+//! `ask` ALSO carries the ROOT-only `confirmed-*` ceremony-commit relay (ADR-007 S6 fix #4): gatekeeperd,
+//! after a confirmed console SAK/VT ceremony, execs `egressd ask confirmed-<verb> <arg>` — a CAPLESS
+//! socket client — instead of a CLI that mutates nft. The daemon (the sole nft mutator, already holding
+//! `CAP_NET_ADMIN`) commits it, and authorizes it on the ROOT peer uid, so gatekeeperd never needs a
+//! network capability and no transient process edits the ROOT-netns table under the broker's caps. Same
+//! dumb-pipe shape; the only difference is which verbs `build_line` will encode:
 //!
 //!   * It builds the wire line from argv, but locally rejects whitespace/control/oversize tokens first —
 //!     better errors, and it never even opens the socket for obvious garbage (the daemon re-validates
@@ -27,8 +34,11 @@ use crate::supervisor::socket_path;
 /// One request/reply round-trip should be near-instant on a local socket; the daemon's own read timeout
 /// is 5s, so 6s here fails closed a hair after it rather than hanging the UI.
 const IO_TIMEOUT: Duration = Duration::from_secs(6);
-/// Matches the daemon's `REQ_MAX`; a verb + a ≤64-char token + newline fits comfortably.
+/// Matches the daemon's `REQ_MAX` (the uid-1000 verbs); a verb + a ≤64-char token + newline fits.
 const LINE_MAX: usize = 128;
+/// Matches the daemon's `REQ_MAX_PRIV` — the ROOT ceremony-commit path, where the arg is a raw
+/// `host:proto:port` (bounded at 300 by the sealed grammar) rather than a short profile token.
+const LINE_MAX_PRIV: usize = 384;
 
 /// `egressd ask <verb> [profile]`. Returns a process exit code: 0 = daemon replied `OK`, 1 = daemon
 /// replied `ERR ...` (denied / rate-limited / resolve-failed — the bless intent may still have persisted;
@@ -38,6 +48,7 @@ pub fn ask(args: &[String]) -> i32 {
         Some(v) => v.as_str(),
         None => {
             eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin|browser-up> [profile]");
+            eprintln!("             (ROOT only) egressd ask confirmed-<bless|unbless|add-raw|remove-raw> <arg>");
             return 2;
         }
     };
@@ -128,7 +139,34 @@ fn build_line(verb: &str, profile: Option<&str>) -> Result<String, String> {
             }
             Ok(line)
         }
-        other => Err(format!("unknown verb `{other}` (want status|bless|unbless|repin|browser-up)")),
+        // ROOT-only ceremony-commit relay (gatekeeperd post-ceremony, or the S6 probe's setup). The daemon
+        // authorizes on the ROOT peer uid; a uid-1000 process sending these is refused server-side. The
+        // profile variants carry a token; the raw variants carry a `host:proto:port`, validated +
+        // canonicalized through THE one sealed grammar (the daemon re-validates regardless).
+        "confirmed-bless" | "confirmed-unbless" => {
+            let p = profile.ok_or_else(|| format!("`{verb}` needs a profile (e.g. `egressd ask {verb} web-browsing`)"))?;
+            if !valid_client_token(p) {
+                return Err(format!("invalid profile token {p:?} (alnum . _ - only, ≤64 chars)"));
+            }
+            let line = format!("{verb} {p}\n");
+            if line.len() > LINE_MAX {
+                return Err("request too large".into());
+            }
+            Ok(line)
+        }
+        "confirmed-add-raw" | "confirmed-remove-raw" => {
+            let p = profile.ok_or_else(|| format!("`{verb}` needs a host:proto:port destination"))?;
+            let t = shrek_policy::desktop_egress::parse_raw_triple(p)
+                .map_err(|e| format!("invalid destination {p:?}: {e}"))?;
+            let line = format!("{verb} {}\n", t.to_wire());
+            if line.len() > LINE_MAX_PRIV {
+                return Err("request too large".into());
+            }
+            Ok(line)
+        }
+        other => Err(format!(
+            "unknown verb `{other}` (want status|bless|unbless|repin|browser-up|confirmed-*)"
+        )),
     }
 }
 
@@ -161,6 +199,21 @@ mod tests {
         // mirrors the daemon: browser-up carries NO argument (the cgroup is derived from the peer uid).
         assert!(build_line("browser-up", Some("web-browsing")).is_err());
         assert!(build_line("browser-up", Some("anything")).is_err());
+    }
+
+    #[test]
+    fn build_line_encodes_the_confirmed_relay_verbs() {
+        // profile-arg ceremony verbs
+        assert_eq!(build_line("confirmed-bless", Some("web-browsing")).unwrap(), "confirmed-bless web-browsing\n");
+        assert_eq!(build_line("confirmed-unbless", Some("web-browsing")).unwrap(), "confirmed-unbless web-browsing\n");
+        // raw-triple ceremony verbs: validated + canonicalized through the sealed grammar
+        assert_eq!(build_line("confirmed-add-raw", Some("example.com:tcp:8443")).unwrap(), "confirmed-add-raw example.com:tcp:8443\n");
+        assert_eq!(build_line("confirmed-remove-raw", Some("203.0.113.7:udp:8883")).unwrap(), "confirmed-remove-raw 203.0.113.7:udp:8883\n");
+        // a malformed destination is refused before the socket is even opened (the daemon re-checks too).
+        assert!(build_line("confirmed-add-raw", Some("singlelabel:tcp:443")).is_err());
+        assert!(build_line("confirmed-add-raw", Some("e.com:icmp:0")).is_err());
+        assert!(build_line("confirmed-add-raw", None).is_err());
+        assert!(build_line("confirmed-bless", None).is_err());
     }
 
     #[test]

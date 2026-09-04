@@ -1,6 +1,6 @@
 # ADR-007 — Desktop egress plane & the user-blessed connectivity boundary
 
-Status: **COMPLETE (2026-09-04) — S1–S6 all shipped; the plane is VM-proven end to end (desktop-egress-s6-vm-proof.sh 13/0).** ACCEPTED owner 2026-09-03 after Fable round-3 GO (clean); mirrors the ADR-005 flow.
+Status: **COMPLETE (2026-09-04) — S1–S6 all shipped; the plane is VM-proven end to end (desktop-egress-s6-vm-proof.sh 13/0).** Includes the **S6.1 fix #4 hardening** (2026-09-04): the ceremony commit is routed through the egressd daemon over root-gated IPC and `gatekeeperd` drops `CAP_NET_ADMIN` (§14 S6.1). ACCEPTED owner 2026-09-03 after Fable round-3 GO (clean); mirrors the ADR-005 flow.
 Three Fable rounds folded: R1 GO-WITH-FIXES (MF-1..MF-5) → R2 GO-WITH-FIXES (R2-MF-A/B/C) → R3 **GO**, with the
 two-line §7 insertion-point reconciliation applied. See the `[R1-MFn]`/`[R2-MF-x]` markers inline and the §14 changelog;
 Q3/Q5/Q6/Q7/Q8 resolved (Q6b `desktop-updates` endpoint still TBD, does not block S1). **Note:** the uid-1000-owned
@@ -463,11 +463,15 @@ table inet shrek_desktop_egress {
 4. **S4 — ceremony tier** — **DONE (2026-09-04)**: `web-browsing` + raw `host:proto:port` adds through the
    console ceremony (`consent.rs` reuse), with the persistence bolt-on. **Shipped** (see §14 S4 entry):
    a NEW gatekeeperd `DESKTOP-EGRESS` verb family reusing the shared SAK/VT ceremony core; a root-only
-   `egressd confirmed-*` commit surface (`geteuid==0` + tier/grammar re-validation + store lock); a
+   ceremony-commit surface (tier/grammar re-validation + store lock); a
    concatenated `@raw_pinned` nft set (`ipv4_addr . inet_proto . inet_service`) keeping the element-only
    invariant for raw; reconcile survival + a `browser-up` actuator (MF-7); the `shrek connectivity` client
    + the DMS Connectivity ceremony button, raw editor, and SAK banner. Built after a Fable build-plan pass
-   (GO-WITH-FIXES → 7 must-fixes folded).
+   (GO-WITH-FIXES → 7 must-fixes folded). **Superseded transport (S6.1 fix #4):** the commit surface is no
+   longer a transient `egressd confirmed-*` CLI that runs nft under gatekeeperd's caps — gatekeeperd now
+   **relays** the confirmed op to the running egressd daemon over its root-gated socket (`egressd ask
+   confirmed-*`), the daemon commits it, and the `geteuid==0` gate becomes the daemon's **root-peer**
+   authorization. See §14 S6.1.
 5. **S5 — baseline wiring — DONE (2026-09-04)**: ships the sealed `timesyncd.conf` drop-in
    (`/usr/lib/systemd/timesyncd.conf.d/10-shrek-sealed-ntp.conf`) with `NTP=` set to the **sealed literal
    Cloudflare IPs** matching `desktop-ntp`'s `@ntp_pinned` (Q6a + `[R2-MF-C]`; no name, no resolution — the
@@ -496,7 +500,9 @@ table inet shrek_desktop_egress {
    in-VM-unsimulatable apply-fail, which the host oracle already covers, `[MF-5]`); and a raw
    `host:proto:port` added through the **console SAK ceremony** pins `@raw_pinned`. **Found + fixed four
    ship-blocking defects the oracle missed** (see §14 S6): the cgroup path/level, the unquoted nft path token,
-   the bare-name `nft` spawn under `env_clear()`, and the missing `CAP_NET_ADMIN` on the ceremony-commit exec.
+   the bare-name `nft` spawn under `env_clear()`, and (initially) a missing `CAP_NET_ADMIN` on the
+   ceremony-commit exec — the last **since superseded** by the **S6.1 fix #4 redesign** (routing the commit
+   through the egressd daemon so gatekeeperd carries no `CAP_NET_ADMIN`; see §14 S6.1). Re-proven 13/0.
 
 ## 12. Open questions (for owner + Fable)
 
@@ -669,14 +675,45 @@ table inet shrek_desktop_egress {
      comment already claimed the absolute path; the code didn't match).
   4. **missing `CAP_NET_ADMIN`** (`gatekeeperd.service`): the ceremony-commit exec of `egressd confirmed-*`
      edits the ROOT-netns table, but the broker's bounding set deliberately omitted net caps, so raw ceremony
-     adds failed with "Operation not permitted." Granted `CAP_NET_ADMIN` (marginal — CAP_SYS_ADMIN already makes
-     the broker root-equivalent); apply.rs stays the sole nft mutator. The S4 oracle ran the commit as
-     unrestricted root and missed it.
+     adds failed with "Operation not permitted." Initially granted `CAP_NET_ADMIN` (marginal — CAP_SYS_ADMIN
+     already makes the broker root-equivalent). **This grant was SUPERSEDED by the S6.1 fix #4 redesign below**
+     — the commit no longer runs in a gatekeeperd child at all, so the broker carries no net cap. The S4 oracle
+     ran the commit as unrestricted root and missed the original defect.
 - **`[MF-5]` assert-set (per the S6 Fable build-plan pass):** dropped the in-VM-unsimulatable `apply-fail` leg
   (destroying the baked table to induce it would demolish the very floor the assert claims stands — the host
   oracle already proves it) and replaced it with a **daemon-death fail-closed** leg; added **revocation** and
   **double-launch** legs and a `/run`-map == `@weather_pinned` set-equality check. **`[MF-4]`** skews the RTC
   **forward** (a past skew hits systemd's behind-epoch clamp = vacuous) but TLS-safe, with an explicit qemu NIC.
+
+**S6.1 — ceremony commit routed through egressd IPC; gatekeeperd drops `CAP_NET_ADMIN` (fix #4, owner-ratified 2026-09-04).**
+The S6 finish-line fix #4 granted the broker `CAP_NET_ADMIN` so its forked `egressd confirmed-*` child could
+edit the ROOT-netns table. That was the *minimal* correct fix but the *wrong shape*: it made gatekeeperd a
+transitive nft mutator and widened its cap posture. **The redesign removes the transient CLI mutation path
+entirely.** On a confirmed ceremony gatekeeperd now execs `egressd ask confirmed-*` — a **capless socket
+client** — which relays the op to the already-running egressd daemon; the daemon (the sole nft mutator,
+already `CAP_NET_ADMIN` via `egressd.service`) does the store write + apply **in its own process**.
+- **New trust boundary:** the daemon gains privileged `confirmed-{bless,unbless,add-raw,remove-raw}` socket
+  verbs, `authorize`d on a **root peer** (`peer_uid == 0`) — the direct analog of the old CLI's `geteuid()==0`
+  gate. A uid-1000 peer can never reach them, so the socket does not become a second front door for the
+  ceremony tier; the daemon still re-validates tier + re-parses the raw triple through the one sealed grammar
+  (defense in depth). The root peer's request line is admitted up to `REQ_MAX_PRIV` (raw triple ≤300); every
+  non-root peer stays held to the tight `REQ_MAX`.
+- **Net effect:** `gatekeeperd.service` `CapabilityBoundingSet` loses `CAP_NET_ADMIN`; **no transient process
+  ever edits the desktop table under the broker's caps**; and the **MF-4 cross-process race is deleted** — the
+  daemon is single-writer, so the store lock no longer arbitrates a broker-forked committer against the daemon.
+  The `egressd confirmed-*` CLI subcommands are gone; `confirmed.rs` keeps only the shared reconcile engine the
+  daemon handlers and boot `reconcile` call.
+- **Rate-limiter exemption (a real regression the first re-run caught — 12/1 → fixed → 13/0):** the daemon
+  rate-limits every *uid-1000* mutating attempt (6/30s, anti-oracle). Routing the commit through the socket
+  first put the ROOT ceremony verbs under that SAME shared budget — so in a busy 30s window (weather
+  bless/repin + `confirmed-bless` + two `browser-up`s) the follow-on `confirmed-unbless` was silently
+  `ERR rate-limited`, the accept-pair never tore down, and `revoke-drop` failed. Fix: **privileged
+  (root-peer) commits bypass the limiter** — they are unreachable by uid-1000 (no oracle vector) and already
+  physically throttled by the SAK/VT ceremony; rate-limiting them is an MF-5 hazard, not a protection. The old
+  CLI path took the store lock directly and never touched the limiter, so this preserves prior behavior.
+- **Re-proven:** the S6 sealed-VM proof re-run is **13/0** — `revoke-drop` and `sak-raw` now exercise the IPC
+  relay end to end (the probe's setup/revoke legs use `egressd ask confirmed-*`; `sak-raw` drives the real
+  gatekeeperd ceremony → `egressd ask confirmed-add-raw` → daemon commit). Rust changed → both repos push.
 
 **CROSS-CUTTING SECURITY DEFECT (filed separately as mycelium #3121, NOT owned by this ADR):**
 `image/overlay/etc/hosts` is a baked symlink into `/home/.shrek-system/hosts`, which

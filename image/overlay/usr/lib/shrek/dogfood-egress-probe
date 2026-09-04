@@ -190,8 +190,10 @@ else
 fi
 
 # ---- LEG: cgroup (§11.6 #3) — THE load-bearing new proof: live path + in-slice vs outside reachability --
-# confirmed-bless as ROOT (geteuid==0 gate; legit setup — the CEREMONY itself is proven in sak-raw below).
-{ echo "confirmed-bless web-browsing:"; egressd confirmed-bless web-browsing 2>&1; echo "ask status:"; sdev egressd ask status 2>&1; } | diag browser
+# confirmed-bless RELAYED as ROOT over the daemon socket (root-peer gate; legit setup — the CEREMONY
+# itself is proven in sak-raw below). Post-fix#4 this exercises the very IPC path gatekeeperd now uses:
+# `egressd ask confirmed-bless` is a capless client; the daemon (sole nft mutator) commits it.
+{ echo "confirmed-bless web-browsing:"; egressd ask confirmed-bless web-browsing 2>&1; echo "ask status:"; sdev egressd ask status 2>&1; } | diag browser
 # Launch a LONG-LIVED scope in the static slice as dev so the slice cgroup exists + has a resident pid.
 sdev env systemd-run --user --scope --slice=shrekbrowser.slice --unit=s6-inslice sleep 120 >/dev/null 2>&1 &
 sleep 2
@@ -248,7 +250,8 @@ if stub_probe_inslice; then say "S6 double-launch=ok stub-reached-in-relaunched-
 else say "S6 double-launch=FAIL stub-dropped-after-relaunch"; fi
 
 # ---- LEG: revocation (MF-5) — confirmed-unbless tears down the accept-pair; the slice now DROPs --------
-egressd confirmed-unbless web-browsing >/dev/null 2>&1 || true
+# RELAYED as ROOT over the daemon socket (post-fix#4); the daemon does the nft teardown in-process.
+egressd ask confirmed-unbless web-browsing >/dev/null 2>&1 || true
 sleep 1
 if stub_probe_inslice; then say "S6 revoke-drop=FAIL stub-still-reachable-after-unbless"
 else say "S6 revoke-drop=ok stub-dropped-after-unbless"; fi

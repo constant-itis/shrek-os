@@ -32,7 +32,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use shrek_policy::desktop_egress::admits_socket_bless;
+use shrek_policy::desktop_egress::{admits_socket_bless, bless_tier, is_broad_profile, parse_raw_triple, BlessTier};
 
 use crate::apply::{self, NftExec, ShellNft};
 use crate::dot;
@@ -40,8 +40,13 @@ use crate::store::{self, BlessRecord, FaultKind, PinRecord};
 use crate::uapi;
 
 /// Max bytes read for one request before giving up (giant-payload guard). One short line — a verb + a
-/// ≤64-char profile token + a newline fits comfortably.
+/// ≤64-char profile token + a newline fits comfortably. This is the UID-1000 cap; the socket enforces it
+/// for every non-root peer, so the untrusted front door stays tight.
 pub const REQ_MAX: usize = 128;
+/// Max bytes for a ROOT peer's request (the ceremony-commit path). A raw `host:proto:port` wire form is
+/// bounded at 300 by [`parse_raw_triple`]; +verb +newline fits under this. Only a root peer (gatekeeperd)
+/// is granted the larger line — a uid-1000 peer is still held to [`REQ_MAX`] by [`serve`].
+pub const REQ_MAX_PRIV: usize = 384;
 /// Sealed desktop session uid the socket serves. Overridable ONLY in the oracle build (the host oracle
 /// runs as the invoking user, not 1000) via `SHREK_EGRESS_DESKTOP_UID`.
 pub const DESKTOP_UID: u32 = 1000;
@@ -89,11 +94,35 @@ pub enum Request {
     /// uid-1000 socket (identity-gated, but authority already rests on the prior ceremony). Wire = verb
     /// only (no cgroup path: the supervisor computes the deterministic slice path from the desktop uid).
     BrowserUp,
+
+    // ---- PRIVILEGED ceremony-commit verbs (ADR-007 S6 fix #4 redesign) ----
+    // These are the CONFIRMED result of a console SAK/VT ceremony. They carry the very things the
+    // uid-1000 verbs forbid — a broad profile or a raw `host:proto:port` destination — so they are gated
+    // on a ROOT peer ([`authorize`]): gatekeeperd, having run the ceremony, connects as root and relays
+    // the confirmed op here. The daemon (the sole nft mutator, already `CAP_NET_ADMIN`) performs the
+    // store write + apply in-process, so gatekeeperd never needs `CAP_NET_ADMIN` and there is no longer a
+    // transient root process editing the ROOT-netns table under the broker's cap umbrella. A uid-1000
+    // peer can NEVER reach these — else the socket would become a second front door for the ceremony
+    // tier. The engine still re-validates the tier + re-parses the grammar (defense in depth).
+    ConfirmedBless(String),     // profile (must be ceremony-tier / broad, e.g. web-browsing)
+    ConfirmedUnbless(String),   // profile
+    ConfirmedAddRaw(String),    // raw `host:proto:port` wire form (re-validated by the sealed grammar)
+    ConfirmedRemoveRaw(String), // raw `host:proto:port` wire form
 }
 
 impl Request {
     pub fn is_mutating(&self) -> bool {
         !matches!(self, Request::Status)
+    }
+    /// A privileged ceremony-commit verb — served ONLY to a root peer (gatekeeperd post-ceremony).
+    pub fn is_privileged(&self) -> bool {
+        matches!(
+            self,
+            Request::ConfirmedBless(_)
+                | Request::ConfirmedUnbless(_)
+                | Request::ConfirmedAddRaw(_)
+                | Request::ConfirmedRemoveRaw(_)
+        )
     }
     pub fn verb(&self) -> &'static str {
         match self {
@@ -102,21 +131,33 @@ impl Request {
             Request::Unbless(_) => "unbless",
             Request::Repin(_) => "repin",
             Request::BrowserUp => "browser-up",
+            Request::ConfirmedBless(_) => "confirmed-bless",
+            Request::ConfirmedUnbless(_) => "confirmed-unbless",
+            Request::ConfirmedAddRaw(_) => "confirmed-add-raw",
+            Request::ConfirmedRemoveRaw(_) => "confirmed-remove-raw",
         }
     }
     pub fn profile(&self) -> &str {
         match self {
             Request::Status | Request::BrowserUp => "-",
             Request::Bless(p) | Request::Unbless(p) | Request::Repin(p) => p,
+            Request::ConfirmedBless(p) | Request::ConfirmedUnbless(p) => p,
+            // raw ops journal under a fixed "raw" label, not the destination (which the audit line + the
+            // events projection carry separately); keeps the profile column stable.
+            Request::ConfirmedAddRaw(_) | Request::ConfirmedRemoveRaw(_) => "raw",
         }
     }
 }
 
-/// Parse one request line, fail-closed. Accepts EXACTLY `status`, or `<verb> <profile>` for the three
-/// mutating verbs — a third token, an unknown verb, a control char, or a non-`valid_token` profile is a
-/// hard error. This is where "verb + profile only, never a supplied destination" is enforced.
+/// Parse one request line, fail-closed. Accepts EXACTLY `status`, `<verb> <profile>` for the uid-1000
+/// mutating verbs, `browser-up`, or one of the privileged `confirmed-*` verbs (a profile token, or a raw
+/// `host:proto:port` re-validated through the ONE sealed grammar). A third whitespace field, an unknown
+/// verb, or a control char is a hard error. Parsing is identity-blind — a uid-1000 peer's `confirmed-*`
+/// line parses fine here and is then REFUSED at [`authorize`] (peer_uid != 0), so this is not where the
+/// tier gate lives. The `REQ_MAX_PRIV` guard is belt-and-suspenders; the real per-peer byte cap is
+/// enforced by [`serve`]/[`read_request`] (uid-1000 → [`REQ_MAX`]).
 pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
-    if raw.len() > REQ_MAX {
+    if raw.len() > REQ_MAX_PRIV {
         return Err("request too large");
     }
     let line = raw.trim_end_matches(['\r', '\n']);
@@ -137,6 +178,14 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
         }
         Ok(p.to_string())
     };
+    // A raw destination is NOT a `valid_token` (it carries `:` and `.`), so it has its own branch: parse
+    // it through the sealed grammar and canonicalize to the wire form. A single whitespace-free token, so
+    // the "no third field" rule above still holds.
+    let want_raw = |p: Option<&str>| -> Result<String, &'static str> {
+        let p = p.ok_or("verb needs a destination")?;
+        let t = shrek_policy::desktop_egress::parse_raw_triple(p)?;
+        Ok(t.to_wire())
+    };
     match verb {
         "status" => {
             if a.is_some() {
@@ -153,15 +202,22 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
             }
             Ok(Request::BrowserUp)
         }
+        "confirmed-bless" => Ok(Request::ConfirmedBless(want_profile(a)?)),
+        "confirmed-unbless" => Ok(Request::ConfirmedUnbless(want_profile(a)?)),
+        "confirmed-add-raw" => Ok(Request::ConfirmedAddRaw(want_raw(a)?)),
+        "confirmed-remove-raw" => Ok(Request::ConfirmedRemoveRaw(want_raw(a)?)),
         _ => Err("unknown verb"),
     }
 }
 
 /// Read one bounded, newline-terminated request from a stream. Fail-closed on EOF-before-newline
-/// (disconnect), on exceeding [`REQ_MAX`] without a newline (giant payload), or on a read error/timeout.
-/// Generic over `Read` so the abuse cases are unit-tested without a socket.
-pub fn read_request<R: Read>(mut r: R) -> Result<String, &'static str> {
-    let mut buf = [0u8; REQ_MAX + 1];
+/// (disconnect), on exceeding `max` bytes without a newline (giant payload), or on a read error/timeout.
+/// `max` is the per-peer byte cap the caller chooses from the peer's uid ([`REQ_MAX`] for uid-1000, the
+/// larger [`REQ_MAX_PRIV`] for a root ceremony-commit) — the untrusted front door stays tight while the
+/// root path admits a raw-triple line. Generic over `Read` so the abuse cases are unit-tested w/o a socket.
+pub fn read_request<R: Read>(mut r: R, max: usize) -> Result<String, &'static str> {
+    let mut buf = [0u8; REQ_MAX_PRIV + 1];
+    let cap = max.min(REQ_MAX_PRIV);
     let mut n = 0usize;
     loop {
         if n >= buf.len() {
@@ -172,12 +228,15 @@ pub fn read_request<R: Read>(mut r: R) -> Result<String, &'static str> {
             Ok(k) => {
                 if let Some(rel) = buf[n..n + k].iter().position(|&b| b == b'\n') {
                     let end = n + rel;
+                    if end > cap {
+                        return Err("request too large");
+                    }
                     return std::str::from_utf8(&buf[..end])
                         .map(|s| s.to_string())
                         .map_err(|_| "non-utf8 request");
                 }
                 n += k;
-                if n > REQ_MAX {
+                if n > cap {
                     return Err("request too large");
                 }
             }
@@ -195,9 +254,21 @@ pub enum Decision {
     Deny(&'static str),
 }
 
-/// The two-gate authorization. Gate 1: the peer must be the sealed desktop uid (identity). Gate 2: the
-/// verb's profile must pass the sealed Tier-B rule (authority). Passing gate 1 alone authorizes nothing.
+/// The identity-then-authority gate. A PRIVILEGED `confirmed-*` verb is served only to a ROOT peer
+/// (gatekeeperd, having run the console SAK/VT ceremony); a uid-1000 peer requesting one is refused so
+/// the socket can never become a second front door for the ceremony tier (the exact analog of the old
+/// CLI's `geteuid()==0` gate). Every OTHER verb requires the sealed desktop uid (identity), and the
+/// mutating ones additionally require the profile to pass the sealed Tier-B rule (authority) — passing
+/// the identity gate alone authorizes nothing. The engine still re-validates tier/grammar downstream.
 pub fn authorize(peer_uid: u32, req: &Request, desktop_uid: u32) -> Decision {
+    if req.is_privileged() {
+        // ROOT-only. A uid-1000 (or any non-root) peer can NEVER commit a ceremony op over the socket.
+        return if peer_uid == 0 {
+            Decision::Allow
+        } else {
+            Decision::Deny("ceremony-commit is root-only (bypasses the console ceremony)")
+        };
+    }
     if peer_uid != desktop_uid {
         return Decision::Deny("peer is not the desktop user");
     }
@@ -213,6 +284,8 @@ pub fn authorize(peer_uid: u32, req: &Request, desktop_uid: u32) -> Decision {
                 Decision::Deny("profile not one-click blessable (baseline/broad/unknown)")
             }
         }
+        // privileged verbs handled above; unreachable but keep the match exhaustive + fail-closed.
+        _ => Decision::Deny("unexpected verb"),
     }
 }
 
@@ -355,9 +428,14 @@ impl Supervisor {
             }
         };
 
-        // Rate-limit every mutating attempt BEFORE authorization, so a denied-profile flood still burns
-        // the budget (no oracle). Status is read-only and not rate-limited here.
-        if req.is_mutating() && !self.limiter.check(now) {
+        // Rate-limit every uid-1000 mutating attempt BEFORE authorization, so a denied-profile flood
+        // still burns the budget (no oracle). Status is read-only and not rate-limited. PRIVILEGED
+        // ceremony commits are EXEMPT: they are ROOT-only (a uid-1000 peer can never reach them, so they
+        // are no oracle/DoS vector) and are already physically throttled by the console SAK/VT ceremony +
+        // gatekeeperd's escalating cooldown. Sharing the 6/30s budget with the uid-1000 verbs would
+        // SILENTLY DROP a legitimate post-ceremony revoke inside a busy window (MF-5 — "revoked intent,
+        // still-live enforcement"): exactly the S6.1 `revoke-drop` regression. Root is trusted here.
+        if req.is_mutating() && !req.is_privileged() && !self.limiter.check(now) {
             journal(cred, req.verb(), req.profile(), "rate-limited", "-", "over limit");
             return "ERR rate-limited".to_string();
         }
@@ -400,6 +478,13 @@ impl Supervisor {
             }
             Request::Unbless(p) => self.unbless(cred, p, exec, at),
             Request::BrowserUp => self.browser_up(cred, exec, at),
+            // PRIVILEGED ceremony-commit (root peer only — already gated in `authorize`). The daemon does
+            // the store write + nft mutation in-process (it holds CAP_NET_ADMIN), so no transient root
+            // process runs nft and gatekeeperd needs no net capability.
+            Request::ConfirmedBless(p) => self.confirmed_bless(cred, p, exec, at),
+            Request::ConfirmedUnbless(p) => self.confirmed_unbless(cred, p, exec, at),
+            Request::ConfirmedAddRaw(w) => self.confirmed_add_raw(cred, w, exec, at),
+            Request::ConfirmedRemoveRaw(w) => self.confirmed_remove_raw(cred, w, exec, at),
         }
     }
 
@@ -426,6 +511,132 @@ impl Supervisor {
             Err(e) => {
                 let msg = format!("{e:?}");
                 journal(cred, "browser-up", "web-browsing", "apply-fail", "-", &msg);
+                "ERR apply-failed".to_string()
+            }
+        }
+    }
+
+    // ---- PRIVILEGED ceremony-commit handlers (root peer only; ADR-007 S6 fix #4 redesign) -----------
+    // These replace the removed `egressd confirmed-*` CLI: the SAME store+reconcile engine (confirmed.rs),
+    // now driven IN the running daemon rather than a transient root process gatekeeperd forked. `exec` is
+    // the daemon's live `ShellNft`, so the daemon (which holds CAP_NET_ADMIN) is the sole nft mutator —
+    // gatekeeperd relays the confirmed op over the socket and touches no network capability. Each verb
+    // re-validates tier/grammar (defense in depth — the request already parsed, but the trust boundary is
+    // "the string originated from a uid-1000 request; the ceremony proved intent, not well-formedness").
+
+    /// Persist + apply a CONFIRMED bless of a broad ceremony profile (`web-browsing`). Intent-first: the
+    /// durable record (tier `ceremony`) is written before the browser rule install, which lands IFF the
+    /// slice exists now (usually it won't — the browser isn't running yet — so it stays pending and
+    /// `browser-up` installs it at launch).
+    fn confirmed_bless(&mut self, cred: &uapi::Ucred, profile: &str, exec: &mut dyn NftExec, at: u64) -> String {
+        if bless_tier(profile) != Some(BlessTier::Ceremony) || !is_broad_profile(profile) {
+            journal(cred, "confirmed-bless", profile, "deny", "-", "not a ceremony-tier profile");
+            return "ERR not-ceremony-tier".to_string();
+        }
+        if let Err(e) = store::write_bless(
+            &self.store,
+            &BlessRecord { profile: profile.to_string(), tier: "ceremony".into(), blessed: at },
+        ) {
+            journal(cred, "confirmed-bless", profile, "store-fail", "-", &e.to_string());
+            return "ERR store".to_string();
+        }
+        let _ = store::clear_fault(&self.store, profile);
+        let installed = crate::confirmed::reconcile_web_browsing(&self.store, exec, self.desktop_uid).unwrap_or(false);
+        self.reproject();
+        journal(cred, "confirmed-bless", profile, "accept", "-", if installed { "live" } else { "pending (browser not up)" });
+        let _ = append_event(&self.run, at, "bless", profile, if installed { "enabled" } else { "enabled (pending browser)" });
+        format!("OK confirmed-bless {profile} {}", if installed { "live" } else { "pending" })
+    }
+
+    /// Revoke a CONFIRMED ceremony bless: tear down live enforcement FIRST (MF-5 — the browser rule must
+    /// go, or the panel reads "Disabled" while broad egress persists), and only then drop the record, so
+    /// a teardown failure never leaves "revoked in the store, still allowed in the kernel".
+    fn confirmed_unbless(&mut self, cred: &uapi::Ucred, profile: &str, exec: &mut dyn NftExec, at: u64) -> String {
+        if bless_tier(profile) != Some(BlessTier::Ceremony) {
+            journal(cred, "confirmed-unbless", profile, "deny", "-", "not a ceremony-tier profile");
+            return "ERR not-ceremony-tier".to_string();
+        }
+        if let Err(e) = apply::uninstall_browser_rules(exec) {
+            let msg = format!("{e:?}");
+            let _ = store::write_fault(&self.store, profile, FaultKind::ApplyFail, &msg, at);
+            self.reproject();
+            journal(cred, "confirmed-unbless", profile, "apply-fail", "-", &msg);
+            return "ERR apply-failed".to_string();
+        }
+        let _ = store::remove_bless(&self.store, profile);
+        let _ = store::clear_fault(&self.store, profile);
+        self.reproject();
+        journal(cred, "confirmed-unbless", profile, "accept", "-", "revoked");
+        let _ = append_event(&self.run, at, "unbless", profile, "revoked");
+        format!("OK confirmed-unbless {profile}")
+    }
+
+    /// Add a CONFIRMED raw destination. Intent-first (MF-3): the triple is stored before the DoT resolve,
+    /// so a ceremony approved before the network is up persists as "blessed, waiting" and heals on
+    /// reconcile. `@raw_pinned` is reconciled to the UNION of all raw entries (never a per-entry element).
+    fn confirmed_add_raw(&mut self, cred: &uapi::Ucred, wire: &str, exec: &mut dyn NftExec, at: u64) -> String {
+        let t = match parse_raw_triple(wire) {
+            Ok(t) => t,
+            Err(e) => {
+                journal(cred, "confirmed-add-raw", "raw", "deny", "-", e);
+                return format!("ERR bad-destination: {e}");
+            }
+        };
+        if let Err(e) = store::add_raw(&self.store, &t) {
+            journal(cred, "confirmed-add-raw", "raw", "store-fail", "-", &e.to_string());
+            return "ERR store".to_string();
+        }
+        let mut resolver = crate::confirmed::DotRawResolver;
+        match crate::confirmed::reconcile_raw(&self.store, exec, &mut resolver, at) {
+            Ok((_, pending)) => {
+                self.reproject();
+                let live = store::list_raw_pins(&self.store).iter().any(|r| r.triple == t);
+                journal(cred, "confirmed-add-raw", "raw", "accept", "-", if live { "pinned" } else { "pending" });
+                let _ = append_event(&self.run, at, "add-raw", "raw", if live { "pinned" } else { "pending" });
+                if live {
+                    format!("OK confirmed-add-raw {} live", t.to_wire())
+                } else {
+                    format!("OK confirmed-add-raw {} pending ({pending} pending total)", t.to_wire())
+                }
+            }
+            Err(e) => {
+                // Record persisted (intent-first); a later reconcile heals it. Report the apply miss so
+                // the caller (and the ceremony log) knows the element did not land yet.
+                let msg = format!("{e:?}");
+                self.reproject();
+                journal(cred, "confirmed-add-raw", "raw", "apply-fail", "-", &msg);
+                let _ = append_event(&self.run, at, "add-raw", "raw", "apply-failed");
+                "ERR apply-failed".to_string()
+            }
+        }
+    }
+
+    /// Remove a CONFIRMED raw destination: drop the intent, then reconcile `@raw_pinned` to the UNION of
+    /// the REMAINING entries (MF-5 — never a per-entry element delete, which would kill a shared tuple).
+    fn confirmed_remove_raw(&mut self, cred: &uapi::Ucred, wire: &str, exec: &mut dyn NftExec, at: u64) -> String {
+        let t = match parse_raw_triple(wire) {
+            Ok(t) => t,
+            Err(e) => {
+                journal(cred, "confirmed-remove-raw", "raw", "deny", "-", e);
+                return format!("ERR bad-destination: {e}");
+            }
+        };
+        if let Err(e) = store::remove_raw(&self.store, &t) {
+            journal(cred, "confirmed-remove-raw", "raw", "store-fail", "-", &e.to_string());
+            return "ERR store".to_string();
+        }
+        let mut resolver = crate::confirmed::DotRawResolver;
+        match crate::confirmed::reconcile_raw(&self.store, exec, &mut resolver, at) {
+            Ok(_) => {
+                self.reproject();
+                journal(cred, "confirmed-remove-raw", "raw", "accept", "-", "revoked");
+                let _ = append_event(&self.run, at, "remove-raw", "raw", "revoked");
+                format!("OK confirmed-remove-raw {}", t.to_wire())
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                self.reproject();
+                journal(cred, "confirmed-remove-raw", "raw", "apply-fail", "-", &msg);
                 "ERR apply-failed".to_string()
             }
         }
@@ -641,7 +852,10 @@ pub fn serve(store: PathBuf, run: PathBuf) -> io::Result<()> {
         };
         let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
         let _ = stream.set_write_timeout(Some(READ_TIMEOUT));
-        let resp = match read_request(&mut stream) {
+        // A root peer (gatekeeperd's ceremony-commit relay) may send a raw-triple line up to
+        // REQ_MAX_PRIV; every other peer is held to the tight uid-1000 cap.
+        let cap = if cred.uid == 0 { REQ_MAX_PRIV } else { REQ_MAX };
+        let resp = match read_request(&mut stream, cap) {
             Ok(line) => {
                 let mut exec = ShellNft;
                 let mut resolver = DotResolver;
@@ -699,14 +913,26 @@ mod tests {
     #[test]
     fn read_request_bounds_and_disconnect() {
         // normal line
-        assert_eq!(read_request(Cursor::new(b"bless weather\n".to_vec())).unwrap(), "bless weather");
+        assert_eq!(read_request(Cursor::new(b"bless weather\n".to_vec()), REQ_MAX).unwrap(), "bless weather");
         // EOF before newline (mid-request disconnect)
-        assert_eq!(read_request(Cursor::new(b"bless weat".to_vec())), Err("disconnected before newline"));
+        assert_eq!(read_request(Cursor::new(b"bless weat".to_vec()), REQ_MAX), Err("disconnected before newline"));
         // giant payload with no newline
         let giant = vec![b'a'; REQ_MAX + 10];
-        assert_eq!(read_request(Cursor::new(giant)), Err("request too large"));
+        assert_eq!(read_request(Cursor::new(giant), REQ_MAX), Err("request too large"));
         // empty stream
-        assert_eq!(read_request(Cursor::new(Vec::new())), Err("disconnected before newline"));
+        assert_eq!(read_request(Cursor::new(Vec::new()), REQ_MAX), Err("disconnected before newline"));
+    }
+
+    #[test]
+    fn read_request_per_uid_cap_gates_the_privileged_line_length() {
+        // A raw-triple ceremony line exceeds the uid-1000 REQ_MAX but fits REQ_MAX_PRIV. The cap is the
+        // caller's (serve() derives it from the peer uid), so the SAME bytes pass at the root cap and are
+        // rejected at the uid-1000 cap — this is what keeps the untrusted front door tight.
+        let host = "x".repeat(120);
+        let line = format!("confirmed-add-raw {host}.example.com:tcp:443\n");
+        assert!(line.len() > REQ_MAX && line.len() <= REQ_MAX_PRIV, "fixture must straddle the two caps");
+        assert!(read_request(Cursor::new(line.clone().into_bytes()), REQ_MAX_PRIV).is_ok());
+        assert_eq!(read_request(Cursor::new(line.into_bytes()), REQ_MAX), Err("request too large"));
     }
 
     // ---- authorization: identity gate + sealed tier gate ----
@@ -725,6 +951,63 @@ mod tests {
         // status is allowed for the desktop uid, denied for others
         assert_eq!(authorize(good, &Request::Status, good), Decision::Allow);
         assert!(matches!(authorize(wrong, &Request::Status, good), Decision::Deny(_)));
+    }
+
+    #[test]
+    fn parse_accepts_the_privileged_verbs() {
+        assert_eq!(parse_request("confirmed-bless web-browsing"), Ok(Request::ConfirmedBless("web-browsing".into())));
+        assert_eq!(parse_request("confirmed-unbless web-browsing"), Ok(Request::ConfirmedUnbless("web-browsing".into())));
+        // a raw triple is canonicalized through the sealed grammar (never a `valid_token`).
+        assert_eq!(parse_request("confirmed-add-raw example.com:tcp:8443"), Ok(Request::ConfirmedAddRaw("example.com:tcp:8443".into())));
+        assert_eq!(parse_request("confirmed-remove-raw 203.0.113.7:udp:8883"), Ok(Request::ConfirmedRemoveRaw("203.0.113.7:udp:8883".into())));
+        // a malformed destination is refused at parse (defense in depth; the daemon re-checks too).
+        assert!(parse_request("confirmed-add-raw singlelabel:tcp:443").is_err());
+        assert!(parse_request("confirmed-add-raw e.com:icmp:0").is_err());
+        // still no smuggled third field.
+        assert!(parse_request("confirmed-add-raw a.com:tcp:443 extra").is_err());
+    }
+
+    #[test]
+    fn authorize_ceremony_commit_is_root_only() {
+        let root = 0;
+        let desktop = 1000;
+        // ROOT peer (gatekeeperd post-ceremony) ⇒ the privileged verbs are allowed.
+        assert_eq!(authorize(root, &Request::ConfirmedBless("web-browsing".into()), desktop), Decision::Allow);
+        assert_eq!(authorize(root, &Request::ConfirmedAddRaw("a.com:tcp:443".into()), desktop), Decision::Allow);
+        // the DESKTOP uid (or any non-root) can NEVER reach them — the socket is not a second front door.
+        assert!(matches!(authorize(desktop, &Request::ConfirmedBless("web-browsing".into()), desktop), Decision::Deny(_)));
+        assert!(matches!(authorize(desktop, &Request::ConfirmedAddRaw("a.com:tcp:443".into()), desktop), Decision::Deny(_)));
+        assert!(matches!(authorize(1234, &Request::ConfirmedRemoveRaw("a.com:tcp:443".into()), desktop), Decision::Deny(_)));
+        // and root does NOT get the uid-1000 verbs (root is not the desktop user).
+        assert!(matches!(authorize(root, &Request::Bless("weather".into()), desktop), Decision::Deny(_)));
+    }
+
+    #[test]
+    fn confirmed_bless_over_ipc_persists_ceremony_tier_and_gates_non_root() {
+        let (store, run) = sup_dirs("cbless");
+        let mut sup = Supervisor::new(store.clone(), run.clone(), 1000);
+        let root = uapi::Ucred { pid: 10, uid: 0, gid: 0 };
+        let desktop = uapi::Ucred { pid: 11, uid: 1000, gid: 1000 };
+        let t = Instant::now();
+
+        // A NON-root peer is refused at the boundary — the socket is not a ceremony bypass; nft untouched.
+        let denied = sup.handle(&desktop, "confirmed-bless web-browsing", &mut NoopExec, &mut NoopResolver, t, 7);
+        assert!(denied.starts_with("ERR denied"), "{denied}");
+        assert!(store::load_bless(&store, "web-browsing").is_none(), "a denied commit must not persist");
+
+        // A ROOT peer (gatekeeperd post-ceremony) persists the bless at tier=ceremony (pending: no slice up).
+        let ok = sup.handle(&root, "confirmed-bless web-browsing", &mut OkExec, &mut NoopResolver, t, 9);
+        assert!(ok.starts_with("OK confirmed-bless web-browsing"), "{ok}");
+        let rec = store::load_bless(&store, "web-browsing").unwrap();
+        assert_eq!(rec.tier, "ceremony");
+        let state = std::fs::read_to_string(store::state_map(&run)).unwrap();
+        assert!(state.contains("profile web-browsing tier=ceremony"), "{state}");
+
+        // Even from root, a ceremony-commit for a NON-ceremony profile is refused by the engine re-check
+        // (defense in depth: the socket authorized the ROOT identity, the engine still guards the tier).
+        let bad = sup.handle(&root, "confirmed-bless weather", &mut NoopExec, &mut NoopResolver, t, 11);
+        assert!(bad.starts_with("ERR"), "{bad}");
+        assert!(store::load_bless(&store, "weather").is_none());
     }
 
     // ---- rate limiter: rejected attempts count ----
@@ -765,6 +1048,31 @@ mod tests {
         }
         assert_eq!(denied, RATE_MAX, "first RATE_MAX attempts hit the tier deny");
         assert_eq!(limited, 3, "the rest are rate-limited despite never being admitted");
+    }
+
+    #[test]
+    fn privileged_ceremony_commit_bypasses_the_rate_limiter() {
+        // The S6.1 regression guard: a ROOT ceremony commit must NEVER be rate-limited, even when the
+        // shared uid-1000 budget is exhausted — else a legitimate post-ceremony revoke is silently
+        // dropped (MF-5: "revoked intent, still-live enforcement"). The old CLI path took the store lock
+        // directly and never touched the limiter; routing the commit through the socket must preserve that.
+        let (store, run) = sup_dirs("cbypass");
+        let mut sup = Supervisor::new(store.clone(), run.clone(), 1000);
+        let desktop = uapi::Ucred { pid: 2, uid: 1000, gid: 1000 };
+        let root = uapi::Ucred { pid: 3, uid: 0, gid: 0 };
+        let t0 = Instant::now();
+        // Saturate the limiter with uid-1000 attempts (rate-limited before touching nft/resolver).
+        for _ in 0..(RATE_MAX + 2) {
+            let _ = sup.handle(&desktop, "bless web-browsing", &mut NoopExec, &mut NoopResolver, t0, 0);
+        }
+        // A uid-1000 mutating attempt is now firmly rate-limited...
+        assert_eq!(
+            sup.handle(&desktop, "bless weather", &mut NoopExec, &mut NoopResolver, t0, 0),
+            "ERR rate-limited"
+        );
+        // ...but the ROOT ceremony commit sails through and executes (no bless present ⇒ a clean OK).
+        let r = sup.handle(&root, "confirmed-unbless web-browsing", &mut OkExec, &mut NoopResolver, t0, 5);
+        assert!(r.starts_with("OK confirmed-unbless"), "privileged commit must bypass the limiter: {r}");
     }
 
     /// An executor that must never be called (used where the path should reject before touching nft).

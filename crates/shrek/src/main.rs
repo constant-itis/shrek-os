@@ -169,9 +169,9 @@ fn bench(args: &[String]) -> i32 {
 
 /// `shrek connectivity <bless|unbless|add-raw|remove-raw> <profile-or-host:proto:port>` — drive the
 /// ADR-007 S4 desktop-egress CONSOLE CEREMONY over gatekeeperd's socket. The DMS Connectivity panel
-/// execs this (fixed argv, no shell). gatekeeperd runs the SAK/VT ceremony; on a confirmed OK it execs
-/// the root-only `egressd confirmed-*` verb. Fail-closed: an unreachable supervisor is unavailability,
-/// never a grant.
+/// execs this (fixed argv, no shell). gatekeeperd runs the SAK/VT ceremony; on a confirmed OK it relays
+/// the op to the egressd daemon over its root-gated socket (`egressd ask confirmed-*`; ADR-007 S6.1).
+/// Fail-closed: an unreachable supervisor is unavailability, never a grant.
 fn connectivity(args: &[String]) -> i32 {
     if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) || args.is_empty() {
         eprintln!("usage: shrek connectivity <bless|unbless|add-raw|remove-raw> <profile|host:proto:port>");

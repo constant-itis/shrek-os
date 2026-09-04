@@ -11,10 +11,11 @@
 //! Boundary (MF-1/MF-6): a NEW verb family (`desktop-egress`, NOT the bench `network` verb — no
 //! bench-name collision, no shared cooldown key), and `high_authority() == true` for every op (each
 //! demands the typed code, never a bare `y`; `web-browsing` also sets `trifecta` so the renderer shows
-//! the "read your files AND reach the network" exfil warning). On a confirmed ceremony, commit execs the
-//! ROOT-ONLY `egressd confirmed-*` verb — the ABSOLUTE sealed binary with a CLEARED environment and argv
-//! taken from the VALIDATED plan (never re-read from the wire), so the string uid 1000 supplied is
-//! re-validated by egressd too and no inherited env can redirect the store.
+//! the "read your files AND reach the network" exfil warning). On a confirmed ceremony, commit RELAYS the
+//! op to the egressd daemon over its root-gated socket (`egressd ask confirmed-*`, a capless client) —
+//! the ABSOLUTE sealed binary with a CLEARED environment and argv taken from the VALIDATED plan (never
+//! re-read from the wire). The DAEMON is the sole nft mutator, so gatekeeperd holds no `CAP_NET_ADMIN`;
+//! egressd re-validates the tier + grammar (defense in depth) and no inherited env can redirect the client.
 
 use crate::bench_plane::{self, AuthorityPlan};
 use crate::linux_uapi::Ucred;
@@ -49,10 +50,14 @@ pub fn action(op: &Op) -> String {
     }
 }
 
-/// Materialize a CONFIRMED desktop-egress ceremony: exec the ROOT-ONLY `egressd confirmed-*` verb. Runs
-/// as whatever uid gatekeeperd is (root — the daemon), env CLEARED, absolute binary, argv from the
-/// validated op. egressd re-checks `geteuid()==0`, the tier, and the grammar (defense in depth), so a
-/// confused-deputy exec still can't widen anything. Returns the child's exit code (0 = applied/persisted).
+/// Materialize a CONFIRMED desktop-egress ceremony by RELAYING it to the egressd daemon over its
+/// root-gated socket (ADR-007 S6 fix #4). We exec `egressd ask confirmed-*` — a CAPLESS socket client
+/// that connects, writes one request line, and reads the reply — NOT a CLI that mutates nft. The daemon
+/// (the sole nft mutator, already holding `CAP_NET_ADMIN`) does the store write + apply in-process and
+/// authorizes on our ROOT peer uid. So gatekeeperd needs NO `CAP_NET_ADMIN`, and no transient process
+/// edits the ROOT-netns table under the broker's cap umbrella. Runs env-CLEARED with the absolute binary
+/// and argv from the VALIDATED op (never re-read from the wire); the daemon re-checks tier + grammar
+/// (defense in depth). Returns the client's exit code (0 = daemon replied OK / applied+persisted).
 pub fn commit(op: &Op) -> i32 {
     let (verb, arg) = match op {
         Op::BlessProfile(p) => ("confirmed-bless", p.clone()),
@@ -60,10 +65,10 @@ pub fn commit(op: &Op) -> i32 {
         Op::AddRaw(t) => ("confirmed-add-raw", t.clone()),
         Op::RemoveRaw(t) => ("confirmed-remove-raw", t.clone()),
     };
-    match Command::new(egressd_bin()).env_clear().arg(verb).arg(&arg).status() {
+    match Command::new(egressd_bin()).env_clear().arg("ask").arg(verb).arg(&arg).status() {
         Ok(st) => st.code().unwrap_or(1),
         Err(e) => {
-            eprintln!("gatekeeperd/desktop-egress: exec egressd {verb}: {e}");
+            eprintln!("gatekeeperd/desktop-egress: exec egressd ask {verb}: {e}");
             1
         }
     }

@@ -1682,7 +1682,8 @@ enum CommitKind {
     Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
     Network { profiles: Vec<String> },
     /// ADR-007 S4 — a console-ceremony desktop-egress change (`web-browsing` bless/unbless or a raw
-    /// `host:proto:port` add/remove). Commit execs the root-only `egressd confirmed-*` verb.
+    /// `host:proto:port` add/remove). Commit relays the op to the egressd daemon over its root-gated
+    /// socket (`egressd ask confirmed-*`; the daemon is the sole nft mutator — ADR-007 S6.1).
     DesktopEgress(crate::desktop_egress::Op),
     Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
     /// A validated bench→Workshop recipe. Carries the CONSENTED snapshot (declared package sets + the
