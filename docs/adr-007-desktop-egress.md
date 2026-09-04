@@ -457,8 +457,14 @@ table inet shrek_desktop_egress {
    "blessed, waiting" and completes later rather than failing dark; the ui-v2 `Egress` service + panel;
    and the ui-installer first-run onboarding step. Proven headless: `scripts/desktop-connectivity-proof.sh`
    (panel renders + real client↔supervisor round-trip) and `scripts/installer-preview.sh`.
-4. **S4 — ceremony tier**: `web-browsing` + raw-destination adds through the console ceremony
-   (`consent.rs` reuse), with the persistence bolt-on (write `blessed` after a confirmed ceremony).
+4. **S4 — ceremony tier** — **DONE (2026-09-04)**: `web-browsing` + raw `host:proto:port` adds through the
+   console ceremony (`consent.rs` reuse), with the persistence bolt-on. **Shipped** (see §14 S4 entry):
+   a NEW gatekeeperd `DESKTOP-EGRESS` verb family reusing the shared SAK/VT ceremony core; a root-only
+   `egressd confirmed-*` commit surface (`geteuid==0` + tier/grammar re-validation + store lock); a
+   concatenated `@raw_pinned` nft set (`ipv4_addr . inet_proto . inet_service`) keeping the element-only
+   invariant for raw; reconcile survival + a `browser-up` actuator (MF-7); the `shrek connectivity` client
+   + the DMS Connectivity ceremony button, raw editor, and SAK banner. Built after a Fable build-plan pass
+   (GO-WITH-FIXES → 7 must-fixes folded).
 5. **S5 — baseline wiring**: ship `timesyncd.conf` with `NTP=` set to the **sealed literal Cloudflare IPs**
    matching `desktop-ntp`'s `@ntp_pinned` (Q6a + `[R2-MF-C]`; no name, no resolution — this is the boot-time
    clock source that lets the DoT re-pin of weather/updates succeed afterward); wire the updater endpoint to
@@ -558,6 +564,44 @@ table inet shrek_desktop_egress {
   malicious uid-1000 process can silently `unbless weather` (deny-direction), burn the 6/30s budget to annoy
   the owner's real clicks, or trigger ≤6 DoT re-pins/30s (bounded traffic to sealed resolvers). The weather
   dashTab / display truth binds to the root-written state file, not spoofable by uid 1000.
+
+**S4 — ceremony tier (2026-09-04): built after a Fable build-plan pass (GO-WITH-FIXES → 7 must-fixes folded).**
+- **The seam.** The SAK/VT ceremony lives in gatekeeperd; the store/apply/DoT authority lives in egressd.
+  The ceremony's confirmed commit **execs** the root-only `egressd confirmed-{bless,unbless,add-raw,remove-raw}`
+  (absolute sealed binary, `env_clear()`, argv from the *validated plan* not the wire), so rustls/DoT never
+  enter gatekeeperd and egressd stays the single store/apply authority. Rejected: linking egressd into
+  gatekeeperd (two sealed DoT clients) and a second store writer (validation would drift).
+- **"Root exec = trusted" ≠ no validation (MF-1).** The destination string originates from a uid-1000 socket
+  request; the ceremony proves human *intent*, not that the string is well-formed. So `confirmed-*` re-checks
+  `geteuid()==0` (a uid-1000 caller can never bypass the ceremony by exec'ing the verb), `bless_tier==Ceremony`
+  for `confirmed-bless` (the ceremony verb is not a `weather`/baseline front door — tier-matrix integrity),
+  and the raw grammar; and it takes the store lock (MF-4) so it never interleaves with the running daemon.
+- **One raw grammar (MF-2), in `shrek-policy`, used by BOTH the gatekeeperd precheck and egressd.** RFC-1123
+  host or IPv4 literal, no leading `-` (argv-option injection), no whitespace/control (the host lands in the
+  world-readable `/run` state — an unescaped value would be a display-truth line injection), `tcp|udp` only
+  (`th dport` needs a transport header), port `1..=65535`. `raw` is the ADR-§4 flat TSV file (S2 built a dir;
+  migrated). A literal host is pinned verbatim (no DoT), like `desktop-ntp`.
+- **Raw enforcement (MF-2/Q2): one CONCATENATED nft set** `raw_pinned { ipv4_addr . inet_proto . inet_service }`
+  + one baked rule `ip daddr . meta l4proto . th dport @raw_pinned accept`. Per-element proto+port with ZERO
+  runtime rules, so the element-only `[R2-MF-B]` invariant holds for raw exactly as for the pinned profiles.
+  Removal recomputes the set as the UNION of the remaining entries (MF-5 — never a per-entry element delete,
+  which would kill a tuple two raw hosts share). Validated against the live kernel in an unshared netns.
+- **Intent-first (MF-3) + reconcile survival (Q4).** `confirmed-add-raw` stores the triple before resolving,
+  so a ceremony approved before the network is up persists as "blessed, waiting" and heals on the next
+  reconcile rather than vanishing (which would force a redo of the whole SAK ceremony). Boot `reconcile` now
+  re-resolves the raw union and re-asserts a blessed `web-browsing` — the ceremony tier survives reboot/A-B.
+- **Browser-rule lifecycle (MF-7).** `web-browsing` enforcement is the cgroup accept pair, which nft can only
+  insert once `shrek-browser.slice` exists — almost never true at bless time. A uid-1000 `browser-up` socket
+  verb actuates an *already-ceremony-blessed* record at launch (installs the pair once the slice exists);
+  it grants nothing not already root-blessed, so it is tier-safe on the socket. Symmetric teardown on
+  `confirmed-unbless` removes the pair by handle (MF-5 — the panel can't read "off" while egress persists).
+- **UX.** The DMS panel LAUNCHES the ceremony (`shrek connectivity …` → gatekeeperd `DESKTOP-EGRESS`), it
+  never flips a broad/raw control itself; a "press the Secure Attention key" banner explains the console
+  switch (so the first session doesn't read it as "broken"); the `/run` state file stays the sole display
+  truth. The advanced raw editor is shipped in the same slice (Fable OK'd staging it later; it was small).
+- **Not proven headless (the sealed-VM gate, Q3/S6):** the SAK/VT ceremony under a running compositor and
+  the live browser cgroup matcher. Everything fails closed until then; the host oracle + unit tests + the
+  headless render proof cover the engine, the precheck/tier gate, the raw nft, and the panel.
 
 **CROSS-CUTTING SECURITY DEFECT (filed separately as mycelium #3121, NOT owned by this ADR):**
 `image/overlay/etc/hosts` is a baked symlink into `/home/.shrek-system/hosts`, which
