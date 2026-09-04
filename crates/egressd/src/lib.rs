@@ -13,9 +13,11 @@
 //!     `/run/shrek/egress/pinned` projection. State only: no nft, no DoT, no socket. ← landed
 //!   * S2b — [`apply`]: the element-only nft applier (`nft add/delete element` reconcile against the
 //!     LIVE set + fail-closed rollback; the sole browser-cgroup rule insert). ← landed
-//!   * S2c — baked DoT re-pin client to sealed resolver IPs.
+//!   * S2c — [`dot`]: the sealed DNS-over-TLS re-pin client (sealed resolver IPs + sealed root bundle +
+//!     exact expected hostname; never resolved/NM/resolv.conf/getaddrinfo). ← landed
 //!   * S2d — the root supervisor daemon: bless/unbless/re-pin verbs over a `SO_PEERCRED`-gated,
 //!     rate-limited, journaled uid-1000 socket.
 
 pub mod apply;
+pub mod dot;
 pub mod store;

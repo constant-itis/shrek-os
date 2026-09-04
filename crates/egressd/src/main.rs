@@ -20,7 +20,10 @@
 use std::net::Ipv4Addr;
 use std::process::exit;
 
+use std::time::Duration;
+
 use egressd::apply::{self, ApplyError, ShellNft};
+use egressd::dot;
 use egressd::store::{
     self, store_dir, run_dir, BlessRecord, FaultKind, Pin, PinRecord,
 };
@@ -29,11 +32,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("store") => store_cli(&args[1..]),
+        Some("resolve") => resolve_cli(&args[1..]),
         Some("apply") => apply_cli(&args[1..]),
         Some("apply-browser") => apply_browser_cli(&args[1..]),
         _ => {
             eprintln!("egressd: usage:");
             eprintln!("  egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
+            eprintln!("  egressd resolve --profile <p> [--at <secs>] [--apply]   # DoT-resolve + store pins (+apply)");
             eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
             eprintln!("  egressd apply-browser --path <cgroup> --level <n>       # insert browser-cgroup rules");
             eprintln!("egressd: (the supervisor daemon socket lands in S2d)");
@@ -156,6 +161,79 @@ fn apply_cli(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `egressd resolve --profile <p> [--at <secs>] [--apply]` — the S2c re-pin front door: DoT-resolve the
+/// profile's sealed name(s) over the sealed resolver set, write the resulting pin record to the store,
+/// and (with `--apply`) reconcile the nft set + re-project the `/run` map. Fail-closed: a resolution
+/// failure parks a `resolve-fail` fault and writes NO pin (the prior pin, if any, and the baked deny
+/// skeleton stand). The sealed daemon never resolves via getaddrinfo/resolved/NM — only this path.
+fn resolve_cli(args: &[String]) -> i32 {
+    let store = store_dir();
+    let run = run_dir();
+    let opts = match parse_opts(args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("egressd resolve: {e}");
+            return 2;
+        }
+    };
+    let profile = match opts.single.get("profile") {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("egressd resolve: --profile <p> required");
+            return 2;
+        }
+    };
+    let at = match parse_at(&opts) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("egressd resolve: {e}");
+            return 2;
+        }
+    };
+    // Fixed query id (see dot:: docs — over authenticated single-query TLS the transport is the
+    // security, not the id). Timeout kept short so a hung resolver fails closed to the next / to fault.
+    let pins = match dot::resolve_profile_pins(&profile, 0x7e57, Duration::from_secs(5)) {
+        Ok(p) => p,
+        Err(e) => {
+            let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &e.to_string(), at);
+            eprintln!("egressd resolve: {e} — parked resolve-fail fault, no pin written");
+            return 1;
+        }
+    };
+    let rec = PinRecord { profile: profile.clone(), pins: pins.clone(), resolved: at };
+    if let Err(e) = store::write_pin(&store, &rec) {
+        // write_pin re-validates every name against the sealed profile; a rejection here is a seal/bug
+        // fault, not a steer. Fail-closed.
+        let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &format!("store: {e}"), at);
+        eprintln!("egressd resolve: store pin rejected: {e}");
+        return 1;
+    }
+    let _ = store::clear_fault(&store, &profile);
+    println!("egressd: resolved {profile} -> {} IP(s) over sealed DoT", pins.len());
+    for p in &pins {
+        println!("  {} {}", p.name, p.addr);
+    }
+
+    if opts.single.contains_key("apply") {
+        let mut exec = ShellNft;
+        let desired: Vec<std::net::Ipv4Addr> = pins.iter().map(|p| p.addr).collect();
+        return match apply::apply_pins(&store, &mut exec, &profile, &desired) {
+            Ok(a) => {
+                let _ = store::project_pinned(&store, &run);
+                println!("egressd: applied {profile} -> {} element(s)", a.len());
+                0
+            }
+            Err(e) => {
+                let msg = format!("{e:?}");
+                let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
+                eprintln!("egressd resolve --apply: {msg}");
+                1
+            }
+        };
+    }
+    0
 }
 
 /// `egressd apply-browser --path <cgroup> --level <n>` — insert the sole runtime rule pair

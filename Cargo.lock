@@ -68,6 +68,9 @@ dependencies = [
 name = "egressd"
 version = "0.0.1"
 dependencies = [
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
  "shrek-policy",
 ]
 

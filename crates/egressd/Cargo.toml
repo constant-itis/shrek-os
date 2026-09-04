@@ -5,6 +5,14 @@ edition.workspace = true
 
 [dependencies]
 shrek-policy = { path = "../shrek-policy" }
+# The sealed DoT re-pin client (ADR-007 S2c). rustls is the ONE TLS tree the sealed image carries — the
+# owner's decision to bake the DoT resolver into the supervisor rather than trust resolved/NM/getaddrinfo
+# ([R1-MF1]/[R2-MF-C], #3121's workaround). Pure-Rust (ring, no OpenSSL), default-features off so no
+# webpki-roots / host CA store is pulled: the trust base is ONLY the sealed dot-ca-roots.pem, loaded via
+# rustls-pemfile. Same rustls 0.23 line already vendored for broker-side model-proxy.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
 
 [features]
 # `oracle-env` gates the `SHREK_EGRESS_*` path overrides (store dir, /run projection dir) to the
