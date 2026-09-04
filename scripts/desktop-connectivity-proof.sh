@@ -19,6 +19,7 @@
 #   CONN-ask-deny     `egressd ask bless web-browsing` is refused at the socket (ceremony tier)
 #   CONN-surfaces     the shell instantiates with the seeded projection present
 #   CONN-state        the Egress service parses the projection (profiles=4) file -> service -> panel
+#   CONN-raw          the S4 advanced-tier raw line parses into the service (raw=1)
 #   CONN-panel        opening the Connectivity panel over IPC raises no QML load error
 #   CONN-render       a real frame paints (unique-colour count over threshold)
 set -euo pipefail
@@ -76,13 +77,15 @@ cleanup; trap - EXIT
 
 # ── seed the RENDER projection (deterministic; no daemon needed for the read path) ────────────────
 # A rich, representative state: baseline on (ntp with its sealed literal IPs), weather blessed + LIVE,
-# web-browsing ceremony/unblessed. Plus one downstream event line for the "last activity" surface.
+# web-browsing ceremony-BLESSED (renders the "Turn off (console)" path), plus one S4 raw destination
+# (a live pinned one). Plus one downstream event line for the "last activity" surface.
 cat > "$RUN/state" <<'STATE'
 schema shrek-egress-state/1
 profile desktop-ntp tier=baseline blessed=0 pins=162.159.200.1,162.159.200.123 refreshed=- fault=-
 profile desktop-updates tier=baseline blessed=0 pins=- refreshed=- fault=-
 profile weather tier=one-click blessed=1 pins=104.18.5.99 refreshed=1750000000 fault=-
-profile web-browsing tier=ceremony blessed=0 pins=- refreshed=- fault=-
+profile web-browsing tier=ceremony blessed=1 pins=- refreshed=- fault=-
+raw host=grafana.example.com proto=tcp port=443 blessed=1 pins=203.0.113.7 refreshed=1750000000
 STATE
 printf '1750000000 bless weather 1 ip(s)\n' > "$RUN/events"
 
@@ -135,6 +138,10 @@ docker run --rm --privileged -v "${REPO_ROOT}:/work" -w /work -e CACHE="${CACHE}
 
     grep -q "SHREK-DESKTOP connectivity egress state profiles=4" /tmp/qs.log && g ok CONN-state \
       || { g no CONN-state; grep -iE "connectivity|egress|error|SHREK-DESKTOP" /tmp/qs.log | head; }
+
+    # S4: the advanced-tier raw line must parse into the service (raw=1).
+    grep -q "SHREK-DESKTOP connectivity egress state profiles=4 raw=1" /tmp/qs.log && g ok CONN-raw \
+      || { g no CONN-raw; grep -iE "connectivity egress state" /tmp/qs.log | head; }
 
     if grep -q "Failed to load configuration" /tmp/qs.log; then
       g no CONN-panel; grep -A6 "Failed to load configuration" /tmp/qs.log
