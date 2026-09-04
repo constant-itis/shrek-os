@@ -1,6 +1,6 @@
 # ADR-007 — Desktop egress plane & the user-blessed connectivity boundary
 
-Status: **ACCEPTED (owner, 2026-09-03) — Fable round-3 GO (clean). Building S1.** (mirrors the ADR-005 flow).
+Status: **COMPLETE (2026-09-04) — S1–S6 all shipped; the plane is VM-proven end to end (desktop-egress-s6-vm-proof.sh 13/0).** ACCEPTED owner 2026-09-03 after Fable round-3 GO (clean); mirrors the ADR-005 flow.
 Three Fable rounds folded: R1 GO-WITH-FIXES (MF-1..MF-5) → R2 GO-WITH-FIXES (R2-MF-A/B/C) → R3 **GO**, with the
 two-line §7 insertion-point reconciliation applied. See the `[R1-MFn]`/`[R2-MF-x]` markers inline and the §14 changelog;
 Q3/Q5/Q6/Q7/Q8 resolved (Q6b `desktop-updates` endpoint still TBD, does not block S1). **Note:** the uid-1000-owned
@@ -324,8 +324,11 @@ table inet shrek_desktop_egress {
     # 2b. web-browsing, if blessed: broad egress for the BROWSER SCOPE only (cgroup match, Q7).
     #     Inserted ABOVE rule 0 at browser launch (the ONE runtime rule — see NOTE). Browser needs live DNS,
     #     so the stub is re-opened here and NOWHERE else:
-    #     meta skuid 1000 socket cgroupv2 level N "<shrek-browser.slice>" ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 accept
-    #     meta skuid 1000 socket cgroupv2 level N "<shrek-browser.slice>" accept
+    #     meta skuid 1000 socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice" ip daddr { 127.0.0.53, 127.0.0.54 } th dport 53 accept
+    #     meta skuid 1000 socket cgroupv2 level 4 "user.slice/user-1000.slice/user@1000.service/shrekbrowser.slice" accept
+    #     (S6: the slice is UN-hyphenated `shrekbrowser.slice` — a `-` is a systemd cgroup hierarchy separator
+    #      that would nest it under a synthetic `shrek.slice`; a `--user --scope` launch lands it at level 4
+    #      under `user@<uid>.service`. The path MUST be a QUOTED nft string or the lexer chokes on `user@1000`.)
 
     # 3. desktop session: blessed, pinned endpoints (element added to @weather_pinned on bless; empty until then)
     meta skuid 1000 ip daddr @weather_pinned tcp dport 443 accept        # inert until 'weather' blessed
@@ -480,11 +483,20 @@ table inet shrek_desktop_egress {
    source, and a live sealed-DoT weather re-pin succeeding once the clock is sane. **Not proven here (S6):**
    the cold-boot sequence live — a wrong-RTC box corrects off the sealed IPs then re-pins — under a real
    compositor.
-6. **S6 — sealed-VM dogfood**: baked test bless set; assert weather reaches its pinned endpoint from uid 1000
-   **via the `/run` map + `--resolve` (TLS verifies the sealed name)**, an unblessed dest drops, the
-   non-browser stub drops while a browser-scope stub accepts, NTP keeps time off sealed IPs with no
-   resolution, a DoT re-pin refreshes `@weather_pinned` by element, apply-fail leaves the baked drop standing,
-   blessed set survives reboot ≥2 and a simulated A/B.
+6. **S6 — sealed-VM dogfood — DONE (2026-09-04)**: `scripts/desktop-egress-s6-vm-proof.sh` (13/0) proves the
+   whole plane live in a booted, Secure-Boot/dm-verity-sealed VM under the real compositor — the two things
+   netns/host-oracles **cannot** show (Q3 gate): the live browser cgroup matcher and the SAK/VT ceremony.
+   Asserted: NTP cold-boot recovery off the sealed literal IPs, **name-free**, from a forward-skewed RTC (§5
+   `[R2-MF-C]`); weather reaches its pinned endpoint from uid 1000 via the `/run` map + SNI/verify-name (TLS
+   verifies the sealed name) while an unblessed dest **drops**; the LIVE `shrekbrowser.slice` cgroup path
+   equals the baked matcher constant, a process **inside** the slice reaches the DNS stub while the same probe
+   **outside drops** (rule-0), a relaunch still accepts, and `confirmed-unbless` tears the accept-pair down so
+   the slice drops again; a DoT re-pin refreshes `@weather_pinned` by element (no flush); **daemon-death
+   fail-closed** (`kill -9` egressd → unblessed still drops, blessed weather still reaches — replaces the
+   in-VM-unsimulatable apply-fail, which the host oracle already covers, `[MF-5]`); and a raw
+   `host:proto:port` added through the **console SAK ceremony** pins `@raw_pinned`. **Found + fixed four
+   ship-blocking defects the oracle missed** (see §14 S6): the cgroup path/level, the unquoted nft path token,
+   the bare-name `nft` spawn under `env_clear()`, and the missing `CAP_NET_ADMIN` on the ceremony-commit exec.
 
 ## 12. Open questions (for owner + Fable)
 
@@ -637,6 +649,34 @@ table inet shrek_desktop_egress {
   once the clock is sane (the NTP-good → DoT ordering). Config/docs/bash only — no Rust, no system-index bump.
 - **Not proven here (the sealed-VM gate, S6):** the cold-boot sequence live — a wrong-RTC box corrects off
   the sealed IPs with zero resolution and only then re-pins weather — under a real compositor.
+
+**S6 — sealed-VM dogfood (2026-09-04): the whole plane proven live; four ship-blocking defects found + fixed.**
+- **Proof (`scripts/desktop-egress-s6-vm-proof.sh`, 13/0).** A booted Secure-Boot/dm-verity VM under the real
+  Sway/Quickshell compositor (reuses the dogfood docker/qemu scaffold + the bench-consent SAK cue-loop). A
+  marker-gated guest probe (`dogfood-egress-probe`, dispatched by `dogfood-persist-probe`) drives every leg and
+  the host tallies `SHREK-DOGFOOD S6 <check>=` serial markers. Proves the Q3 gate — the live browser cgroup
+  matcher and the SAK/VT ceremony — plus NTP recovery, weather reach/drop, repin, revocation, and daemon-death
+  fail-closed. The probe asserts the LIVE cgroup path equals the baked constant *before* trusting accept/drop.
+- **The finish line caught what the netns/host oracles structurally could not — four real defects, all fixed:**
+  1. **cgroup path/level** (`confirmed.rs::browser_cgroup`): shipped as `…/shrek-browser.slice` at level 2, a
+     path a real `--user` launch never produces → the matcher was dead. Fixed to the measured
+     `user.slice/user-<uid>.slice/user@<uid>.service/shrekbrowser.slice` at **level 4** (un-hyphenated name; §7).
+  2. **unquoted nft path** (`apply.rs`): the cgroup path was passed to nft as a bare token — the lexer chokes on
+     `user@1000` (`syntax error, unexpected number`), so `browser-up` always returned `apply-failed`. Fixed:
+     pass it QUOTED. Verified against the live kernel (bare fails, quoted loads).
+  3. **bare-name `nft` spawn** (`apply.rs::ShellNft`): `Command::new("nft")` fails under gatekeeperd's
+     `env_clear()` ceremony-commit exec (empty PATH → ENOENT). Fixed to the absolute `/usr/sbin/nft` (the doc
+     comment already claimed the absolute path; the code didn't match).
+  4. **missing `CAP_NET_ADMIN`** (`gatekeeperd.service`): the ceremony-commit exec of `egressd confirmed-*`
+     edits the ROOT-netns table, but the broker's bounding set deliberately omitted net caps, so raw ceremony
+     adds failed with "Operation not permitted." Granted `CAP_NET_ADMIN` (marginal — CAP_SYS_ADMIN already makes
+     the broker root-equivalent); apply.rs stays the sole nft mutator. The S4 oracle ran the commit as
+     unrestricted root and missed it.
+- **`[MF-5]` assert-set (per the S6 Fable build-plan pass):** dropped the in-VM-unsimulatable `apply-fail` leg
+  (destroying the baked table to induce it would demolish the very floor the assert claims stands — the host
+  oracle already proves it) and replaced it with a **daemon-death fail-closed** leg; added **revocation** and
+  **double-launch** legs and a `/run`-map == `@weather_pinned` set-equality check. **`[MF-4]`** skews the RTC
+  **forward** (a past skew hits systemd's behind-epoch clamp = vacuous) but TLS-safe, with an explicit qemu NIC.
 
 **CROSS-CUTTING SECURITY DEFECT (filed separately as mycelium #3121, NOT owned by this ADR):**
 `image/overlay/etc/hosts` is a baked symlink into `/home/.shrek-system/hosts`, which
