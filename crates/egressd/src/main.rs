@@ -32,6 +32,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("daemon") => daemon_cli(&args[1..]),
+        Some("reconcile") => reconcile_cli(),
         Some("ask") => egressd::client::ask(&args[1..]),
         Some("store") => store_cli(&args[1..]),
         Some("resolve") => resolve_cli(&args[1..]),
@@ -185,6 +186,28 @@ fn apply_cli(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+/// `egressd reconcile` — run ONE boot-style reconcile (re-apply every stored bless/pin + raw union +
+/// blessed web-browsing) into the baked sets, flush-free, then exit. Root-only (mutates nft + the store).
+/// The manual re-pin trigger the timer/network-online path would fire; also the oracle's "reboot" proof.
+fn reconcile_cli() -> i32 {
+    if egressd::uapi::geteuid() != 0 {
+        eprintln!("egressd reconcile: refused — root only");
+        return 2;
+    }
+    let store = store_dir();
+    let run = run_dir();
+    if let Err(e) = egressd::store::ensure_store(&store) {
+        eprintln!("egressd reconcile: ensure store: {e}");
+        return 1;
+    }
+    let _lock = egressd::store::lock_store(&store).ok();
+    let mut exec = egressd::apply::ShellNft;
+    let mut resolver = egressd::supervisor::DotResolver;
+    let summary = egressd::supervisor::reconcile(&store, &run, &mut exec, &mut resolver, egressd::supervisor::now_unix());
+    println!("egressd: {summary}");
+    0
 }
 
 /// `egressd daemon` — run the S2d supervisor: bind the uid-1000 socket, reconcile blessed pins into the
