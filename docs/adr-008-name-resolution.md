@@ -77,8 +77,11 @@ enters the box). A **5th** sealed name `shrek-swamp-broker` tcp:8400 exists (`eg
    format break is explicit and rollback stays sane). Dir `root:root 0700` (owned by `tmpfiles.d`), file
    `root:root 0600` (content owned by the compose oneshot) — **[R1-MF4]/N-1**.
 
-4. **NM polkit closure (§9, in-scope [R1-MF7]):** keep the Wi-Fi grant, remove its DNS-steering power by
-   sealing resolved's effective DNS (posture A). Own dogfood oracle.
+4. **Remove resolved from gatekeeperd's privileged pin path (§9, in-scope [R1-MF7], OPTION 4 — owner,
+   supersedes posture A):** do NOT seal/cripple NM+resolved DNS (that would harden the owner-controlled
+   resolver — the MF-1/§3 anti-pattern). Instead gatekeeperd resolves public egress pins over the shared
+   sealed-DoT crate (`shrek-dot`), never resolved; NM/DHCP DNS stay functional for user resolution. Own
+   host oracle. (The uid-1000-edits-system-DNS *privilege* question is filed separately, #3157.)
 
 ## 3. The trust boundary (the load-bearing part) — rewritten per [R1-MF1]
 
@@ -234,15 +237,34 @@ tmpfiles line now re-declares `root:root 0700`. On every boot, `compose-hosts` i
   `dogfood-persist-probe` (~:820, asserts the old symlink target). Move both in S3, or S5 dogfood goes
   red. `SHREK_HOSTS` override → point at the projection.
 
-## 9. NM polkit closure (§1b, in-scope [R1-MF7]) — posture A
+## 9. The NM→resolved path (§1b, in-scope [R1-MF7]) — OPTION 4 (supersedes posture A)
 
-Keep the `settings.modify.system` grant (Wi-Fi UX) but strip its DNS-steering power: seal resolved's
-effective DNS so a user-edited system connection's `ipv4.dns`/`ipv6.dns`/`*.dns-search`/`dns-priority`
-cannot become what root resolves (sealed `resolved.conf` DNS posture, and/or a NM dispatcher that strips
-those keys from any user-saved system connection). Posture B (narrow the polkit rule) collapses into A's
-mechanism (polkit sees the action, not the field delta), as the draft noted. **Closure gate with its own
-dogfood oracle:** a user-set `ipv4.dns` is demonstrably **absent** from resolved's effective config, and a
-poisoned public-profile lookup does not steer gatekeeperd's pin.
+**Owner decision 2026-09-04 (supersedes the locked posture-A design):** do NOT seal/cripple NM+resolved
+DNS. That would harden the owner-controlled resolver — the exact anti-pattern MF-1/§3 already rejected.
+Instead **remove resolved from gatekeeperd's PRIVILEGED egress-pin path**, so a uid-1000 NM `ipv4.dns`
+edit can never steer egress POLICY, while NM/DHCP DNS stay fully functional for ordinary USER resolution.
+Same lesson, generalized: *don't sanitize an owner-controlled resolver harder — stop using it as a
+security oracle.* ADR-007 already did this for the desktop egress plane (sealed DoT); S4 extends it to
+gatekeeperd.
+
+Mechanism (S4a + S4b): the sealed DoT client (`egressd::dot`) is extracted into a shared **`shrek-dot`**
+crate; gatekeeperd depends on it. `net_plane::resolve_profiles_v4` no longer calls `getaddrinfo`
+(files+resolved). It resolves each rule host by CLASS — disjoint, so neither can steer the other:
+- a sealed ALIAS (`shrek_policy::provider_bind::is_sealed_alias_host` — the 4 owner-bindable model
+  brokers + the swamp broker) resolves ONLY from the root-owned `/run/shrek/hosts` projection; unbound ⇒
+  fail-closed ("no brain connected"), never leaking the alias label to a public resolver;
+- every OTHER (public DNS) name — github/debian/pypi/crates — resolves ONLY over the shared sealed-DoT
+  client; the hosts file is NEVER consulted, so a poisoned hosts line / NM DNS edit CANNOT steer a public
+  pin.
+
+**Closure gate (its own host oracle, `scripts/gatekeeperd-egress-resolve-s4-proof.sh`):** a POISONED
+hosts entry `6.6.6.6 github.com` is demonstrably IGNORED — gatekeeperd pins github.com's REAL IP over
+sealed DoT (proven live, 4/4). No NM/resolved sealing, no dogfood dependency on resolved config.
+
+**Left OPEN (filed separately — mycelium #3157, NOT ADR-008 scope):** whether uid 1000 should be able to
+alter the system connection's DNS at all. It no longer touches egress policy, but still influences OTHER
+root programs that naively use the system resolver (apt via getaddrinfo→resolved; a root `curl`; NTP is
+already immune, ADR-007 S5). A distinct privilege review — NOT to be solved by crippling DHCP DNS.
 
 ## 10. Scope & delivery ordering (slices)
 
@@ -257,7 +279,11 @@ poisoned public-profile lookup does not steer gatekeeperd's pin.
   tmpfiles dir-ownership reconcile, `/etc/hosts` retarget, `shrek-connect` + `shrek-agent` +
   `dogfood-persist-probe` reader migrations, rollback-compat legacy-path file. **[N-R2-1]** update the now-
   stale `resolved.conf.d/10-shrek-sealed.conf` comment (`#3121 … unowned`) in this diff.
-- **S4** — NM polkit closure (§9), the second half of #3121; dogfood oracle.
+- **S4 (Option 4, §9)** — the second half of #3121. **S4a** extract the sealed DoT client into a shared
+  `shrek-dot` crate (behavior-preserving; egressd re-exports it). **S4b** repoint `gatekeeperd`'s
+  `net_plane::resolve_profiles_v4` off `getaddrinfo`/resolved to files-then-DoT (aliases from the root
+  hosts projection, public names over sealed DoT). Host oracle: a poisoned hosts entry does NOT steer a
+  public pin. Rust → system-index bump. (The NM-polkit *privilege* question is filed separately, #3157.)
 - **S5** — sealed-VM dogfood: localhost resolves at base boot; `shrek-connect local <ipv4>` binds and
   gatekeeperd pins it; a uid-1000 write to `/etc/hosts`/the store is refused; NTP/apt/public-profile
   resolution reads root-owned data; a poisoned NM DNS does not steer a public pin; binding survives
@@ -304,3 +330,10 @@ poisoned public-profile lookup does not steer gatekeeperd's pin.
   UNCONDITIONALLY — store absence never blocks localhost, since tmpfiles runs after the oneshot on a
   virgin disk; §6/§7) + N-R2-1 (stale resolved.conf comment → S3) + N-R2-2 (dup legacy line → first-wins).
   **No round 3 — ready for owner LOCK.**
+- POST-LOCK AMENDMENT (owner, 2026-09-04, during S4 build): §9 **OPTION 4 supersedes posture A**. The
+  second half of #3121 is fixed not by sealing NM/resolved DNS but by removing resolved from gatekeeperd's
+  privileged pin path — the sealed DoT client is extracted to a shared `shrek-dot` crate (S4a) and
+  gatekeeperd resolves public pins over it, aliases from the root hosts file, resolved never (S4b). Same
+  MF-1/§3 lesson generalized: don't harden the owner-controlled resolver, stop using it as an oracle. The
+  distinct "may uid 1000 edit system-connection DNS at all" privilege question is filed OUT of scope
+  (#3157) — not to be solved by crippling DHCP DNS. §2.4, §9, §10-S4 updated to match.
