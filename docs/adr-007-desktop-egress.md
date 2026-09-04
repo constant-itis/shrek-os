@@ -465,10 +465,21 @@ table inet shrek_desktop_egress {
    invariant for raw; reconcile survival + a `browser-up` actuator (MF-7); the `shrek connectivity` client
    + the DMS Connectivity ceremony button, raw editor, and SAK banner. Built after a Fable build-plan pass
    (GO-WITH-FIXES → 7 must-fixes folded).
-5. **S5 — baseline wiring**: ship `timesyncd.conf` with `NTP=` set to the **sealed literal Cloudflare IPs**
-   matching `desktop-ntp`'s `@ntp_pinned` (Q6a + `[R2-MF-C]`; no name, no resolution — this is the boot-time
-   clock source that lets the DoT re-pin of weather/updates succeed afterward); wire the updater endpoint to
-   `desktop-updates` once it exists (blocked on Q6b). **Ordering matters:** NTP-good → DoT-repin → weather.
+5. **S5 — baseline wiring — DONE (2026-09-04)**: ships the sealed `timesyncd.conf` drop-in
+   (`/usr/lib/systemd/timesyncd.conf.d/10-shrek-sealed-ntp.conf`) with `NTP=` set to the **sealed literal
+   Cloudflare IPs** matching `desktop-ntp`'s `@ntp_pinned` (Q6a + `[R2-MF-C]`; no name, no resolution — the
+   boot-time clock source that lets the DoT re-pin of weather/updates succeed afterward) and `FallbackNTP=`
+   **emptied** so a sealed-IP failure never silently falls back to the compiled-in ntp.org *name* pool
+   (unsealed egress under timesyncd's uid). This drop-in is the actual NTP enforcement: the nft floor drops
+   uid 1000 only, and timesyncd runs under its own uid, so config — not the packet filter — pins it.
+   `desktop-updates` **stays an inert fail-closed stub** (empty `@updates_pinned`, zero policy rules) —
+   wiring it is **deferred on Q6b** (see §12). **Ordering matters:** NTP-good → DoT-repin → weather.
+   *Proof* (`scripts/desktop-ntp-proof.sh`, 8/0): a 3-way anti-drift assertion (`NTP=` == `DESKTOP_NTP` ==
+   baked `@ntp_pinned`), name-free + empty-fallback config checks, the `desktop-updates` inert-stub check,
+   a netns liveness load of the baked set, a real SNTP round-trip proving the sealed IP is a sane clock
+   source, and a live sealed-DoT weather re-pin succeeding once the clock is sane. **Not proven here (S6):**
+   the cold-boot sequence live — a wrong-RTC box corrects off the sealed IPs then re-pins — under a real
+   compositor.
 6. **S6 — sealed-VM dogfood**: baked test bless set; assert weather reaches its pinned endpoint from uid 1000
    **via the `/run` map + `--resolve` (TLS verifies the sealed name)**, an unblessed dest drops, the
    non-browser stub drops while a browser-scope stub accepts, NTP keeps time off sealed IPs with no
@@ -485,9 +496,14 @@ table inet shrek_desktop_egress {
   rate-bound failure re-pin) folded. (§5)
 - **Q6a — DECIDED (owner 2026-09-03):** seal `time.cloudflare.com` (single anycast, re-pinned) for
   `desktop-ntp` rather than fragile NTP-pool IPs.
-- **Q6b — OPEN (TBD):** the actual layer-store / sysupdate source endpoint for `desktop-updates` is not
-  defined in-repo yet. `desktop-updates` is stubbed on; its endpoint is wired in **S5** once the update
-  source exists. **Does not block S1** — ship NTP + weather first.
+- **Q6b — DEFERRED (owner-ratified 2026-09-04):** the actual layer-store / sysupdate source endpoint for
+  `desktop-updates` (the host the A/B `Type=url-file` `[Source]` fetches signed root/verity/UKI images from)
+  is **not set up yet**. Intended direction: its own owner-controlled domain; the **candidate** is
+  `shrekos.iambu.dev` (under `iambu.dev`, which the owner controls) — a candidate, **not a commitment**.
+  Until the domain + distribution channel exist, `desktop-updates` **stays an inert empty stub** (empty nft
+  set = fail-closed, not accept-all). This did **not** block S5 (S5 wired only the NTP baseline). When the
+  domain is stood up, wire it as a sealed profile (stable name, DoT-pinned like `weather`) — that is a
+  signed-image rebuild + A/B rollout, so the final host must be chosen *before* baking.
 - **Q6c — DECIDED (owner 2026-09-03):** seal **open-meteo** (`api.open-meteo.com`, keyless, no account,
   privacy-forward) as the `weather` endpoint.
 - **Q7 — DECIDED (Fable round-1):** cgroup match on a stable `shrek-browser.slice`, NOT a dedicated sub-uid
@@ -602,6 +618,25 @@ table inet shrek_desktop_egress {
 - **Not proven headless (the sealed-VM gate, Q3/S6):** the SAK/VT ceremony under a running compositor and
   the live browser cgroup matcher. Everything fails closed until then; the host oracle + unit tests + the
   headless render proof cover the engine, the precheck/tier gate, the raw nft, and the panel.
+
+**S5 — baseline wiring (2026-09-04): the NTP baseline sealed; `desktop-updates` deferred.**
+- **The clock source is config, not the packet filter.** The nft floor drops uid 1000 only; timesyncd runs
+  under its own system uid, so the filter does not constrain it. The pin is therefore the sealed
+  `timesyncd.conf.d/10-shrek-sealed-ntp.conf` drop-in: `NTP=162.159.200.1 162.159.200.123` (the same
+  literals as `DESKTOP_NTP`/`@ntp_pinned`, `[R2-MF-C]` — no name, no resolution) with `FallbackNTP=` emptied
+  so a sealed-IP failure never silently resolves the compiled-in ntp.org *name* pool under timesyncd's uid.
+- **Three-way anti-drift.** `NTP=` (config), `DESKTOP_NTP` (shrek-policy), and the baked `@ntp_pinned` set
+  must all name the same two IPs; the proof asserts set-equality across all three so a future edit to one
+  cannot silently diverge.
+- **`desktop-updates` stays a fail-closed stub — Q6b deferred (§12).** No wiring this slice: empty
+  `@updates_pinned`, zero policy rules. The endpoint (candidate `shrekos.iambu.dev`, not committed) does not
+  exist yet; wiring it is a future signed-image rebuild.
+- **Proof (`scripts/desktop-ntp-proof.sh`, 8/0):** static config↔policy↔nft consistency (name-free `NTP=`,
+  empty `FallbackNTP=`, inert `desktop-updates`); a netns liveness load of the baked table; a real SNTP
+  round-trip proving the sealed IP is a sane clock source; and a live sealed-DoT `weather` re-pin succeeding
+  once the clock is sane (the NTP-good → DoT ordering). Config/docs/bash only — no Rust, no system-index bump.
+- **Not proven here (the sealed-VM gate, S6):** the cold-boot sequence live — a wrong-RTC box corrects off
+  the sealed IPs with zero resolution and only then re-pins weather — under a real compositor.
 
 **CROSS-CUTTING SECURITY DEFECT (filed separately as mycelium #3121, NOT owned by this ADR):**
 `image/overlay/etc/hosts` is a baked symlink into `/home/.shrek-system/hosts`, which
