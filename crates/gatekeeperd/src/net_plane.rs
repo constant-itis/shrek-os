@@ -371,6 +371,49 @@ pub fn resolve_profiles_v4(profiles: &[&EgressProfile]) -> io::Result<Resolved> 
     Ok(Resolved { endpoints, hosts })
 }
 
+/// ADR-008 S4 host-oracle ONLY (`oracle-env`): resolve one or more sealed egress profiles through the
+/// EXACT files-then-DoT path the T2 constructor uses, and print the pins, so the proof can assert that a
+/// public name resolves over sealed DoT (NOT `resolved`) and a poisoned hosts entry is IGNORED. Compiled
+/// OUT of production — the shipped gatekeeperd has no resolution-exposing verb. Prints `host <name> <ip>`
+/// per pinned name and `endpoint <ip> <proto> <port>` per nft endpoint; exit 1 fail-closed on any host
+/// that will not resolve.
+#[cfg(feature = "oracle-env")]
+pub fn resolve_egress_cli(args: &[String]) -> i32 {
+    if args.is_empty() {
+        eprintln!("usage: gatekeeperd resolve-egress <profile>...");
+        return 2;
+    }
+    let mut profiles: Vec<&'static EgressProfile> = Vec::new();
+    for name in args {
+        match shrek_policy::egress::resolve(name) {
+            Some(p) => profiles.push(p),
+            None => {
+                eprintln!("resolve-egress: unknown egress profile {name:?}");
+                return 2;
+            }
+        }
+    }
+    match resolve_profiles_v4(&profiles) {
+        Ok(r) => {
+            for (h, ip) in &r.hosts {
+                println!("host {h} {ip}");
+            }
+            for e in &r.endpoints {
+                let proto = match e.proto {
+                    Proto::Tcp => "tcp",
+                    Proto::Udp => "udp",
+                };
+                println!("endpoint {} {proto} {}", e.ip, e.port);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("resolve-egress: {e}");
+            1
+        }
+    }
+}
+
 /// Render the pinned host→IP map as an `/etc/hosts` body (localhost + one line per sealed host). The
 /// workload resolves profile names through THIS, never a DNS query that would need egress.
 pub fn etc_hosts(hosts: &[(&'static str, Ipv4Addr)]) -> String {

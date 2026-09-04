@@ -509,6 +509,14 @@ fn main() {
     if argv.first().map(String::as_str) == Some("pin-verity") {
         std::process::exit(gatekeeperd::provenance_plane::pin_verity_cli(&argv[1..]));
     }
+    // ADR-008 S4 host-oracle ONLY (oracle-env): resolve a sealed egress profile through the real
+    // files-then-DoT path (aliases from the root /etc/hosts, public names over sealed DoT — never
+    // resolved) and print the pins, so the proof can assert a poisoned hosts entry does NOT steer a
+    // public pin. Compiled OUT of production: a default build has no resolution-exposing verb.
+    #[cfg(feature = "oracle-env")]
+    if argv.first().map(String::as_str) == Some("resolve-egress") {
+        std::process::exit(gatekeeperd::net_plane::resolve_egress_cli(&argv[1..]));
+    }
 
     let sock = env_or("SHREK_BROKER_SOCK", "/run/shrek-gk.sock");
     let store = env_or("SHREK_ONION_STORE", "/run/shrek-store");
