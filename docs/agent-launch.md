@@ -142,18 +142,23 @@ into the sandbox's `/etc/hosts` (`t2_plane.rs:598`); the sandbox itself has NO D
 sealed egress invariant does not change one bit. The only question is what the *host's* `getaddrinfo`
 reads — and the answer is nss `files`, i.e. `/etc/hosts`:
 
-- `/etc/hosts` is a **baked symlink → `/home/.shrek-system/hosts`** (`image/overlay/etc/hosts`) — the
-  exact "mutable `/etc` file → writable plane" idiom the base already uses for `/etc/resolv.conf`
-  → `/run`. `shrek-connect` edits that store; `getaddrinfo` (and thus gatekeeperd) reads it.
+- `/etc/hosts` is a **baked symlink → `/run/shrek/hosts`** (`image/overlay/etc/hosts`) — the exact
+  "mutable `/etc` file → writable plane" idiom the base uses for `/etc/resolv.conf` → `/run`. As of
+  **ADR-008 (#3121 fix)** that projection is **ROOT-authored**: `getaddrinfo` (and thus gatekeeperd)
+  reads a file uid 1000 cannot write. `shrek-connect` no longer edits it directly — it sends a narrow,
+  closed-token `egressd ask bind <provider> <ipv4>` over the supervisor socket, and root composes
+  `/run/shrek/hosts` from a sealed baseline + the owner's root-owned bindings.
 - **Not MagicDNS.** The egress hosts are sealed-policy *aliases*, not tailnet device names
   (`egress.rs`: "`shrek-model` is the sealed, stable" name), so MagicDNS can't resolve them without
   per-user Tailscale-console records — extra surface that couples a compiled-in alias to mutable console
   state. nss `files` needs zero resolver wiring and is deterministic; the pin is as sealed as the name.
-- The image has no `libnss-myhostname`, so `shrek-hosts-seed.service` (a base oneshot ordered like
-  `var-lib-swamp.mount`: after `home.mount`, before `local-fs.target`) seeds the store with `localhost`
-  on every boot, so a fresh, un-hooked-up box still resolves `localhost`. Un-hooked-up model names simply
-  don't resolve → `shrek-agent` catches it pre-flight and prints a "hook one up" hint (never a bare
-  fail-closed).
+- The image has no `libnss-myhostname`, so `shrek-hosts-compose.service` (a base oneshot ordered like
+  `var-lib-swamp.mount`: after `home.mount`, before `local-fs.target`/`nss-lookup.target`) composes
+  `/run/shrek/hosts` from a **sealed-in-code `localhost` baseline** plus the owner's bindings on every
+  boot — UNCONDITIONALLY, so a fresh, un-hooked-up box resolves `localhost` even before any binding store
+  exists. Un-hooked-up model names simply don't resolve → `shrek-agent` catches it pre-flight (reading the
+  root-owned projection) and prints a "hook one up" hint (never a bare fail-closed). The binding address
+  must be an **IPv4 literal** (glibc `files` needs a literal; a hostname line is silently skipped).
 
 **Broker placement is now the user's call, per install, and orthogonal to the image:**
 - **`local`** — point it at any OpenAI-wire model server you can reach: `shrek-connect local
@@ -171,8 +176,9 @@ turned on when hooking up a remote brain, never assumed by the image.
 ## 8. Sealed-OS fit
 
 - Dispatcher + set-default bake into `/usr` (RO); the writable state is the provider *choice*
-  (`~/.config/shrek/agent.json`) and the name→address *bindings* (`/home/.shrek-system/hosts`, which
-  `/etc/hosts` symlinks to) — both on `/home`, same model as theme/menu. Nothing installs post-boot.
+  (`~/.config/shrek/agent.json`) and the name→address *bindings* (the root-owned
+  `/home/.shrek-system/hosts-bindings` store, projected to `/run/shrek/hosts` which `/etc/hosts` symlinks
+  to; ADR-008) — the provider *choice* on `/home`, the bindings root-mediated. Nothing installs post-boot.
 - **No blind auto-approve.** Omarchy passes `--permission-mode auto`/`--yolo`; Shrek does NOT — the
   bounded coder loop + T2 wall + grant protocol are the approval model. The dispatcher passes no
   approve-everything flag.
@@ -185,9 +191,10 @@ turned on when hooking up a remote brain, never assumed by the image.
 - **Built:** `shrek run`, the coder (`--provider local|anthropic`, `--task`, `--model`, `--model-url`),
   every sealed egress profile, all three brokers, the login/health UX (slice-5).
 - **New (this doc):** `shrek-agent`, `shrek-default-agent`, the sway keybind (all L4/L5, shipped); and
-  the name-resolution layer — `shrek-connect` (the hook-up), the baked `/etc/hosts` → `/home` symlink,
-  and `shrek-hosts-seed.service`; and (later) the read-only usage panel. All shell/config → **no
-  system-index bump**.
+  the name-resolution layer — `shrek-connect` (the hook-up, now root-mediated over the egressd socket),
+  the baked `/etc/hosts` → `/run/shrek/hosts` symlink, `shrek-hosts-compose.service`, and the egressd
+  `bind`/`unbind` verb (ADR-008, #3121 — this part is Rust and DOES bump the system-index); and (later)
+  the read-only usage panel.
 
 ## 10. Proof / dogfood
 
@@ -195,10 +202,11 @@ turned on when hooking up a remote brain, never assumed by the image.
 executable, provider→triple map matches the §2 table for all four ids, fail-closes on an unknown id, and
 the L5 default round-trips) and an **S-connect** group for the name-resolution layer:
 - `shrek-connect` present; its provider→sealed-host-name map matches the L0 policy 1:1;
-- bind/list/forget round-trips a correct `/etc/hosts` line into the store (via `SHREK_HOSTS`);
+- a REAL bind/list/forget round-trips a correct line into the root-owned `/run/shrek/hosts` projection
+  (via the live egressd supervisor socket — ADR-008);
 - `shrek-agent` fail-closes (exit 3) with the "hook one up" hint when the chosen provider is UNbound;
-- the real image wiring is in place: `/etc/hosts` is the baked symlink to `/home/.shrek-system/hosts`,
-  and `shrek-hosts-seed.service` ran on boot (so `localhost` resolves on a fresh, un-hooked-up box).
+- the real image wiring is in place: `/etc/hosts` is the baked symlink to `/run/shrek/hosts`, and
+  `shrek-hosts-compose.service` ran on boot (so `localhost` resolves on a fresh, un-hooked-up box).
 A bound real launch (`local` end-to-end against a canned OpenAI-wire responder → `CODER-DONE ok=true`)
 is the host-side coder oracle's job (slice-3 §5); the credentialed paths reuse the slice-3/4/5 broker
 oracles. The dispatcher only needs to prove it hands them the right args over a resolvable name.
