@@ -1,0 +1,22 @@
+[package]
+name = "shrek-dot"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# The sealed DNS-over-TLS client, shared by egressd (desktop-egress re-pin, ADR-007 S2c) and gatekeeperd
+# (privileged egress-profile pin resolution, ADR-008 S4). rustls is the ONE TLS tree the sealed image
+# carries — the owner's decision to resolve privileged egress policy over a transport-authenticated
+# channel rather than trust resolved/NM/getaddrinfo (the #3121 "don't use the owner-controlled resolver
+# as a security oracle" principle). Pure-Rust (ring, no OpenSSL); default-features off so no
+# webpki-roots / host CA store is pulled — the trust base is ONLY the sealed dot-ca-roots.pem.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+rustls-pemfile = "2"
+
+[features]
+# `oracle-env` gates the sealed-CA path override to the host/container oracle ONLY (mirrors egressd's +
+# gatekeeperd's `oracle-env` discipline). DEFAULT-OFF: the shipped image compiles the override out and
+# always uses the baked /usr/lib/shrek/dot-ca-roots.pem, so no environment can point the sealed trust
+# base at an attacker bundle. Both consumers pass their own `oracle-env` through to this one.
+oracle-env = []

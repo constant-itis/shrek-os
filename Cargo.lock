@@ -68,9 +68,7 @@ dependencies = [
 name = "egressd"
 version = "0.0.1"
 dependencies = [
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
+ "shrek-dot",
  "shrek-policy",
 ]
 
@@ -273,6 +271,15 @@ version = "0.0.1"
 [[package]]
 name = "shrek-bench-run"
 version = "0.0.1"
+
+[[package]]
+name = "shrek-dot"
+version = "0.0.1"
+dependencies = [
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+]
 
 [[package]]
 name = "shrek-gate-probe"

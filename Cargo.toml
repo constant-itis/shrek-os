@@ -9,6 +9,7 @@ members = [
     "crates/swampd",      # filesystem-intelligence daemon        (Phase 6+)
     "crates/agentd",      # agent identity + tier/caps resolver    (Phase 8)
     "crates/shrek-policy", # sealed compiled-in policy: tier + egress (Phase 5)
+    "crates/shrek-dot",   # sealed DNS-over-TLS resolver, shared by egressd + gatekeeperd (ADR-008 S4)
     "crates/gatekeeperd", # privileged broker; only sandbox builder (Phase 4/5)
     "crates/egressd",     # desktop-egress supervisor: bless/pin store + applier (ADR-007 S2)
     "crates/oniond",      # sysext layer policy/orchestration      (Phase 2/4)
@@ -38,6 +39,7 @@ default-members = [
     "crates/swampd",
     "crates/agentd",
     "crates/shrek-policy",
+    "crates/shrek-dot",
     "crates/gatekeeperd",
     "crates/egressd",
     "crates/oniond",

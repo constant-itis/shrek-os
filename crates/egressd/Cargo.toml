@@ -5,14 +5,10 @@ edition.workspace = true
 
 [dependencies]
 shrek-policy = { path = "../shrek-policy" }
-# The sealed DoT re-pin client (ADR-007 S2c). rustls is the ONE TLS tree the sealed image carries — the
-# owner's decision to bake the DoT resolver into the supervisor rather than trust resolved/NM/getaddrinfo
-# ([R1-MF1]/[R2-MF-C], #3121's workaround). Pure-Rust (ring, no OpenSSL), default-features off so no
-# webpki-roots / host CA store is pulled: the trust base is ONLY the sealed dot-ca-roots.pem, loaded via
-# rustls-pemfile. Same rustls 0.23 line already vendored for broker-side model-proxy.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rustls-pki-types = "1"
-rustls-pemfile = "2"
+# The sealed DoT re-pin client (ADR-007 S2c) now lives in the SHARED shrek-dot crate (ADR-008 S4), so
+# gatekeeperd resolves its privileged public-egress pins over the same sealed transport. egressd keeps
+# only the desktop-profile→Pin wrappers on top of it (src/dot.rs). rustls (the one TLS tree) rides in.
+shrek-dot = { path = "../shrek-dot" }
 
 [features]
 # `oracle-env` gates the `SHREK_EGRESS_*` path overrides (store dir, /run projection dir) to the
@@ -21,5 +17,6 @@ rustls-pemfile = "2"
 # and no environment crossing the sudo boundary can redirect the bless/pin store at a uid-1000-writable
 # dir. The host oracle (S2e, no systemd/VM) opts in with `--features oracle-env`. Mirrors gatekeeperd's
 # `oracle-env` (bench_record.rs) discipline. Core store fns take an explicit `&Path`, so `cargo test`
-# never touches the real store regardless of this feature.
-oracle-env = []
+# never touches the real store regardless of this feature. Passes through to shrek-dot so the sealed-CA
+# override (SHREK_DOT_CA / SHREK_EGRESS_DOT_CA) is honored in the host oracle only.
+oracle-env = ["shrek-dot/oracle-env"]
