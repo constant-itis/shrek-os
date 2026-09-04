@@ -11,9 +11,11 @@
 //! Slices (this crate grows one module per slice; the ADR §11.2 decomposition):
 //!   * S2a — [`store`]: the durable `/home/.shrek-system/egress` bless/pin state + the world-readable
 //!     `/run/shrek/egress/pinned` projection. State only: no nft, no DoT, no socket. ← landed
-//!   * S2b — element-only nft applier (`nft add/delete element`; browser-cgroup insert).
+//!   * S2b — [`apply`]: the element-only nft applier (`nft add/delete element` reconcile against the
+//!     LIVE set + fail-closed rollback; the sole browser-cgroup rule insert). ← landed
 //!   * S2c — baked DoT re-pin client to sealed resolver IPs.
 //!   * S2d — the root supervisor daemon: bless/unbless/re-pin verbs over a `SO_PEERCRED`-gated,
 //!     rate-limited, journaled uid-1000 socket.
 
+pub mod apply;
 pub mod store;

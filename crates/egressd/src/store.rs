@@ -347,6 +347,66 @@ pub fn remove_pin(store: &Path, profile: &str) -> io::Result<()> {
     remove_if_present(&pinned_dir(store).join(profile))
 }
 
+// ---- applied marker -----------------------------------------------------------------------------
+
+/// The last set of IPv4s the applier successfully wrote into `@<profile>_pinned`. An AUDIT / boot record
+/// — the applier reconciles against the LIVE nft set (the real source of truth), not this marker, so a
+/// corrupt/missing marker is harmless (a fresh reconcile still converges). Written only after a clean
+/// apply. `blessed`/`pinned` are intent; `.applied/` is "what actually made it into the kernel".
+pub fn write_applied(store: &Path, profile: &str, addrs: &[Ipv4Addr]) -> io::Result<PathBuf> {
+    if !valid_token(profile) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid profile token"));
+    }
+    let mut sorted: Vec<Ipv4Addr> = addrs.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    let mut body = format!("SHREK-EGRESS-APPLIED 1\nprofile {profile}\n");
+    for a in &sorted {
+        body.push_str(&format!("addr {a}\n"));
+    }
+    body.push_str("END\n");
+    atomic_write(&applied_dir(store), profile, &body, 0o600)
+}
+
+/// Read the applied marker for `profile`. Missing/malformed ⇒ empty (fail-safe: the applier just
+/// re-reconciles). Verifies the inner `profile` matches the filename.
+pub fn load_applied(store: &Path, profile: &str) -> Vec<Ipv4Addr> {
+    if !valid_token(profile) {
+        return Vec::new();
+    }
+    let Ok(body) = fs::read_to_string(applied_dir(store).join(profile)) else {
+        return Vec::new();
+    };
+    let mut lines = body.lines();
+    if lines.next() != Some("SHREK-EGRESS-APPLIED 1") {
+        return Vec::new();
+    }
+    if lines.next().and_then(|l| l.strip_prefix("profile ")) != Some(profile) {
+        return Vec::new();
+    }
+    let mut addrs = Vec::new();
+    for line in lines {
+        if line == "END" {
+            return addrs;
+        } else if let Some(rest) = line.strip_prefix("addr ") {
+            match rest.parse::<Ipv4Addr>() {
+                Ok(a) => addrs.push(a),
+                Err(_) => return Vec::new(),
+            }
+        } else {
+            return Vec::new();
+        }
+    }
+    Vec::new() // no END ⇒ fail-safe empty
+}
+
+pub fn clear_applied(store: &Path, profile: &str) -> io::Result<()> {
+    if !valid_token(profile) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid profile token"));
+    }
+    remove_if_present(&applied_dir(store).join(profile))
+}
+
 // ---- fault records ------------------------------------------------------------------------------
 
 /// Why a bless/pin attempt was parked in `fault/` instead of applied. Kept as an explicit enum so the
@@ -638,6 +698,21 @@ mod tests {
         assert_eq!(f.at, 7);
         clear_fault(&d, "mysteryprofile").unwrap();
         assert_eq!(load_fault(&d, "mysteryprofile"), None);
+    }
+
+    #[test]
+    fn applied_marker_roundtrips_sorted_and_fails_safe() {
+        let d = fresh();
+        write_applied(&d, "weather", &[Ipv4Addr::new(9, 9, 9, 9), Ipv4Addr::new(1, 1, 1, 1)]).unwrap();
+        assert_eq!(
+            load_applied(&d, "weather"),
+            vec![Ipv4Addr::new(1, 1, 1, 1), Ipv4Addr::new(9, 9, 9, 9)]
+        );
+        // Corrupt marker ⇒ empty (the applier just re-reconciles), never a parse panic.
+        fs::write(applied_dir(&d).join("weather"), "garbage").unwrap();
+        assert_eq!(load_applied(&d, "weather"), Vec::<Ipv4Addr>::new());
+        clear_applied(&d, "weather").unwrap();
+        assert_eq!(load_applied(&d, "weather"), Vec::<Ipv4Addr>::new());
     }
 
     #[test]

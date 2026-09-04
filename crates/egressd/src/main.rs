@@ -20,6 +20,7 @@
 use std::net::Ipv4Addr;
 use std::process::exit;
 
+use egressd::apply::{self, ApplyError, ShellNft};
 use egressd::store::{
     self, store_dir, run_dir, BlessRecord, FaultKind, Pin, PinRecord,
 };
@@ -28,8 +29,13 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("store") => store_cli(&args[1..]),
+        Some("apply") => apply_cli(&args[1..]),
+        Some("apply-browser") => apply_browser_cli(&args[1..]),
         _ => {
-            eprintln!("egressd: usage: egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
+            eprintln!("egressd: usage:");
+            eprintln!("  egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
+            eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
+            eprintln!("  egressd apply-browser --path <cgroup> --level <n>       # insert browser-cgroup rules");
             eprintln!("egressd: (the supervisor daemon socket lands in S2d)");
             2
         }
@@ -46,10 +52,16 @@ struct Opts {
 fn parse_opts(args: &[String]) -> Result<Opts, String> {
     let mut single = std::collections::HashMap::new();
     let mut pins = Vec::new();
-    let mut it = args.iter();
+    let mut it = args.iter().peekable();
     while let Some(a) = it.next() {
         let key = a.strip_prefix("--").ok_or_else(|| format!("unexpected arg {a}"))?;
-        let val = it.next().ok_or_else(|| format!("--{key} needs a value"))?;
+        // A `--flag` at the end, or followed by another `--x`, is a valueless boolean (e.g. --unbless).
+        let takes_value = it.peek().map(|n| !n.starts_with("--")).unwrap_or(false);
+        if !takes_value {
+            single.insert(key.to_string(), String::new());
+            continue;
+        }
+        let val = it.next().unwrap();
         if key == "pin" {
             let (name, ip) = val.split_once('=').ok_or_else(|| format!("--pin wants name=ipv4, got {val}"))?;
             let addr: Ipv4Addr = ip.parse().map_err(|_| format!("bad ipv4 in --pin: {ip}"))?;
@@ -66,6 +78,122 @@ fn require<'a>(o: &'a Opts, key: &str) -> Result<&'a String, String> {
 }
 fn parse_at(o: &Opts) -> Result<u64, String> {
     o.single.get("at").map(|s| s.parse::<u64>().map_err(|_| "bad --at".to_string())).unwrap_or(Ok(0))
+}
+
+/// `egressd apply` — reconcile the LIVE nft table from stored state, fail-closed. This is the S2b
+/// enforcement front door the host-oracle proof drives against a real `nft` in a netns:
+///   * `--profile <p>` reconciles `@<p>_pinned` to the addrs in the stored pin record. Unknown/broad ⇒
+///     an `unknown-profile` fault is parked and NO element is written; an nft error ⇒ an `apply-fail`
+///     fault (the add path already rolled back, so the deny skeleton stands). Success ⇒ re-project the
+///     `/run` map + clear any prior fault.
+///   * `--profile <p> --unbless` reconciles the set to empty.
+///   * `--browser --path <cgroup> --level <n>` inserts the browser-cgroup rule pair above rule 0.
+fn apply_cli(args: &[String]) -> i32 {
+    let store = store_dir();
+    let run = run_dir();
+    let opts = match parse_opts(args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("egressd apply: {e}");
+            return 2;
+        }
+    };
+    let mut exec = ShellNft;
+
+    let profile = match opts.single.get("profile") {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("egressd apply: --profile <p> required");
+            return 2;
+        }
+    };
+    let at = match parse_at(&opts) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("egressd apply: {e}");
+            return 2;
+        }
+    };
+
+    // unbless: reconcile to empty
+    if opts.single.contains_key("unbless") {
+        return match apply::unapply(&store, &mut exec, &profile) {
+            Ok(()) => {
+                let _ = store::project_pinned(&store, &run);
+                println!("egressd: unblessed+unpinned {profile}");
+                0
+            }
+            Err(e) => {
+                eprintln!("egressd apply --unbless: {e:?}");
+                1
+            }
+        };
+    }
+
+    // desired addrs come from the stored pin record (S2c will populate it via sealed DoT; here the
+    // oracle/tests seed it with `store pin`).
+    let desired: Vec<std::net::Ipv4Addr> = match store::load_pin(&store, &profile) {
+        Some(rec) => rec.pins.iter().map(|p| p.addr).collect(),
+        None => Vec::new(),
+    };
+
+    match apply::apply_pins(&store, &mut exec, &profile, &desired) {
+        Ok(addrs) => {
+            let _ = store::clear_fault(&store, &profile);
+            let _ = store::project_pinned(&store, &run);
+            println!("egressd: applied {profile} -> {} element(s)", addrs.len());
+            0
+        }
+        Err(ApplyError::Unmanaged(p)) => {
+            // unknown/broad/baseline/pre-pinned: park a fault, install NO element (fail-closed).
+            let _ = store::write_fault(&store, &p, FaultKind::UnknownProfile, "not a pinnable set-managed profile", at);
+            eprintln!("egressd apply: {p} is not pinnable — parked unknown-profile fault, no element written");
+            1
+        }
+        Err(ApplyError::Nft(msg)) => {
+            let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
+            eprintln!("egressd apply: nft failure (rolled back, deny skeleton stands): {msg}");
+            1
+        }
+    }
+}
+
+/// `egressd apply-browser --path <cgroup> --level <n>` — insert the sole runtime rule pair
+/// (browser-cgroup accept + browser-scope stub-accept) above rule 0. Driven at browser launch / by the
+/// oracle when the `shrek-browser.slice` cgroup exists.
+fn apply_browser_cli(args: &[String]) -> i32 {
+    let opts = match parse_opts(args) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("egressd apply-browser: {e}");
+            return 2;
+        }
+    };
+    let path = match opts.single.get("path") {
+        Some(p) => p,
+        None => {
+            eprintln!("egressd apply-browser: --path <cgroup> required");
+            return 2;
+        }
+    };
+    let level: u32 = match opts.single.get("level").map(|s| s.parse()) {
+        Some(Ok(n)) => n,
+        _ => {
+            eprintln!("egressd apply-browser: --level <n> required");
+            return 2;
+        }
+    };
+    let mut exec = ShellNft;
+    match apply::install_browser_rules(&mut exec, path, level) {
+        Ok(()) => {
+            println!("egressd: inserted browser-cgroup rules for {path} (level {level})");
+            0
+        }
+        Err(e) => {
+            eprintln!("egressd apply-browser: {e:?}");
+            1
+        }
+    }
 }
 
 fn store_cli(args: &[String]) -> i32 {
