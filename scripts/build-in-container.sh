@@ -34,7 +34,7 @@ cargo build --release
 # `--features spike` AND the gate, so the shipped gatekeeperd has no pin-verity surface.
 cargo build --release -p gatekeeperd --features spike
 install -d image/overlay/usr/libexec/shrek image/overlay/usr/share/doc/shrek
-install -m0755 target/release/{swampd,agentd,gatekeeperd,oniond,shrekctl,shrek,shrek-bench-run} image/overlay/usr/libexec/shrek/
+install -m0755 target/release/{swampd,agentd,gatekeeperd,egressd,oniond,shrekctl,shrek,shrek-bench-run} image/overlay/usr/libexec/shrek/
 # User-facing CLIs on PATH (Dogfood M2): `shrek` is the Phase-6 front door and `shrekctl` the operator
 # CLI — both belong on PATH so the box behaves like a normal machine (owner hit `shrek: command not
 # found`). The daemons stay in /usr/libexec/shrek (not PATH); shrek finds gatekeeperd/agentd via the
@@ -244,6 +244,21 @@ if [ "${DOGFOOD:-0}" = "1" ] || [ "$INSTALLABLE" = "1" ]; then
   install -d "$OP_DROPIN_DIR"
   install -m0644 "$DE_TEMPLATE" "$DE_DROPIN"
   echo "!!! desktop egress plane (ADR-007 S1): enabling shrek-desktop-egress.service (getty@tty1 Requires it) !!!"
+fi
+
+# ── ADR-007 desktop egress plane (S2: the egressd supervisor) — variant-gated ─────────────────────────
+# The bless/re-pin supervisor is enabled ONLY where there is a real uid-1000 desktop + writable /home:
+# INSTALLABLE + DOGFOOD. Enablement is a target Wants= (NOT a getty Requires=): unlike the S1 oneshot,
+# a failed egressd must not brick tty1 — the S1 deny-by-default floor stands on its own, so egressd is
+# merely PULLED into the boot transaction and ordered via its own After=. The unit FILE ships in the
+# overlay unconditionally (tracked, no [Install]); only this enable symlink is variant-gated + gitignored,
+# so LIVE_INSTALLER (ADR-007 §9: no plane) and plain-CI stay byte-clean.
+EGRESSD_WANT="$MU_WANTS/egressd.service"
+rm -f "$EGRESSD_WANT"
+if [ "${DOGFOOD:-0}" = "1" ] || [ "$INSTALLABLE" = "1" ]; then
+  install -d "$MU_WANTS"
+  ln -sf ../egressd.service "$EGRESSD_WANT"
+  echo "!!! desktop egress plane (ADR-007 S2): enabling egressd.service (bless supervisor) !!!"
 fi
 
 # ── ADR-005 provisioning plane (gate + locale/keymap appliers) — variant-gated like home.mount above ───

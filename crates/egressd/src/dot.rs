@@ -267,6 +267,16 @@ fn query_one(
 /// de-duplicated. `id` is caller-provided (the sealed daemons avoid rng; over an authenticated single-
 /// query TLS stream a fixed id is safe — the transport, not the id, is the security).
 pub fn resolve_over_dot(name: &str, id: u16, timeout: Duration) -> Result<Vec<Ipv4Addr>, DotError> {
+    resolve_over_dot_logged(name, id, timeout).map(|(a, _)| a)
+}
+
+/// As [`resolve_over_dot`], but also reports WHICH sealed resolver answered — the supervisor journals it
+/// (the owner wants "resolver used" on every bless). Result addrs are sorted + de-duplicated.
+pub fn resolve_over_dot_logged(
+    name: &str,
+    id: u16,
+    timeout: Duration,
+) -> Result<(Vec<Ipv4Addr>, Ipv4Addr), DotError> {
     if !valid_dns_name(name) {
         return Err(DotError::BadName(name.to_string()));
     }
@@ -277,7 +287,7 @@ pub fn resolve_over_dot(name: &str, id: u16, timeout: Duration) -> Result<Vec<Ip
             Ok(mut a) => {
                 a.sort();
                 a.dedup();
-                return Ok(a);
+                return Ok((a, r.ip));
             }
             Err(e) => errs.push(e),
         }
@@ -290,19 +300,31 @@ pub fn resolve_over_dot(name: &str, id: u16, timeout: Duration) -> Result<Vec<Ip
 /// DoT-resolved. A single host that fails to resolve fails the whole profile (fail-closed: a partial
 /// pin set is not applied).
 pub fn resolve_profile_pins(profile: &str, id: u16, timeout: Duration) -> Result<Vec<Pin>, DotError> {
+    resolve_profile_pins_logged(profile, id, timeout).map(|(p, _)| p)
+}
+
+/// As [`resolve_profile_pins`], but reports the resolver that answered (the FIRST host's, for the
+/// journal — profiles have one host today). Fail-closed on any host that won't resolve.
+pub fn resolve_profile_pins_logged(
+    profile: &str,
+    id: u16,
+    timeout: Duration,
+) -> Result<(Vec<Pin>, Option<Ipv4Addr>), DotError> {
     use shrek_policy::desktop_egress::{is_broad_profile, is_prepinned_profile, resolve_desktop};
     let prof = resolve_desktop(profile).ok_or_else(|| DotError::BadName(profile.to_string()))?;
     if is_broad_profile(profile) || is_prepinned_profile(profile) || prof.is_empty() {
         return Err(DotError::BadName(format!("{profile} is not DoT-resolvable")));
     }
     let mut pins = Vec::new();
+    let mut used: Option<Ipv4Addr> = None;
     for rule in prof.rules {
-        let addrs = resolve_over_dot(rule.host, id, timeout)?;
+        let (addrs, resolver) = resolve_over_dot_logged(rule.host, id, timeout)?;
+        used.get_or_insert(resolver);
         for addr in addrs {
             pins.push(Pin { name: rule.host.to_string(), addr });
         }
     }
-    Ok(pins)
+    Ok((pins, used))
 }
 
 #[cfg(test)]

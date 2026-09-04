@@ -122,6 +122,44 @@ pub fn is_broad_profile(name: &str) -> bool {
     name == "web-browsing"
 }
 
+/// The bless TIER a desktop profile requires (ADR-007 §3, Q3). This is SEALED policy — the supervisor
+/// consults it to decide what a uid-1000 socket request may grant, and the tier is authored here, not
+/// inferred by the daemon. `None` for an unknown name (fail-closed: no tier ⇒ no bless).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlessTier {
+    /// System-service egress, always on, NOT user-blessable (`desktop-ntp`, `desktop-updates`). A
+    /// socket bless of a baseline profile is meaningless and refused.
+    Baseline,
+    /// One-click grant over the uid-1000 socket, no console ceremony — a pinned, bounded destination
+    /// (`weather`). The ONLY tier the S2 supervisor admits over the socket.
+    OneClick,
+    /// High-consequence BROAD grant (`web-browsing`): only through the full console ceremony (S4),
+    /// NEVER over the uid-1000 socket. A compromised uid 1000 must not be able to open arbitrary
+    /// browsing by naming a profile.
+    Ceremony,
+}
+
+/// Resolve a desktop profile to its sealed [`BlessTier`]. `None` ⇒ unknown profile (fail-closed).
+pub fn bless_tier(name: &str) -> Option<BlessTier> {
+    resolve_desktop(name)?;
+    Some(if is_baseline_profile(name) {
+        BlessTier::Baseline
+    } else if is_broad_profile(name) {
+        BlessTier::Ceremony
+    } else {
+        BlessTier::OneClick
+    })
+}
+
+/// The Tier-B admission gate the supervisor applies to EVERY socket bless/re-pin: is this profile
+/// grantable one-click over the uid-1000 socket? True ONLY for a sealed, non-baseline, non-broad
+/// profile (`weather` today). Baseline is always-on (nothing to bless); broad requires the console
+/// ceremony (S4). SO_PEERCRED proves the requester is uid 1000, but authorization to grant still rests
+/// entirely on THIS sealed rule — identity is not authority.
+pub fn admits_socket_bless(name: &str) -> bool {
+    bless_tier(name) == Some(BlessTier::OneClick)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,6 +171,24 @@ mod tests {
         assert_eq!(resolve_desktop("weather").unwrap().rules.len(), 1);
         assert!(resolve_desktop("desktop-updates").unwrap().is_empty());
         assert!(resolve_desktop("web-browsing").unwrap().is_empty());
+    }
+
+    #[test]
+    fn bless_tier_and_socket_admission() {
+        // The sealed Tier-B rule the S2 supervisor enforces on every socket bless.
+        assert_eq!(bless_tier("weather"), Some(BlessTier::OneClick));
+        assert_eq!(bless_tier("web-browsing"), Some(BlessTier::Ceremony));
+        assert_eq!(bless_tier("desktop-ntp"), Some(BlessTier::Baseline));
+        assert_eq!(bless_tier("desktop-updates"), Some(BlessTier::Baseline));
+        assert_eq!(bless_tier("evil"), None); // unknown ⇒ fail-closed
+        // Only the one-click tier is admissible over the uid-1000 socket: NOT baseline (always-on),
+        // NOT broad (ceremony, S4), NOT unknown. This is the whole "identity != authority" gate.
+        assert!(admits_socket_bless("weather"));
+        assert!(!admits_socket_bless("web-browsing"));
+        assert!(!admits_socket_bless("desktop-ntp"));
+        assert!(!admits_socket_bless("desktop-updates"));
+        assert!(!admits_socket_bless("evil"));
+        assert!(!admits_socket_bless(""));
     }
 
     #[test]

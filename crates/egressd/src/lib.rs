@@ -15,9 +15,12 @@
 //!     LIVE set + fail-closed rollback; the sole browser-cgroup rule insert). ← landed
 //!   * S2c — [`dot`]: the sealed DNS-over-TLS re-pin client (sealed resolver IPs + sealed root bundle +
 //!     exact expected hostname; never resolved/NM/resolv.conf/getaddrinfo). ← landed
-//!   * S2d — the root supervisor daemon: bless/unbless/re-pin verbs over a `SO_PEERCRED`-gated,
-//!     rate-limited, journaled uid-1000 socket.
+//!   * S2d — [`supervisor`]: the root daemon — bless/unbless/re-pin over a `SO_PEERCRED`-gated,
+//!     Tier-B-admitted, rate-limited, journaled uid-1000 socket; flush-free startup reconcile. Uses
+//!     [`uapi`] for the one raw syscall (peer creds). ← landed
 
 pub mod apply;
 pub mod dot;
 pub mod store;
+pub mod supervisor;
+pub mod uapi;

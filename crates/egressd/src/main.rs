@@ -31,17 +31,18 @@ use egressd::store::{
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
+        Some("daemon") => daemon_cli(&args[1..]),
         Some("store") => store_cli(&args[1..]),
         Some("resolve") => resolve_cli(&args[1..]),
         Some("apply") => apply_cli(&args[1..]),
         Some("apply-browser") => apply_browser_cli(&args[1..]),
         _ => {
             eprintln!("egressd: usage:");
+            eprintln!("  egressd daemon                                          # run the supervisor (uid-1000 socket)");
             eprintln!("  egressd store <init|bless|unbless|pin|unpin|fault|project|list> [args]");
             eprintln!("  egressd resolve --profile <p> [--at <secs>] [--apply]   # DoT-resolve + store pins (+apply)");
             eprintln!("  egressd apply --profile <p> [--unbless] [--at <secs>]   # reconcile stored pins into nft");
             eprintln!("  egressd apply-browser --path <cgroup> --level <n>       # insert browser-cgroup rules");
-            eprintln!("egressd: (the supervisor daemon socket lands in S2d)");
             2
         }
     };
@@ -158,6 +159,22 @@ fn apply_cli(args: &[String]) -> i32 {
         Err(ApplyError::Nft(msg)) => {
             let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
             eprintln!("egressd apply: nft failure (rolled back, deny skeleton stands): {msg}");
+            1
+        }
+    }
+}
+
+/// `egressd daemon` — run the S2d supervisor: bind the uid-1000 socket, reconcile blessed pins into the
+/// baked sets (flush-free), and serve bless/unbless/re-pin. This is what the systemd unit runs. Never
+/// returns except on a fatal bind error.
+fn daemon_cli(_args: &[String]) -> i32 {
+    let store = store_dir();
+    let run = run_dir();
+    eprintln!("egressd[boot]: starting supervisor (store={}, run={})", store.display(), run.display());
+    match egressd::supervisor::serve(store, run) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("egressd[boot]: FATAL {e}");
             1
         }
     }

@@ -105,6 +105,9 @@
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-provision-validate.service
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-locale-seed.service
 /image/overlay/usr/lib/systemd/system/multi-user.target.wants/shrek-keymap-seed.service
+# ADR-007 S2: egressd supervisor enable symlink — staged ONLY for INSTALLABLE/DOGFOOD (the unit FILE
+# under image/overlay/usr/lib is tracked source). Gitignored so LIVE_INSTALLER/plain-CI stay byte-clean.
+/image/overlay/usr/lib/systemd/system/multi-user.target.wants/egressd.service
 /image/overlay/etc/shrek/provisioning.env
 /image/overlay/etc/shrek/test-manifest
 # Dogfood artifacts (generated VM definition + captured screenshots + the disposable oracle data disk;

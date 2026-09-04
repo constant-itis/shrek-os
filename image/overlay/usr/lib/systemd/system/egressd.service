@@ -1,0 +1,49 @@
+# egressd — the desktop-egress supervisor (ADR-007 S2d). The root daemon that turns a uid-1000 bless
+# into a live allow WITHOUT rebuilding the S1-baked deny table: it DoT-resolves the sealed profile name
+# over sealed resolver IPs (never resolved/NM/getaddrinfo — the #3121 workaround) and writes nft SET
+# ELEMENTS only. Listens on a SO_PEERCRED-gated uid-1000 socket; identity is gated by peer creds,
+# AUTHORITY by the sealed Tier-B rule. docs/adr-007-desktop-egress.md.
+#
+# Enablement is variant-gated: the enable symlink is staged by build-in-container.sh ONLY for
+# INSTALLABLE/DOGFOOD (a real uid-1000 desktop + writable /home). This unit FILE ships in the sealed
+# overlay unconditionally but has NO [Install] section, so plain-CI / LIVE_INSTALLER never pull it in.
+# It is a target Wants= (not a getty Requires=): a failed egressd must NOT brick the session — the
+# S1-baked deny-by-default floor stands on its own, weather simply stays unblessed until egressd is up.
+[Unit]
+Description=Shrek egressd — desktop-egress supervisor (ADR-007 S2)
+Documentation=file:///usr/share/doc/shrek/adr-007-desktop-egress.md
+# The baked deny table + its named sets must exist before egressd adds elements; the store lives on the
+# persistent /home. Ordered After, NOT Requires: if the baked table is missing, egressd's element writes
+# fault and fail-closed (the deny floor holds) rather than the daemon failing.
+After=shrek-desktop-egress.service home.mount local-fs.target systemd-sysctl.service
+Wants=home.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/shrek/egressd daemon
+Restart=always
+RestartSec=2
+# Scoped privilege: runs as root (root-owned 0700 store + the uid-1000 socket) but bounded to the two
+# caps its work needs — CAP_NET_ADMIN for the element-only nft writes, CAP_CHOWN to set the socket's
+# group + the store/projection ownership. A compromised egressd still cannot load modules, ptrace,
+# change sysctls, or touch the sealed /usr.
+User=root
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_CHOWN
+AmbientCapabilities=CAP_NET_ADMIN CAP_CHOWN
+NoNewPrivileges=yes
+# egressd does NOT overmount anything (unlike gatekeeperd), so a private mount namespace is safe here.
+# It writes only its store (/home/.shrek-system) and its /run projection+socket; everything else stays
+# read-only. nf_tables is already loaded by shrek-desktop-egress.service, so ProtectKernelModules is safe.
+ProtectSystem=strict
+ProtectHome=no
+ReadWritePaths=/home/.shrek-system /run
+ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+StandardOutput=journal
+StandardError=journal
