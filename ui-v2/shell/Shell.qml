@@ -57,6 +57,7 @@ ShellRoot {
         function controlNetwork(): void { UI.openControl("network") }
         function system(): void { UI.toggleSystem("overview") }
         function network(): void { UI.openSystem("network") }
+        function connectivity(): void { UI.openSystem("connectivity") }
         function audio(): void { UI.openSystem("audio") }
         function bluetooth(): void { UI.openSystem("bluetooth") }
         function power(): void { UI.openSystem("power") }

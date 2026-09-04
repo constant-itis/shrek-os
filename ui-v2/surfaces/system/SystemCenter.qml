@@ -10,6 +10,7 @@ Item {
     readonly property var sections: [
         { id: "overview", label: "Overview" },
         { id: "network", label: "Network" },
+        { id: "connectivity", label: "Connectivity" },
         { id: "audio", label: "Audio" },
         { id: "bluetooth", label: "Bluetooth" },
         { id: "power", label: "Power" },
@@ -81,6 +82,7 @@ Item {
         anchors.bottom: parent.bottom
         sourceComponent: {
             if (UI.systemSection === "network") return networkPage
+            if (UI.systemSection === "connectivity") return connectivityPage
             if (UI.systemSection === "audio") return audioPage
             if (UI.systemSection === "bluetooth") return bluetoothPage
             if (UI.systemSection === "power") return powerPage
@@ -92,6 +94,7 @@ Item {
 
     Component { id: overviewPage; OverviewPage {} }
     Component { id: networkPage; NetworkPage {} }
+    Component { id: connectivityPage; ConnectivityPage {} }
     Component { id: audioPage; AudioPage {} }
     Component { id: bluetoothPage; BluetoothPage {} }
     Component { id: powerPage; PowerPage {} }
