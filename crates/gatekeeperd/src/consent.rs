@@ -343,54 +343,79 @@ fn audit(event: &str, uid: u32, verb: &str, detail: &str) {
 
 // ---- the production entry point (called by bench_plane::dispatch_socket) -------------------------
 
-fn refused(verb: &str, tag: &str) -> (i32, Vec<String>) {
-    (2, vec![format!("RESULT bench-{verb} - refused {tag}")])
+fn refused(prefix: &str, verb: &str, tag: &str) -> (i32, Vec<String>) {
+    (2, vec![format!("RESULT {prefix}-{verb} - refused {tag}")])
 }
 
-fn ceremony_result_line(verb: &str, bench: &str, rc: i32) -> Vec<String> {
-    vec![format!("RESULT bench-{verb} {bench} {}", if rc == 0 { "ok" } else { "fail" })]
+fn ceremony_result_line(prefix: &str, verb: &str, subject: &str, rc: i32) -> Vec<String> {
+    vec![format!("RESULT {prefix}-{verb} {subject} {}", if rc == 0 { "ok" } else { "fail" })]
 }
 
-/// Drive the console consent ceremony for one authority-increasing socket request. Peer-gated (root uses
-/// the in-process `cli()`, only the bench uid may drive this, `shrek` is refused), cooldown-gated,
-/// precheck-validated (the human is never asked on a validation failure), then the real ceremony. Returns
-/// the `(rc, RESULT lines)` the socket front end frames as `RESULT …` / `END <rc>`.
+/// Drive the console consent ceremony for one authority-increasing BENCH socket request. Thin delegator
+/// over [`run_socket_consent_with`] — the bench precheck/commit + the `bench-` result prefix.
 pub fn run_socket_consent(cred: Ucred, peer_fd: std::os::fd::RawFd, verb: &str, rest: &[String]) -> (i32, Vec<String>) {
+    run_socket_consent_with(
+        cred,
+        peer_fd,
+        verb,
+        "bench",
+        || bench_plane::precheck_authority(verb, rest),
+        bench_plane::commit_authority,
+    )
+}
+
+/// Drive the console consent ceremony for ONE authority-increasing socket request, generic over the
+/// request family: `precheck` builds the validated [`AuthorityPlan`] (the human is NEVER asked on a
+/// validation failure), `commit` materializes it after a passing ceremony, and `result_prefix` names the
+/// family on the wire (`bench` / `desktop-egress`). Everything security-critical is SHARED: the peer
+/// gate (root uses `cli()` in-process; only the `dev` uid may drive the socket ceremony — the desktop
+/// user IS `dev`, same uid as the bench user), the escalating anti-flood cooldown (keyed on `(uid,
+/// verb)`, so a distinct verb string keeps one family's denials from arming another's cooldown), the
+/// PID-reuse/peer-liveness tuple binding, the SAK+VT `run_ceremony`, and the audit. Returns the
+/// `(rc, RESULT lines)` the socket front end frames as `RESULT …` / `END <rc>`.
+pub(crate) fn run_socket_consent_with(
+    cred: Ucred,
+    peer_fd: std::os::fd::RawFd,
+    verb: &str,
+    result_prefix: &str,
+    precheck: impl FnOnce() -> Result<AuthorityPlan, (i32, String)>,
+    commit: impl FnOnce(&AuthorityPlan) -> i32,
+) -> (i32, Vec<String>) {
     // 1. Peer gate. Root never uses the socket ceremony (it drives cli() in-process); only `dev` may.
     if cred.uid == 0 {
-        return refused(verb, "root-uses-cli");
+        return refused(result_prefix, verb, "root-uses-cli");
     }
     if cred.uid != bench_plane::bench_user_uid() {
         audit("reject-peer", cred.uid, verb, "not-bench-uid");
-        return refused(verb, "not-bench-uid");
+        return refused(result_prefix, verb, "not-bench-uid");
     }
     // 2. Anti-flood cooldown (sequential-spam / SAK-fatigue defense).
     let now = now_secs();
     if let Some(until) = cooldown_active(cred.uid, verb, now) {
         audit("reject-cooldown", cred.uid, verb, &format!("{}s-left", until.saturating_sub(now)));
-        return refused(verb, "cooldown");
+        return refused(result_prefix, verb, "cooldown");
     }
     // 3. Precheck — every validator runs here; a failure denies and the human is NEVER asked. A precheck
     //    failure is cheap + local (no VT, no human, no SAK), so it does NOT arm the cooldown: that defends
     //    against SAK fatigue, which only begins once a request reaches the ceremony. (A typo'd bench name
     //    must not lock the user out for escalating minutes.)
-    let plan = match bench_plane::precheck_authority(verb, rest) {
+    let plan = match precheck() {
         Ok(p) => p,
         Err((rc, msg)) => {
             eprintln!("gatekeeperd/consent: precheck refused verb={verb} uid={}: {msg}", cred.uid);
             audit("reject-precheck", cred.uid, verb, &msg);
-            return (rc, vec![format!("RESULT bench-{verb} - refused precheck")]);
+            return (rc, vec![format!("RESULT {result_prefix}-{verb} - refused precheck")]);
         }
     };
     // 4. Bind the tuple. No peer start-time (peer already gone) → deny before we ever touch the VT.
     let Some(starttime) = proc_starttime(cred.pid as u32) else {
         audit("deny", cred.uid, verb, DenyReason::NoStarttime.tag());
         note_deny(cred.uid, verb, now);
-        return (1, vec![format!("RESULT bench-{verb} - refused ceremony-{}", DenyReason::NoStarttime.tag())]);
+        return (1, vec![format!("RESULT {result_prefix}-{verb} - refused ceremony-{}", DenyReason::NoStarttime.tag())]);
     };
     let Some(nonce) = mint_nonce() else {
         audit("deny", cred.uid, verb, "nonce-unavailable");
-        return (1, vec![format!("RESULT bench-{verb} - refused ceremony-nonce")]);
+        return (1, vec![format!("RESULT {result_prefix}-{verb} - refused ceremony-nonce")]);
     };
     let pending = Pending { nonce, uid: cred.uid, pid: cred.pid as u32, starttime };
 
@@ -402,19 +427,19 @@ pub fn run_socket_consent(cred: Ucred, peer_fd: std::os::fd::RawFd, verb: &str, 
         &mut console,
         proc_starttime,
         || peer_fd_alive(peer_fd),
-        || bench_plane::commit_authority(&plan),
+        || commit(&plan),
     );
 
     // 6. Audit + cooldown + wire framing.
     match result.outcome {
         Outcome::Approved => {
             audit("approve", cred.uid, verb, &plan.action());
-            (result.rc, ceremony_result_line(verb, &plan.bench, result.rc))
+            (result.rc, ceremony_result_line(result_prefix, verb, &plan.bench, result.rc))
         }
         Outcome::Denied(r) => {
             audit("deny", cred.uid, verb, r.tag());
             note_deny(cred.uid, verb, now);
-            (1, vec![format!("RESULT bench-{verb} - refused ceremony-{}", r.tag())])
+            (1, vec![format!("RESULT {result_prefix}-{verb} - refused ceremony-{}", r.tag())])
         }
     }
 }

@@ -406,6 +406,42 @@ fn handle_conn(b: &mut Broker, stream: UnixStream, allowed: &BTreeSet<u32>, onio
         return;
     }
 
+    // ADR-007 S4 — the count-framed DESKTOP-EGRESS console-ceremony request (web-browsing bless/unbless,
+    // raw host:proto:port add/remove). Same frame shape as BENCH so a raw destination (or any arg) rides
+    // its own pct-encoded line and can never smuggle a second request. dev (uid 1000) drives it; the
+    // ceremony's own peer gate + SAK/VT are the authority.
+    if verb == "DESKTOP-EGRESS" {
+        let subverb = tok.next().unwrap_or("").to_string();
+        let argc: usize = tok.next().and_then(|s| s.parse().ok()).unwrap_or(usize::MAX);
+        let mut w = stream;
+        if subverb.is_empty() || argc > 8 {
+            eprintln!("gatekeeperd: DENY malformed DESKTOP-EGRESS frame uid={} (subverb={subverb:?} argc={argc})", cred.uid);
+            let _ = writeln!(w, "END 1 malformed-desktop-egress-frame");
+            return;
+        }
+        let mut argv: Vec<String> = Vec::with_capacity(argc + 1);
+        argv.push(subverb);
+        for _ in 0..argc {
+            let mut l = String::new();
+            match reader.read_line(&mut l) {
+                Ok(0) | Err(_) => {
+                    let _ = writeln!(w, "END 1 short-desktop-egress-frame");
+                    return;
+                }
+                Ok(_) => {}
+            }
+            let l = l.strip_suffix('\n').unwrap_or(&l);
+            argv.push(gatekeeperd::bench_plane::pct_decode(l));
+        }
+        eprintln!("gatekeeperd: req uid={} pid={} DESKTOP-EGRESS verb={} argc={argc}", cred.uid, cred.pid, argv[0]);
+        let (rc, lines) = gatekeeperd::desktop_egress::dispatch_socket(cred, w.as_raw_fd(), &argv);
+        for l in &lines {
+            let _ = writeln!(w, "{l}");
+        }
+        let _ = writeln!(w, "END {rc} -");
+        return;
+    }
+
     // Legacy single-line onion verbs — restricted to root + shrek (a bench-only `dev` peer is refused).
     if matches!(verb.as_str(), "merge" | "activate" | "deactivate" | "status")
         && !onion_allowed.contains(&cred.uid)

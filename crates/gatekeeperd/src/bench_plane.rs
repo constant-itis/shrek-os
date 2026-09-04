@@ -1648,6 +1648,7 @@ impl AuthorityPlan {
                 | CommitKind::Grant { rw: true, .. }
                 | CommitKind::Promote { .. }
                 | CommitKind::Launch { .. }
+                | CommitKind::DesktopEgress { .. }
         )
     }
 
@@ -1659,13 +1660,30 @@ impl AuthorityPlan {
             CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
             CommitKind::Promote { workshop, .. } => format!("PROMOTE bench '{}' to the Workshop recipe '{}'", self.bench, workshop),
             CommitKind::Launch { .. } => format!("LAUNCH the Workshop recipe '{}' (re-derive its environment + run)", self.bench),
+            CommitKind::DesktopEgress(op) => crate::desktop_egress::action(op),
         }
     }
+}
+
+/// Build a validated desktop-egress ceremony plan (ADR-007 S4). Lives here because `CommitKind` is
+/// private to this module; the desktop-egress module supplies the op + rendered diff and this wraps it in
+/// the shared `AuthorityPlan` the consent renderer consumes. `subject` is the wire/audit label (the
+/// profile name or the raw triple), NOT a bench.
+pub(crate) fn desktop_egress_plan(
+    op: crate::desktop_egress::Op,
+    subject: String,
+    diff_rows: Vec<(String, String)>,
+    trifecta: bool,
+) -> AuthorityPlan {
+    AuthorityPlan { bench: subject, diff_rows, trifecta, kind: CommitKind::DesktopEgress(op) }
 }
 
 enum CommitKind {
     Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
     Network { profiles: Vec<String> },
+    /// ADR-007 S4 — a console-ceremony desktop-egress change (`web-browsing` bless/unbless or a raw
+    /// `host:proto:port` add/remove). Commit execs the root-only `egressd confirmed-*` verb.
+    DesktopEgress(crate::desktop_egress::Op),
     Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
     /// A validated bench→Workshop recipe. Carries the CONSENTED snapshot (declared package sets + the
     /// grants/exports copied from the source bench at precheck time) so `commit_promote` writes exactly
@@ -2105,6 +2123,7 @@ pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
         CommitKind::Promote { workshop, seed, apt, pip, grants, exports } => commit_promote(&plan.bench, workshop, seed, apt, pip, grants, exports),
         CommitKind::Launch { seed, apt, pip, grants, workload, refresh, offline } => commit_launch(&plan.bench, seed, apt, pip, grants, workload, *refresh, *offline),
+        CommitKind::DesktopEgress(op) => crate::desktop_egress::commit(op),
     }
 }
 
