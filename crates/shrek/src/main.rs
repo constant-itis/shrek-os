@@ -38,6 +38,7 @@ fn main() {
         // `shrek run` → `gatekeeperd sandbox`. Bench containers run as `dev`'s rootless podman; the
         // supervisor drops privilege internally.
         Some("bench") => std::process::exit(bench(&argv[1..])),
+        Some("connectivity") => std::process::exit(connectivity(&argv[1..])),
         // ADR-006 Mode A: the on-device AI front door. A thin forwarder to
         // /usr/lib/shrek/ai/shrek-ai-front-door (mirrors `shrek run` → gatekeeperd). This CLI owns no AI
         // logic and adds no host-exec surface; the front door + the vendored no-exec shell are the boundary.
@@ -163,25 +164,46 @@ fn bench(args: &[String]) -> i32 {
         usage();
         return if args.is_empty() { 2 } else { 0 };
     }
+    frame_to_gatekeeper("BENCH", "shrek bench", &args[0], &args[1..])
+}
+
+/// `shrek connectivity <bless|unbless|add-raw|remove-raw> <profile-or-host:proto:port>` — drive the
+/// ADR-007 S4 desktop-egress CONSOLE CEREMONY over gatekeeperd's socket. The DMS Connectivity panel
+/// execs this (fixed argv, no shell). gatekeeperd runs the SAK/VT ceremony; on a confirmed OK it execs
+/// the root-only `egressd confirmed-*` verb. Fail-closed: an unreachable supervisor is unavailability,
+/// never a grant.
+fn connectivity(args: &[String]) -> i32 {
+    if matches!(args.first().map(String::as_str), Some("-h") | Some("--help")) || args.is_empty() {
+        eprintln!("usage: shrek connectivity <bless|unbless|add-raw|remove-raw> <profile|host:proto:port>");
+        eprintln!("  Grants the high-consequence desktop-egress tier at the CONSOLE: this switches to a");
+        eprintln!("  secure text screen — press the Secure Attention key (Ctrl-Alt-Break) and type the");
+        eprintln!("  shown code to approve. web-browsing opens broad internet access for the browser.");
+        return if args.is_empty() { 2 } else { 0 };
+    }
+    frame_to_gatekeeper("DESKTOP-EGRESS", "shrek connectivity", &args[0], &args[1..])
+}
+
+/// Send a count-framed request (`<FRAME> <verb> <argc>` + one pct-encoded arg per line) to gatekeeperd's
+/// authenticated socket and stream back its `RESULT …`/`END <rc>` reply. Shared by the bench + the
+/// desktop-egress ceremony front doors — both go through the daemon (SO_PEERCRED-gated, re-validating,
+/// ceremony-owning), never by exec'ing a privileged binary.
+fn frame_to_gatekeeper(frame: &str, tool: &str, verb: &str, rest: &[String]) -> i32 {
     use std::io::{BufRead, BufReader, Write};
     let socket = std::env::var("SHREK_BROKER_SOCK").unwrap_or_else(|_| "/run/shrek-gk.sock".to_string());
-    let verb = args[0].as_str();
-    let rest = &args[1..];
     let mut stream = match std::os::unix::net::UnixStream::connect(&socket) {
         Ok(s) => s,
         Err(e) => {
-            // Fail-closed: an unreachable supervisor is unavailability, never a grant. Report + exit nonzero.
-            eprintln!("shrek bench: gatekeeper socket unavailable ({socket}): {e}");
+            eprintln!("{tool}: gatekeeper socket unavailable ({socket}): {e}");
             return 1;
         }
     };
-    let mut req = format!("BENCH {verb} {}\n", rest.len());
+    let mut req = format!("{frame} {verb} {}\n", rest.len());
     for a in rest {
         req.push_str(&pct_encode(a));
         req.push('\n');
     }
     if let Err(e) = stream.write_all(req.as_bytes()) {
-        eprintln!("shrek bench: write failed: {e}");
+        eprintln!("{tool}: write failed: {e}");
         return 1;
     }
     let _ = stream.flush();
@@ -191,7 +213,7 @@ fn bench(args: &[String]) -> i32 {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(e) => { eprintln!("shrek bench: read failed: {e}"); return 1; }
+            Err(e) => { eprintln!("{tool}: read failed: {e}"); return 1; }
         };
         if let Some(tail) = line.strip_prefix("END ") {
             rc = tail.split_whitespace().next().and_then(|s| s.parse().ok()).unwrap_or(1);
@@ -203,7 +225,7 @@ fn bench(args: &[String]) -> i32 {
         }
     }
     if !saw_end {
-        eprintln!("shrek bench: no well-formed response from the supervisor");
+        eprintln!("{tool}: no well-formed response from the supervisor");
         return 1;
     }
     rc

@@ -59,10 +59,33 @@ QtObject {
     // The DMS weather dashTab is enabled IFF weather is a LIVE bless (blessed + pinned + no fault).
     readonly property bool weatherLive: weather ? weather.live : false
 
-    // --- actions (the socket write path) ---------------------------------------------------------
+    // The `shrek` front door for the CONSOLE CEREMONY (S4). web-browsing + raw destinations are the
+    // high-consequence tier: this UI does NOT flip them over the one-click socket (the daemon refuses
+    // that anyway). It launches the ceremony via gatekeeperd; the human must approve at a secure text
+    // console (the Secure Attention key), so the panel shows a "go to the console" hint, not a spinner.
+    readonly property string shrekBin: Quickshell.env("SHREK_CLI_BIN") || "shrek"
+
+    // Raw advanced-tier destinations parsed from the state projection (S4): [{host,proto,port,blessed,
+    // pins:[..],refreshed,hasPins,pending,wire}]. Empty until a raw line appears.
+    property var rawEntries: []
+
+    // True from when a ceremony is launched until it should have resolved at the console — the panel
+    // shows the SAK instruction while set. Not authority, just UX: the state projection is still the
+    // display truth for what actually got blessed.
+    property bool ceremonyActive: false
+    property string ceremonyLabel: ""
+
+    // --- actions ---------------------------------------------------------------------------------
+    // Tier-B one-click (weather) — the egressd socket path.
     function bless(name)   { _ask("bless", name) }
     function unbless(name) { _ask("unbless", name) }
     function repin(name)   { _ask("repin", name) }
+
+    // Ceremony tier (web-browsing + raw) — the gatekeeperd console-ceremony path.
+    function blessCeremony(name)   { _ceremony("bless", name, "Allow " + name) }
+    function unblessCeremony(name) { _ceremony("unbless", name, "Turn off " + name) }
+    function addRaw(triple)        { _ceremony("add-raw", triple, "Add " + triple) }
+    function removeRaw(triple)     { _ceremony("remove-raw", triple, "Remove " + triple) }
 
     function _ask(verb, name) {
         if (!name || busyProfile.length > 0) return           // debounce: one action in flight
@@ -73,6 +96,19 @@ QtObject {
         busyGuard.restart()                                    // clear busy even if nothing changes
         kick.restart()                                         // catch the projection up fast
     }
+
+    function _ceremony(verb, arg, label) {
+        if (!arg) return
+        root.ceremonyActive = true
+        root.ceremonyLabel = label
+        Quickshell.execDetached([root.shrekBin, "connectivity", verb, arg]) // fixed argv, no shell
+        ceremonyGuard.restart()                                // clear the hint after the ceremony window
+        kick.restart()
+    }
+
+    // The SAK ceremony can take up to ~105s (60s SAK-arm + 45s answer). Keep the "approve at the console"
+    // hint up across that window, then clear it (the state projection reveals the real outcome regardless).
+    property Timer ceremonyGuard: Timer { interval: 120000; repeat: false; onTriggered: { root.ceremonyActive = false; root.ceremonyLabel = "" } }
 
     function reload() { proc.running = true }
 
@@ -119,13 +155,20 @@ QtObject {
             return
         }
         var rows = []
+        var raws = []
         for (var i = start; i < lines.length; i++) {
             var l = lines[i].trim()
             if (l.length === 0) continue
-            var row = _parseProfileLine(l)
-            if (row) rows.push(row)
+            if (l.indexOf("raw ") === 0) {
+                var rr = _parseRawLine(l)
+                if (rr) raws.push(rr)
+            } else {
+                var row = _parseProfileLine(l)
+                if (row) rows.push(row)
+            }
         }
         root.profiles = rows
+        root.rawEntries = raws
         root.available = true
         // If the busy profile has settled to a different blessed state, release the lock immediately.
         if (busyProfile.length > 0) {
@@ -136,7 +179,7 @@ QtObject {
         // Load-bearing marker: the headless render proof greps this to confirm the projection flowed
         // file -> service -> panel.
         console.log("SHREK-DESKTOP connectivity egress state profiles=" + rows.length
-            + " weatherLive=" + root.weatherLive)
+            + " raw=" + raws.length + " weatherLive=" + root.weatherLive)
     }
 
     // `profile <name> tier=<t> blessed=<0|1> pins=<ip,ip|-> refreshed=<unix|-> fault=<kind|->`
@@ -162,6 +205,29 @@ QtObject {
         row.live = row.blessed && row.hasPins && !row.faulted
         row.pending = row.blessed && !row.live       // blessed but not yet reachable (waiting/fault)
         return row
+    }
+
+    // `raw host=<h> proto=<p> port=<n> blessed=1 pins=<ip,ip|-> refreshed=<unix|->` (S4 advanced tier).
+    function _parseRawLine(l) {
+        var toks = l.split(/\s+/)
+        if (toks[0] !== "raw") return null
+        var r = { host: "", proto: "", port: "", blessed: false, pins: [], refreshed: 0 }
+        for (var i = 1; i < toks.length; i++) {
+            var kv = toks[i].split("=")
+            if (kv.length !== 2) continue
+            var k = kv[0], v = kv[1]
+            if (k === "host") r.host = v
+            else if (k === "proto") r.proto = v
+            else if (k === "port") r.port = v
+            else if (k === "blessed") r.blessed = v === "1"
+            else if (k === "pins") r.pins = (v === "-") ? [] : v.split(",")
+            else if (k === "refreshed") r.refreshed = (v === "-") ? 0 : (parseInt(v) || 0)
+        }
+        if (!r.host || !r.proto || !r.port) return null
+        r.hasPins = r.pins.length > 0
+        r.pending = !r.hasPins                        // blessed intent present, not yet resolved/pinned
+        r.wire = r.host + ":" + r.proto + ":" + r.port
+        return r
     }
 
     function _ingestEvents(text) {

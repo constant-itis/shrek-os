@@ -76,6 +76,34 @@ Flickable {
                 }
             }
 
+            // The SAK ceremony instruction — shown while a console ceremony is in flight. The approval
+            // does NOT happen in this panel: the screen switches to a secure text console.
+            ShrekCard {
+                visible: Egress.ceremonyActive
+                height: visible ? implicitHeight : 0
+                Column {
+                    width: parent.width
+                    spacing: Tokens.spaceXs
+                    Text {
+                        width: parent.width
+                        text: "Approve at the console"
+                        color: Tokens.accent
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontSmall
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        width: parent.width
+                        text: (Egress.ceremonyLabel.length > 0 ? (Egress.ceremonyLabel + ": ") : "")
+                              + "press the Secure Attention key (Ctrl-Alt-Break), then type the code shown on the secure screen to approve. Anything else denies."
+                        color: Tokens.textSecondary
+                        font.family: Tokens.fontFamily
+                        font.pixelSize: Tokens.fontCaption
+                        wrapMode: Text.WordWrap
+                    }
+                }
+            }
+
             Repeater {
                 model: Egress.available ? Egress.profiles : []
 
@@ -126,14 +154,90 @@ Flickable {
                         font.weight: Font.DemiBold
                     }
 
-                    // Web browsing: broad grant, ceremony-only. Shown, not toggled here (S4).
-                    Text {
+                    // Web browsing: broad grant, ceremony-only (S4). The button LAUNCHES the console
+                    // ceremony (it does not flip anything here) — the human approves at the secure text
+                    // console. The state projection remains the display truth for what actually blessed.
+                    ShrekButton {
                         visible: isCeremony
-                        text: modelData.blessed ? "Enabled" : "Console approval"
-                        color: modelData.blessed ? Tokens.success : Tokens.muted
-                        font.family: Tokens.fontFamily
-                        font.pixelSize: Tokens.fontSmall
-                        font.weight: Font.DemiBold
+                        text: modelData.blessed ? "Turn off (console)" : "Set up at console"
+                        compact: true
+                        enabled: !Egress.ceremonyActive
+                        onActivated: {
+                            if (modelData.blessed) Egress.unblessCeremony(modelData.name)
+                            else Egress.blessCeremony(modelData.name)
+                        }
+                    }
+                }
+            }
+        }
+
+        // Advanced raw-destination editor (S4, §8): add a specific host:proto:port. Each add/remove is a
+        // console ceremony (broad-consequence: an attacker-chosen host), resolve-and-pinned like a profile.
+        ShrekSection {
+            title: "Advanced destinations"
+            detail: "Allow a specific host, protocol and port. Each is approved at the console and pinned to the address it resolves to — nothing else opens."
+
+            // Existing raw destinations, each with a console-ceremony remove.
+            Repeater {
+                model: Egress.available ? Egress.rawEntries : []
+                ShrekSettingRow {
+                    required property var modelData
+                    title: modelData.wire
+                    detail: modelData.hasPins
+                            ? ("Active  ·  Pinned: " + modelData.pins.join(", "))
+                            : "Blessed — waiting for network"
+                    enabledRow: false
+                    ShrekButton {
+                        text: "Remove"
+                        compact: true
+                        enabled: !Egress.ceremonyActive
+                        onActivated: Egress.removeRaw(modelData.wire)
+                    }
+                }
+            }
+
+            // The add row: a host:proto:port field + a console-ceremony "Add" button.
+            ShrekCard {
+                Row {
+                    width: parent.width
+                    spacing: Tokens.spaceSm
+                    Rectangle {
+                        width: parent.width - addBtn.width - Tokens.spaceSm
+                        height: 32
+                        radius: Tokens.radiusSm
+                        color: Tokens.surfaceAlt
+                        border.color: rawInput.activeFocus ? Tokens.accent : Tokens.border
+                        border.width: 1
+                        TextInput {
+                            id: rawInput
+                            anchors.fill: parent
+                            anchors.leftMargin: Tokens.spaceSm
+                            anchors.rightMargin: Tokens.spaceSm
+                            verticalAlignment: TextInput.AlignVCenter
+                            clip: true
+                            color: Tokens.text
+                            font.family: Tokens.fontFamily
+                            font.pixelSize: Tokens.fontSmall
+                            selectionColor: Tokens.accentDim
+                            // A host:proto:port hint when empty.
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: rawInput.text.length === 0
+                                text: "example.com:tcp:443"
+                                color: Tokens.muted
+                                font: rawInput.font
+                            }
+                        }
+                    }
+                    ShrekButton {
+                        id: addBtn
+                        text: "Add at console"
+                        compact: true
+                        enabled: !Egress.ceremonyActive && rawInput.text.trim().length > 0
+                        onActivated: {
+                            Egress.addRaw(rawInput.text.trim())
+                            rawInput.text = ""
+                        }
                     }
                 }
             }
