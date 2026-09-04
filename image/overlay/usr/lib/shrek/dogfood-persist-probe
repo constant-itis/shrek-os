@@ -1167,6 +1167,22 @@ if [ -f /home/.shrek-consent-dogfood ]; then
     fi
 fi
 
+# --- ADR-007 S6: desktop-egress sealed-VM dogfood (S6) -----------------------------------------------
+# Marker-gated exactly like BENCH-CONSENT: desktop-egress-s6-vm-proof.sh seeds /home/.shrek-egress-dogfood
+# into the data disk so this runs ONLY under that proof (a plain dogfood run has no marker, skips clean).
+# Proves the two things netns/host-oracles CANNOT: the live browser cgroup matcher (a process in
+# shrekbrowser.slice ACCEPTs while the same probe outside DROPs) and the SAK/VT ceremony for a raw
+# destination under a running compositor, plus the S5 NTP cold-boot recovery. Never aborts the persist run.
+if [ -f /home/.shrek-egress-dogfood ]; then
+    if [ -f /home/.shrek-egress-probe ]; then
+        say "S6-EGRESS marker present — invoking data-disk override probe"
+        sh /home/.shrek-egress-probe || say "S6-EGRESS probe exited non-zero rc=$?"
+    elif [ -x /usr/lib/shrek/dogfood-egress-probe ]; then
+        say "S6-EGRESS marker present — invoking baked dogfood-egress-probe"
+        /usr/lib/shrek/dogfood-egress-probe || say "S6-EGRESS probe exited non-zero rc=$?"
+    fi
+fi
+
 # --- ADR-006 slice-6: optional on-device AI layer — boot-first proof (runs at boot>=2) ----------------
 # Gated on the shrek-ai Onion marker: a non-AI dogfood build has no marker and skips clean. Proves the
 # layer actually RUNS end to end: model-as-data verify READY, the lazy inference server starts + answers on

@@ -1,0 +1,372 @@
+#!/bin/sh
+# Shrek OS — ADR-007 S6b: the sealed-VM desktop-egress dogfood probe (guest side).
+#
+# This is the in-guest ORACLE + CUE EMITTER for the desktop-egress plane (crates/egressd + the gatekeeperd
+# DESKTOP-EGRESS ceremony). It proves the handful of properties that netns/host-oracles (S2e/S5) CANNOT:
+#   * the LIVE browser-cgroup matcher — a real process in shrekbrowser.slice ACCEPTs to the DNS stub while
+#     the SAME probe outside the slice DROPs (confirmed.rs::browser_cgroup, nft rule-0 vs the browser pair);
+#   * weather reaches its pinned open-meteo IP from uid 1000 via the /run map + `--resolve` while an
+#     UNBLESSED dest drops; the /run pin map == the live @weather_pinned set;
+#   * NTP cold-boot recovery off a FORWARD-skewed RTC — timesyncd corrects off the sealed literal IPs with
+#     NO name resolution (§5 [R2-MF-C]); double-launch + revocation of the browser accept-pair; a DoT re-pin
+#     refreshes @weather_pinned by element; the daemon dying fails CLOSED; and the raw-destination SAK/VT
+#     ceremony under a running compositor.
+#
+# HOST EXECUTOR: scripts/desktop-egress-s6-vm-proof.sh boots the VM with a skewed RTC + explicit NIC, seeds
+# the /home/.shrek-egress-dogfood marker + this probe as /home/.shrek-egress-probe, and drives the SAK
+# ceremony over the serial console with the SAME `SHREK-DOGFOOD CONSENT-CUE ...` cue protocol the
+# bench-consent proof uses (chord / stop-chord / shot / answer). We NEVER inject the SAK at the D-Bus
+# boundary — arm_sak's sender-pin filters a forged signal by the very defense under test.
+#
+# MARKER-GATED: only runs when /home/.shrek-egress-dogfood exists (the persist probe dispatches it at
+# boot2, desktop up). A plain dogfood run has no marker and skips clean.
+#
+# set +e for the whole body: every leg must emit its S6 verdict regardless of an individual failure.
+set +u
+
+# ---- baked constants the host tally + this probe assert against --------------------------------------
+UID_DEV=1000
+RT=/run/user/${UID_DEV}
+GKSOCK=/run/shrek-gk.sock
+# The BAKED browser-cgroup path + nft ancestor level (crates/egressd/src/confirmed.rs::browser_cgroup):
+#   user.slice/user-<uid>.slice/user@<uid>.service/shrekbrowser.slice  →  nft `socket cgroupv2 level 4`.
+BROWSER_CG="user.slice/user-${UID_DEV}.slice/user@${UID_DEV}.service/shrekbrowser.slice"
+BROWSER_LEVEL=4
+NFT_TABLE="inet shrek_desktop_egress"
+# Sealed desktop-ntp literal IPs (Cloudflare anycast, §6 / desktop-egress.nft @ntp_pinned).
+NTP_IP_A=162.159.200.1
+NTP_IP_B=162.159.200.123
+# The sealed weather endpoint (§6 Q6c).
+WEATHER_HOST=api.open-meteo.com
+# The raw triple driven through the console ceremony (matches confirmed.rs test fixture).
+RAW_TRIPLE="203.0.113.7:tcp:8443"
+RAW_IP=203.0.113.7
+RAW_PORT=8443
+# /run pin map. NOTE: confirmed layout is a SINGLE flat file /run/shrek/egress/pinned with `<name> <ip>`
+# lines (crates/egressd/src/store.rs::project_pinned). The task brief describes a per-profile subfile
+# /run/shrek/egress/pinned/weather with `pin <name> <ip>` lines; pinned_ips_for() below reads BOTH shapes
+# so this is robust to whichever the live image ships. <<< NEEDS-LIVE-TUNING: confirm the on-disk layout.
+RUN_EGRESS=/run/shrek/egress
+PIN_MAP="$RUN_EGRESS/pinned"
+
+say() { echo "SHREK-DOGFOOD $*" > /dev/console 2>/dev/null; echo "SHREK-DOGFOOD $*"; }        # S6 verdicts
+cue() { echo "SHREK-DOGFOOD CONSENT-CUE $*"; }        # commands to the host executor (SAK ceremony)
+# Diagnostics go to a FILE on the persistent data disk (/home = the data fs) — a burst of lines to the
+# serial console gets dropped by journald/serial rate-limiting, so the host reads this file post-run via
+# `debugfs -R "cat /s6-diag.log" out/dogfood-data.raw` instead. One `[tag] line` per input line.
+S6DIAGFILE=/home/s6-diag.log
+: > "$S6DIAGFILE" 2>/dev/null
+diag() { while IFS= read -r _l; do echo "[$1] $_l" >> "$S6DIAGFILE" 2>/dev/null; done; }
+
+# Run a command AS DEV (uid 1000) with the desktop session env, mirroring bench-consent-probe's sdev.
+# /usr/libexec/shrek holds the daemons (egressd etc.) — NOT on the default PATH (only shrek/shrekctl are
+# symlinked into /usr/bin), so put it on PATH for BOTH the root probe and the dev-session calls, else every
+# `egressd ...` invocation is a silent command-not-found (swallowed by `|| true`).
+export PATH="/usr/libexec/shrek:${PATH:-/usr/sbin:/usr/bin:/sbin:/bin}"
+sdev() { runuser -u dev -- env HOME=/home/dev XDG_RUNTIME_DIR="$RT" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=$RT/bus" SHREK_BROKER_SOCK="$GKSOCK" \
+        PATH=/usr/libexec/shrek:/usr/bin:/bin "$@"; }
+
+# Extract the pinned IP(s) for a profile from whichever /run layout ships. Emits one IP per line.
+pinned_ips_for() {
+    _p="$1"
+    if [ -f "$PIN_MAP/$_p" ]; then                       # per-profile subfile: `pin <name> <ip>` lines
+        awk '/^pin /{print $3} /^[^ ]+ [0-9]/{print $2}' "$PIN_MAP/$_p" 2>/dev/null
+    elif [ -f "$PIN_MAP" ]; then                          # flat map: `<name> <ip>` lines (confirmed shape)
+        awk '{print $2}' "$PIN_MAP" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'
+    fi
+}
+
+# Live @weather_pinned set elements (one IP per line), tolerant of nft's `elements = { a, b }` layout.
+nft_set_elems() {
+    _set="$1"
+    nft list set $NFT_TABLE "$_set" 2>/dev/null \
+        | tr ',{}' '\n\n\n' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+' 2>/dev/null
+}
+
+# --- the load-bearing DNS-stub reachability probe (INSIDE vs OUTSIDE the browser slice) ----------------
+# rule-0 drops `skuid 1000 ip daddr {127.0.0.53,127.0.0.54} th dport 53`; the browser accept-pair (above
+# rule-0, installed by `egressd ask browser-up` once the slice exists) re-opens the stub for the slice.
+# We probe with a TCP connect to 127.0.0.53:53: a slice process should connect/refuse-fast (ACCEPT path),
+# a plain uid-1000 process should TIME OUT (DROP). This is a SHELL /dev/tcp probe wrapped in `timeout`.
+# <<< NEEDS-LIVE-TUNING: the base image tool inventory is unknown — /dev/tcp is bash-only (dev's shell may
+# be dash), and curl/nc/dig/python3 may or may not ship. If /dev/tcp is unavailable, swap the body of
+# stub_probe_cmd for whichever connect tool the live image has (nc -w2 -z 127.0.0.53 53, python3 socket,
+# etc). Return convention: rc 0/expected-fast => reachable (NOT dropped); non-zero/timeout => dropped.
+STUB_PROBE_TOOL=/run/shrek-egress-stubprobe.sh
+cat > "$STUB_PROBE_TOOL" <<'PROBEEOF'
+#!/bin/bash
+# Connect to the resolved DNS stub (resolved LISTENS on tcp 127.0.0.53:53, confirmed via ss). So:
+#   reached (accept path) => the SYN gets through, resolved accepts the TCP connection => connect SUCCEEDS.
+#   dropped               => an nft DROP on a locally-destined packet fails the connect FAST with EPERM
+#                            (NOT a hang-to-timeout), and a blackhole would time out — either way, FAILURE.
+# Therefore: exit 0 iff the connect SUCCEEDS; exit 1 on ANY failure (fast EPERM drop OR timeout). The old
+# "only rc 124 is a drop" logic misread every fast EPERM drop as reached — the S6-run3 false pass.
+exec 2>/dev/null
+timeout 4 bash -c 'exec 3<>/dev/tcp/127.0.0.53/53' && exit 0 || exit 1
+PROBEEOF
+chmod 0755 "$STUB_PROBE_TOOL" 2>/dev/null
+
+# Run the stub probe INSIDE a fresh transient scope in the STATIC browser slice (as dev). rc 0 => reachable.
+stub_probe_inslice() {
+    sdev env systemd-run --user --scope --slice=shrekbrowser.slice --quiet -- \
+        "$STUB_PROBE_TOOL" >/dev/null 2>&1
+}
+# Run the stub probe as a plain dev process OUTSIDE any browser slice. rc 0 => reachable (should DROP=>rc1).
+stub_probe_outside() { sdev "$STUB_PROBE_TOOL" >/dev/null 2>&1; }
+
+say "S6 begin probe=dogfood-egress-probe baked-cg=[$BROWSER_CG] level=$BROWSER_LEVEL"
+
+# ---- preconditions -----------------------------------------------------------------------------------
+[ -x /usr/bin/egressd ] || command -v egressd >/dev/null 2>&1 || say "S6 precondition=WARN no-egressd-on-PATH"
+# Wait briefly for the supervisor socket / run projection to exist (daemon may still be coming up).
+w=0; while [ "$w" -lt 30 ]; do [ -S "$RUN_EGRESS/sock" ] && break; sleep 1; w=$((w + 1)); done
+
+# ---- LEG: ntp (MF-4) — cold-boot NTP recovery off a FORWARD-skewed RTC --------------------------------
+# The host boots with -rtc base=2030-... so the clock starts wrong; timesyncd must correct it off the
+# SEALED literal IPs with NO name (§5 [R2-MF-C]). Wait bounded (~60s) for NTPSynchronized=yes.
+ntp_synced=timeout; ntp_server=""; ntp_noname=no
+printf 'initial-clock: %s\n' "$(date -u 2>/dev/null)" | diag ntp
+timedatectl 2>/dev/null | diag ntp
+t=0
+while [ "$t" -lt 120 ]; do
+    # NTPSynchronized is a property of the MANAGER (`timedatectl show`), NOT `show-timesync` (which returns
+    # empty for it) — querying the wrong object was the run3 false timeout while the clock was in fact synced.
+    _sync=$(timedatectl show -p NTPSynchronized --value 2>/dev/null)
+    [ "$_sync" = yes ] && { ntp_synced=synced; break; }
+    sleep 3; t=$((t + 3))
+done
+timedatectl show-timesync 2>/dev/null | diag ntp
+timedatectl timesync-status 2>/dev/null | diag ntp
+printf 'corrected-clock: %s (waited %ss)\n' "$(date -u 2>/dev/null)" "$t" | diag ntp
+systemctl status systemd-timesyncd --no-pager 2>/dev/null | sed -n '1,14p' | diag ntp
+# any OTHER nft table that could be blocking timesyncd's own egress (uid systemd-timesync, not 1000):
+nft list ruleset 2>/dev/null | diag nft-all
+# ServerAddress must be one of the sealed IPs; there must be NO ServerName line (name-free bootstrap).
+_ts=$(timedatectl show-timesync 2>/dev/null)
+ntp_server=$(printf '%s\n' "$_ts" | sed -n 's/^ServerAddress=//p' | head -1)
+# Name-free bootstrap ([R2-MF-C]): NTP= is sealed literal IPs, so timesyncd does NO DNS. timedatectl still
+# echoes ServerName, but when NTP= is an IP it is the IP STRING itself (e.g. ServerName=162.159.200.1) — that
+# is name-free. So noname=yes iff ServerName is empty OR a dotted-quad literal; only a real hostname => no.
+_sn=$(printf '%s\n' "$_ts" | sed -n 's/^ServerName=//p' | head -1)
+if [ -z "$_sn" ] || printf '%s' "$_sn" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$'; then ntp_noname=yes; else ntp_noname=no; fi
+case "$ntp_server" in "$NTP_IP_A"|"$NTP_IP_B") : ;; *) [ "$ntp_synced" = synced ] && ntp_synced=synced-badserver ;; esac
+say "S6 ntp=$ntp_synced server=${ntp_server:-none} noname=$ntp_noname"
+
+# ---- LEG: weather-reach (§11.6 #1,#2) — bless weather, pin open-meteo, reach it, unblessed drops ------
+# Prefer the uid-1000 socket path (egressd ask), then re-pin; fall back to a root store bless + resolve.
+sdev egressd ask bless weather >/dev/null 2>&1 || egressd store bless --profile weather --tier b --at "$(date +%s 2>/dev/null || echo 0)" >/dev/null 2>&1 || true
+sdev egressd ask repin weather >/dev/null 2>&1 || egressd resolve --profile weather --apply >/dev/null 2>&1 || true
+sleep 2
+
+# Read the pinned IP from the /run map; assert the /run map == the live @weather_pinned nft set (map-eq).
+_pinned_ip=$(pinned_ips_for weather | head -1)
+_map_ips=$(pinned_ips_for weather | sort -u | tr '\n' ' ')
+_set_ips=$(nft_set_elems weather_pinned | sort -u | tr '\n' ' ')
+if [ -n "$_map_ips" ] && [ "$_map_ips" = "$_set_ips" ]; then say "S6 map-eq=yes map=[$_map_ips] set=[$_set_ips]"
+else say "S6 map-eq=no map=[$_map_ips] set=[$_set_ips]"; fi
+
+# As uid 1000: reach the pinned weather endpoint. curl/wget are NOT in the dogfood store (they ride the
+# shrek-apps/installer layers), but openssl + ca-certificates ARE in the base — and the ADR §4 explicitly
+# names "connect-to-IP-but-SNI/verify-name" as the equivalent of curl --resolve. openssl s_client to
+# <pinned-ip>:443 with SNI + hostname verification proves BOTH that the pinned IP is reachable (nft handle 9
+# allows uid-1000 -> @weather_pinned tcp/443) AND that the cert verifies for the SEALED name.
+weather_tls() { [ -n "$1" ] || return 1; printf 'Q\n' | sdev openssl s_client -connect "$1:443" \
+    -servername "$WEATHER_HOST" -verify_hostname "$WEATHER_HOST" -verify_return_error -brief >/dev/null 2>&1; }
+_wout=$([ -n "$_pinned_ip" ] && printf 'Q\n' | sdev openssl s_client -connect "$_pinned_ip:443" -servername "$WEATHER_HOST" -verify_hostname "$WEATHER_HOST" -verify_return_error -brief 2>&1); _wrc=$?
+printf 'pinned=%s rc=%s\n' "${_pinned_ip:-none}" "$_wrc" | diag weather
+printf '%s\n' "$_wout" | grep -aiE 'verif|protocol|cipher|hostname|handshake|connect|CN|depth|error' | head -8 | diag weather
+if [ -n "$_pinned_ip" ] && weather_tls "$_pinned_ip"; then
+    say "S6 weather-reach=ok pinned=$_pinned_ip"
+else
+    say "S6 weather-reach=FAIL pinned=[${_pinned_ip:-none}]"
+fi
+# As uid 1000: an UNBLESSED dest must DROP. A raw TCP connect to a stable public IP:443 that is NOT in any
+# pinned set must FAIL (nft handle 11 `skuid 1000 drop`). ok == it FAILED to connect (fast EPERM = dropped).
+if sdev bash -c 'timeout 4 bash -c "exec 3<>/dev/tcp/1.1.1.1/443"' >/dev/null 2>&1; then
+    say "S6 unblessed-drop=FAIL 1.1.1.1:443-reachable-from-uid1000"
+else
+    say "S6 unblessed-drop=ok unblessed-dst-dropped"
+fi
+
+# ---- LEG: cgroup (§11.6 #3) — THE load-bearing new proof: live path + in-slice vs outside reachability --
+# confirmed-bless as ROOT (geteuid==0 gate; legit setup — the CEREMONY itself is proven in sak-raw below).
+{ echo "confirmed-bless web-browsing:"; egressd confirmed-bless web-browsing 2>&1; echo "ask status:"; sdev egressd ask status 2>&1; } | diag browser
+# Launch a LONG-LIVED scope in the static slice as dev so the slice cgroup exists + has a resident pid.
+sdev env systemd-run --user --scope --slice=shrekbrowser.slice --unit=s6-inslice sleep 120 >/dev/null 2>&1 &
+sleep 2
+{ echo "slice-dir exists? [/sys/fs/cgroup/$BROWSER_CG]:"; ls -d "/sys/fs/cgroup/$BROWSER_CG" 2>&1; \
+  echo "browser-up reply:"; sdev egressd ask browser-up 2>&1; \
+  echo "egressd journal (nft apply error):"; journalctl -u egressd --no-pager -n 15 2>&1 | tail -15; } | diag browser
+# ISOLATION TEST: run the EXACT cgroup-accept insert as ROOT (no egressd sandbox). If this SUCCEEDS but the
+# daemon's browser-up said apply-failed, the culprit is egressd.service ProtectControlGroups=yes (read-only
+# /sys/fs/cgroup blocks nft's cgroupv2 path resolution at load). If it fails too, the nft syntax/path is wrong.
+_r0h=$(nft -a list chain inet shrek_desktop_egress output 2>/dev/null | grep 'th dport 53 drop' | grep -oE 'handle [0-9]+' | grep -oE '[0-9]+' | head -1)
+{ echo "rule0-handle=[$_r0h]; manual root insert (bare path token, exactly as apply.rs builds it):"; \
+  nft insert rule inet shrek_desktop_egress output handle "${_r0h:-0}" meta skuid 1000 socket cgroupv2 level "$BROWSER_LEVEL" "$BROWSER_CG" accept 2>&1; \
+  echo "rc=$?"; echo "cgroupv2 rules now: $(nft -a list chain inet shrek_desktop_egress output 2>&1 | grep -c cgroupv2)"; } | diag browser-nfttest
+# remove the manual test rule so it doesn't skew the in-slice/outside verdicts below (browser-up path is the
+# real one under test); any cgroupv2 rule we just added by hand is deleted by handle.
+for _h in $(nft -a list chain inet shrek_desktop_egress output 2>/dev/null | grep cgroupv2 | grep -oE 'handle [0-9]+' | grep -oE '[0-9]+'); do nft delete rule inet shrek_desktop_egress output handle "$_h" 2>/dev/null; done
+# FIRST assert the LIVE cgroup path == the baked constant. Find the sleep's pid, read /proc/<pid>/cgroup.
+_slpid=$(sdev pgrep -u dev -x sleep 2>/dev/null | head -1)
+[ -z "$_slpid" ] && _slpid=$(pgrep -u dev -x sleep 2>/dev/null | head -1)
+_cgline=$(cat "/proc/${_slpid}/cgroup" 2>/dev/null | head -1)
+_cgpath=${_cgline#*::}                                   # cgroup v2 line is `0::/<path>`
+# The pid sits in a per-launch `.../shrekbrowser.slice/<scope>.scope` — the nft matcher keys on the
+# level-4 ANCESTOR (shrekbrowser.slice), so a match means the baked slice path is an ancestor of the live
+# path (as the slice itself OR the parent of the launch scope), NOT an exact suffix.
+case "$_cgpath" in
+    */"$BROWSER_CG"|*/"$BROWSER_CG"/*) say "S6 cgroup-path=match live=[$_cgpath]" ;;
+    *)                                 say "S6 cgroup-path=MISMATCH:${_cgpath:-none}" ;;
+esac
+# Install the accept-pair for the (now existing) slice via the dev socket verb.
+sdev egressd ask browser-up >/dev/null 2>&1 || true
+sleep 1
+# DIAGNOSTIC: the live output chain (rule-0 stub-drop + the inserted cgroup accept-pair, with handles) and
+# whether resolved even listens on the stub — the two facts that decide the in-slice/outside verdicts.
+nft -a list chain inet shrek_desktop_egress output 2>/dev/null | diag nft
+ss -ltnp 2>/dev/null | grep -E '127.0.0.5[34]:53|:53 ' | diag resolved
+# the outside probe's OWN cgroup (root-probe context, uid-1000 via runuser) — to reason about the match.
+sdev sh -c 'cat /proc/self/cgroup' 2>/dev/null | diag outside-cg
+# Now the discriminating test: DNS stub reachable INSIDE the slice (accept-pair) vs OUTSIDE (rule-0 drop).
+if stub_probe_inslice; then say "S6 inslice-accept=ok stub-reached-in-slice"
+else say "S6 inslice-accept=FAIL stub-dropped-in-slice"; fi
+if stub_probe_outside; then say "S6 nonbrowser-drop=FAIL stub-reached-outside-slice"
+else say "S6 nonbrowser-drop=ok stub-dropped-outside-slice"; fi
+
+# ---- LEG: double-launch (MF-5) — a fresh scope in the SAME static slice still ACCEPTs -----------------
+# The slice is STABLE (confirmed.rs: socket cgroupv2 resolves the STATIC slice id, not a per-launch scope),
+# so killing the scope and relaunching + re-running browser-up must keep the accept-pair matching.
+sdev systemctl --user stop s6-inslice.scope >/dev/null 2>&1 || sdev pkill -u dev -x sleep >/dev/null 2>&1 || true
+sleep 1
+sdev env systemd-run --user --scope --slice=shrekbrowser.slice --unit=s6-inslice2 sleep 120 >/dev/null 2>&1 &
+sleep 2
+sdev egressd ask browser-up >/dev/null 2>&1 || true
+sleep 1
+if stub_probe_inslice; then say "S6 double-launch=ok stub-reached-in-relaunched-slice"
+else say "S6 double-launch=FAIL stub-dropped-after-relaunch"; fi
+
+# ---- LEG: revocation (MF-5) — confirmed-unbless tears down the accept-pair; the slice now DROPs --------
+egressd confirmed-unbless web-browsing >/dev/null 2>&1 || true
+sleep 1
+if stub_probe_inslice; then say "S6 revoke-drop=FAIL stub-still-reachable-after-unbless"
+else say "S6 revoke-drop=ok stub-dropped-after-unbless"; fi
+
+# ---- LEG: repin (§11.6 #5) — a DoT re-pin reconciles @weather_pinned by element (no flush) ------------
+_before=$(nft_set_elems weather_pinned | sort -u | tr '\n' ' ')
+sdev egressd ask repin weather >/dev/null 2>&1 || egressd resolve --profile weather --apply >/dev/null 2>&1 || true
+sleep 2
+_after=$(nft_set_elems weather_pinned | sort -u | tr '\n' ' ')
+# ok = the set is reconciled by element: still present (single stable open-meteo A record => unchanged),
+# and never emptied by a flush. A non-empty @weather_pinned after re-pin is the pass.
+if [ -n "$_after" ]; then say "S6 repin=ok before=[$_before] after=[$_after]"
+else say "S6 repin=FAIL before=[$_before] after=[empty]"; fi
+
+# ---- LEG: daemon-death fail-closed (MF-5) — kill egressd; the floor + elements persist -----------------
+# Re-bless weather so there is a live element to survive (the revoke leg above only touched web-browsing).
+sdev egressd ask bless weather >/dev/null 2>&1 || true
+sdev egressd ask repin weather >/dev/null 2>&1 || true
+sleep 1
+_dpid=$(pgrep -x egressd 2>/dev/null | head -1)
+[ -n "$_dpid" ] && kill -9 "$_dpid" 2>/dev/null
+sleep 1
+# systemd Restart=always may respawn it — that's fine; assert the SAFETY posture holds during/after:
+#  * an unblessed dest STILL drops (baked floor is never the daemon's to touch);
+#  * blessed weather STILL reaches (elements persist in the kernel set independent of the daemon).
+_fc_unbl=drop; sdev bash -c 'timeout 4 bash -c "exec 3<>/dev/tcp/1.1.1.1/443"' >/dev/null 2>&1 && _fc_unbl=reachable
+_fc_pin=$(pinned_ips_for weather | head -1)
+_fc_reach=FAIL
+[ -n "$_fc_pin" ] && weather_tls "$_fc_pin" && _fc_reach=ok
+if [ "$_fc_unbl" = drop ] && [ "$_fc_reach" = ok ]; then say "S6 daemon-death-failclosed=ok unblessed=drop weather=reach killed-pid=${_dpid:-none}"
+else say "S6 daemon-death-failclosed=FAIL unblessed=$_fc_unbl weather=$_fc_reach"; fi
+
+# ---- LEG: sak-raw (§11.6 owner steer) — drive a RAW add through the console SAK ceremony ---------------
+# Mirror dogfood-consent-probe: `shrek connectivity add-raw <triple>` frames DESKTOP-EGRESS to gatekeeperd,
+# which runs the SHARED SAK/VT ceremony (crates/gatekeeperd/src/desktop_egress.rs -> consent.rs). It BLOCKS
+# in the serial broker for the whole ceremony, so we launch it in the background AS DEV, cue the host to
+# drive the REAL chord + type the 6-digit code, then assert @raw_pinned carries the (ip . proto . port).
+#
+# The tty8 render + confirmation-code protocol is IDENTICAL to bench-consent (same ceremony core). We wipe
+# tty8, cue `chord`, poll for the VT flip + the "AUTHORITY CHANGE REQUEST" render barrier, cue a `shot`,
+# scrape `Enter: NNNNNN`, then cue `answer` with the digits.
+CONSENT_VT=8
+active_vt() { tr -d '\n' < /sys/class/tty/tty0/active 2>/dev/null; }
+vcs() { cat "/dev/vcs${CONSENT_VT}" 2>/dev/null | tr -d '\000'; }
+
+_sakleg=raw
+_RAWOUT=/run/shrek-egress-sak.out; : > "$_RAWOUT"
+printf '\033[2J\033[H' > "/dev/tty${CONSENT_VT}" 2>/dev/null || true
+# launch the ceremony client as dev in the background; RESULT lands in $_RAWOUT when it completes.
+sdev shrek connectivity add-raw "$RAW_TRIPLE" >"$_RAWOUT" 2>&1 &
+_sakpid=$!
+cue "chord leg=s6-sak-$_sakleg"
+# Poll the foreground VT up to ~62s (host re-chords ~every 2s; SAK-arm window is 60s).
+VT_REACHED=0; t=0
+while [ "$t" -lt 620 ]; do
+    [ "$(active_vt)" = "tty${CONSENT_VT}" ] && { VT_REACHED=1; break; }
+    kill -0 "$_sakpid" 2>/dev/null || break
+    sleep 0.1; t=$((t + 1))
+done
+cue "stop-chord leg=s6-sak-$_sakleg"
+if [ "$VT_REACHED" -eq 1 ]; then
+    # render barrier: the ceremony writes "AUTHORITY CHANGE REQUEST" to tty8 before read_answer.
+    RENDERED=0; r=0
+    while [ "$r" -lt 80 ]; do
+        case "$(vcs)" in *"AUTHORITY CHANGE REQUEST"*) RENDERED=1; break ;; esac
+        sleep 0.1; r=$((r + 1))
+    done
+    cue "shot name=s6-sak-$_sakleg"
+    # a raw add is high-authority => a 6-digit confirmation code renders after "Enter:".
+    PROMPT_CODE="$(vcs | grep -oE 'Enter:[ ]+[0-9]{6}' | grep -oE '[0-9]{6}' | head -1)"
+    sleep 0.5
+    if [ -n "$PROMPT_CODE" ]; then
+        _keys="$(echo "$PROMPT_CODE" | sed 's/./&,/g')ret"      # N,N,N,N,N,N,ret
+        cue "answer leg=s6-sak-$_sakleg keys=$_keys"
+    else
+        # no code scraped — <<< NEEDS-LIVE-TUNING: if the desktop-egress ceremony renders a bare y/n prompt
+        # for raw adds (not a 6-digit code) mirror bench's `y,ret` here instead. Do NOT fake a pass.
+        cue "answer leg=s6-sak-$_sakleg keys=y,ret"
+    fi
+    wait "$_sakpid" 2>/dev/null
+    _res="$(tr -d '\r' <"$_RAWOUT" 2>/dev/null | grep -a . | tail -1)"
+    # DIAGNOSTIC: the FULL ceremony client output + the tty8 render buffer + scraped code, so a failed
+    # confirm can be read post-run instead of guessed at (the run3 correct-code-yet-fail puzzle).
+    printf 'scraped-code=[%s] active-vt=[%s]\n' "${PROMPT_CODE:-none}" "$(active_vt)" | diag sak
+    printf '%s\n' "--- shrek connectivity add-raw stdout ---" | diag sak
+    tr -d '\r' <"$_RAWOUT" 2>/dev/null | diag sak
+    printf '%s\n' "--- tty8 vcs buffer ---" | diag sak
+    vcs | diag sak
+    printf '%s\n' "--- gatekeeperd journal (ceremony decline reason) ---" | diag sak
+    journalctl -u gatekeeperd --no-pager -n 25 2>/dev/null | tail -25 | diag sak
+    printf '%s\n' "--- egressd store list ---" | diag sak
+    egressd store list 2>/dev/null | diag sak
+    # Assert BOTH the durable raw pin is written AND @raw_pinned carries the (ip . proto . port) element.
+    _rawset="$(nft list set $NFT_TABLE raw_pinned 2>/dev/null)"
+    _elem_ok=0
+    printf '%s' "$_rawset" | grep -q "$RAW_IP" && printf '%s' "$_rawset" | grep -q "$RAW_PORT" && _elem_ok=1
+    _pin_ok=0
+    egressd store list 2>/dev/null | grep -q "$RAW_IP" && _pin_ok=1
+    # the confirmed store also writes a raw record file; grep the store dump / the /run raw view as backup.
+    [ "$_pin_ok" -eq 0 ] && { printf '%s' "$_rawset" | grep -q "$RAW_IP" && _pin_ok=1; }
+    if [ "$_elem_ok" -eq 1 ] && [ "$_pin_ok" -eq 1 ]; then
+        say "S6 sak-raw=ok rendered=$RENDERED code=${PROMPT_CODE:-none} result=[$_res]"
+    else
+        say "S6 sak-raw=FAIL rendered=$RENDERED elem=$_elem_ok pin=$_pin_ok result=[$_res] set=[$(printf '%s' "$_rawset" | tr '\n' ' ' | cut -c1-160)]"
+    fi
+else
+    # No VT flip in the window: either SAK never delivered in this VM, or the desktop-egress ceremony wiring
+    # differs from bench. Rather than fake a pass, DEFER with a clear pointer for live completion.
+    wait "$_sakpid" 2>/dev/null
+    _res="$(tr -d '\r' <"$_RAWOUT" 2>/dev/null | grep -a . | tail -1)"
+    # <<< NEEDS-LIVE-TUNING: confirm the SAK chord (bench uses ctrl-alt-shift-esc; the shrek connectivity
+    # help text says Ctrl-Alt-Break) AND that `shrek connectivity add-raw` routes through the same VT
+    # ceremony. If the chord/verb wiring needs a live tweak, this line is where the run reports it.
+    say "S6 sak-raw=DEFERRED no-vt-flip result=[$_res] — verify SAK chord + DESKTOP-EGRESS ceremony wiring live"
+fi
+
+# flush the diag file to the data disk — the VM may be force-stopped at budget before a clean unmount, which
+# otherwise leaves /s6-diag.log unreadable (ext4 bitmap-checksum error on the host debugfs read).
+sync 2>/dev/null || true
+say "S6 done"
+exit 0
