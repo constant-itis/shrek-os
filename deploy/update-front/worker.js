@@ -20,7 +20,7 @@
 const REPO = "constant-itis/shrek-os";
 const MANIFEST_TAG = "manifest"; // stable release carrying the cumulative SHA256SUMS(+.gpg)
 const CHANNELS = new Set(["stable"]);
-// shrek_<V>_<arch>...  e.g. shrek_1_x86-64.efi / shrek_1_x86-64.root-x86-64.<hash>.raw.zst
+// shrek_<V>_<arch>...  e.g. shrek_1_x86-64.efi / shrek_1_x86-64.root-x86-64.<hash>.raw.xz
 const ASSET_RE = /^shrek_(\d+)_[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MANIFEST_FILES = new Set(["SHA256SUMS", "SHA256SUMS.gpg"]);
 

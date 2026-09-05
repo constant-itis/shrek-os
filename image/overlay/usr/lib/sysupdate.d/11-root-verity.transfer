@@ -7,8 +7,8 @@ ProtectVersion=%A
 [Source]
 Type=url-file
 Path=https://shrekos-updates.iambu.dev/stable/
-# zstd-compressed like the data split (see 10-root.transfer); MatchPattern includes the .zst suffix.
-MatchPattern=%M_@v_%a.root-%a-verity.@u.raw.zst
+# xz-compressed like the data split (see 10-root.transfer); MatchPattern includes the .xz suffix.
+MatchPattern=%M_@v_%a.root-%a-verity.@u.raw.xz
 
 [Target]
 Type=partition

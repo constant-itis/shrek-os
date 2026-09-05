@@ -5,16 +5,17 @@
 # (+ .gpg) and the matched asset, verifies the GPG-signed manifest against the baked import keyring, and
 # installs into the inactive on-disk root slot. ProtectVersion=%A never overwrites the running version.
 # The offline S7 proof still works: scripts/update-in-container.sh passes --transfer-source=out (local
-# pool of .zst splits), which overrides this url Path host-side.
+# pool of .xz splits), which overrides this url Path host-side.
 [Transfer]
 ProtectVersion=%A
 
 [Source]
 Type=url-file
 Path=https://shrekos-updates.iambu.dev/stable/
-# The published asset is zstd-compressed (fits GitHub's 2GiB cap; sysupdate decompresses transparently),
-# so MatchPattern INCLUDES the .zst suffix — matches shrek_<v>_<arch>.root-<arch>.<hash>.raw.zst.
-MatchPattern=%M_@v_%a.root-%a.@u.raw.zst
+# The published asset is xz-compressed (fits GitHub's 2GiB cap; sysupdate 257 decompresses .xz/.gz on the
+# fly — but NOT .zst, which it writes verbatim). MatchPattern INCLUDES the .xz suffix — matches
+# shrek_<v>_<arch>.root-<arch>.<hash>.raw.xz.
+MatchPattern=%M_@v_%a.root-%a.@u.raw.xz
 
 [Target]
 Type=partition

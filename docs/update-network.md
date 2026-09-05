@@ -7,7 +7,7 @@ sealed image. This is Chunk 2 of "updates on GitHub" — Chunk 1 (public repo + 
 ## The model
 
 GitHub is the transparency authority: every versioned build publishes its systemd-sysupdate payload
-(zstd-compressed split root partition, dm-verity hash partition, Secure-Boot-signed UKI) + a manifest as a
+(xz-compressed split root partition, dm-verity hash partition, Secure-Boot-signed UKI) + a manifest as a
 public, immutable Release. The OS fetches over a stable owner-controlled hostname
 `shrekos-updates.iambu.dev/<channel>/` (a thin front over the public releases), checksum- and
 signature-verifies, and A/B installs with boot-counted rollback (the S7/S8 engine, already proven).
@@ -24,12 +24,15 @@ untrusted plumbing — it cannot ship a bootable tampered image, and it cannot f
   verification is only disabled by the CLI `--verify=no` (not usable for the unattended service path).
 - `SHA256SUMS` is standard `sha256sum` format (`<hex>  <filename>`), and must list ALL files for ALL
   versions offered (one cumulative manifest at the base URL).
-- Compression is transparent (.gz/.xz/.zst). `MatchPattern` INCLUDES the compression suffix
-  (`...raw.zst`). The checksum in the manifest is over the COMPRESSED bytes — which is what
-  `publish-release.sh` already generates.
-- Proof (metadata level, no target partitions): a mock front serving the real v1 `.zst` assets + their
-  `SHA256SUMS`, with `--verify=no`, yielded `VERSION 1 ... AVAILABLE ✓ candidate` from a real
-  `/usr/lib/systemd/systemd-sysupdate list`. (Harness: scratchpad/sysupdate-contract-proof.sh.)
+- Compression: sysupdate 257 decompresses **`.gz` and `.xz`** on the fly when writing a `url-file` source
+  into a partition/regular-file target — but **NOT `.zst`** (it writes the compressed bytes verbatim, so a
+  `.zst` payload lands as garbage in the slot and dm-verity fails at boot). **We publish `.xz`.**
+  `MatchPattern` INCLUDES the suffix (`...raw.xz`). The manifest checksum is over the COMPRESSED bytes.
+- ⚠️ LESSON (2026-09-05, caught by the networked A/B dogfood): an earlier revision used `.zst` on the
+  strength of a metadata-only `list` proof. `list` never downloads/decompresses/writes, so it did NOT
+  exercise decompression — the real pull silently wrote compressed bytes into the slot. Verified in a
+  container: `.gz`/`.xz` decompress into a `regular-file` target, `.zst` does not. Prove the WRITE, not
+  just the listing.
 
 ## Consequences for the pieces
 
@@ -51,7 +54,7 @@ untrusted plumbing — it cannot ship a bootable tampered image, and it cannot f
      (`/usr/lib/systemd/import-pubring.gpg`) so sysupdate trusts the manifest signature.
    - Flip `image/overlay/usr/lib/sysupdate.d/*.transfer` `[Source]` from `Type=regular-file` `Path=/`
      to `Type=url-file` `Path=https://shrekos-updates.iambu.dev/stable/`, and change the root/verity
-     `MatchPattern` to the `...raw.zst` names (UKI stays uncompressed).
+     `MatchPattern` to the `...raw.xz` names (UKI stays uncompressed).
    - Keep the S7 OFFLINE A/B proof working: it injects a local source via `--transfer-source` (host-side),
      so the baked url-file `[Source]` does not break it — VERIFY this override still applies after the flip.
 
@@ -105,7 +108,7 @@ the trusted key + front URL + egress bless as ONE trust-policy change.
    STILL TODO as the FIRST step of the bake run: a real `systemd-sysupdate list` (verify ON) against this
    live host, using the actual transfer def + import keyring about to be baked (validate-then-bake).
 4. [TODO] Bake (signed-image change): image/overlay/usr/lib/systemd/import-pubring.gpg (from
-   keys/shrek-update-pub.gpg) + transfer defs → url-file/.raw.zst @ shrekos-updates.iambu.dev/stable/ +
+   keys/shrek-update-pub.gpg) + transfer defs → url-file/.raw.xz @ shrekos-updates.iambu.dev/stable/ +
    egress bless shrekos-updates.iambu.dev via sealed DoT; system-index bump. Keep the S7 offline proof via
    --transfer-source override.
 5. [TODO] Networked A/B dogfood (fresh install → pull v-next → boot → rollback proof).

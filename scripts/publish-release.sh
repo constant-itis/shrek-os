@@ -63,19 +63,23 @@ for pair in "root:$ROOT" "verity:$VERITY" "uki:$UKI"; do
 done
 
 # The mkosi root partition is a FIXED 2 GiB (== GitHub's release-asset cap, which requires assets to be
-# strictly UNDER 2 GiB), so the raw split cannot be a release asset. Compress the root + verity splits with
-# zstd — this fits the cap AND is exactly what systemd-sysupdate consumes over the wire (it fetches+decompresses
-# .zst natively). The UKI (~76M) ships uncompressed. Compression is idempotent (skip if the .zst is newer).
-ZOPT="-T0 -19"
-zst() { local src="$1"; local dst="${src}.zst"; if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then echo "  compressing $(basename "$src") ..." >&2; zstd -q -f $ZOPT "$src" -o "$dst"; fi; echo "$dst"; }
-echo "Compressing update payload (zstd${ZOPT})..." >&2
-ROOTZ="$(zst "$ROOT")"
-VERITYZ="$(zst "$VERITY")"
+# strictly UNDER 2 GiB), so the raw split cannot be a release asset. Compress the root + verity splits.
+# USE XZ, NOT ZSTD: systemd-sysupdate 257 decompresses .gz/.xz on the fly when writing a url-file source
+# into a partition/regular-file target, but it does NOT decompress .zst — it writes the compressed bytes
+# verbatim, so a .zst payload lands as garbage in the slot and dm-verity fails at boot (caught by the
+# networked A/B dogfood 2026-09-05; the earlier ".zst transparent" claim was only list/metadata-tested,
+# which never decompresses). xz compresses this mostly-zero 2 GiB image well under the cap. UKI (~76M)
+# ships uncompressed. Compression is idempotent (skip if the .xz is newer). -T0 = multithreaded.
+XZOPT="-T0 -6"
+xzc() { local src="$1"; local dst="${src}.xz"; if [ ! -f "$dst" ] || [ "$src" -nt "$dst" ]; then echo "  compressing $(basename "$src") ..." >&2; xz -q -f $XZOPT -c "$src" > "$dst"; fi; echo "$dst"; }
+echo "Compressing update payload (xz ${XZOPT})..." >&2
+ROOTZ="$(xzc "$ROOT")"
+VERITYZ="$(xzc "$VERITY")"
 
 CAP=2147483648
 fail=0
 echo "Resolved update payload for ${TAG}:"
-for pair in "root(zst):$ROOTZ" "verity(zst):$VERITYZ" "uki:$UKI"; do
+for pair in "root(xz):$ROOTZ" "verity(xz):$VERITYZ" "uki:$UKI"; do
   name="${pair%%:*}"; path="${pair#*:}"; sz=$(stat -c%s "$path")
   printf '  %-11s %-9s %s\n' "$name" "$(numfmt --to=iec "$sz")" "$(basename "$path")"
   if [ "$sz" -ge "$CAP" ]; then echo "  ^ STILL AT/OVER 2GiB — GitHub will reject this asset" >&2; fail=1; fi
@@ -112,7 +116,7 @@ NOTES="$(cat <<EOF
 Shrek OS ${TAG} — sealed A/B update payload.
 
 Transparency: GitHub is the authoritative, immutable public record of what Shrek OS ships. This release is
-the systemd-sysupdate payload — the zstd-compressed split root partition, its dm-verity hash partition, and
+the systemd-sysupdate payload — the xz-compressed split root partition, its dm-verity hash partition, and
 the Secure-Boot-signed UKI — plus \`SHA256SUMS\`. Authority is the signed UKI (which carries the verity roothash)
 + the checksums, so any mirror or front (e.g. shrekos-updates.iambu.dev) is untrusted plumbing: it cannot
 ship a bootable tampered image.

@@ -47,9 +47,9 @@ hr "3. Real asset fetch + checksum"
 while read -r want name; do
   [ -n "$name" ] || continue
   case "$name" in
-    *verity*.raw.zst|*.efi) dl=1 ;;
-    *.raw.zst)              [ "${FULL:-0}" = 1 ] && dl=1 || { echo "  SKIP: $name (set FULL=1 to checksum the big root split)"; continue; } ;;
-    *)                      dl=1 ;;
+    *verity*.raw.xz|*.efi) dl=1 ;;
+    *.raw.xz)              [ "${FULL:-0}" = 1 ] && dl=1 || { echo "  SKIP: $name (set FULL=1 to checksum the big root split)"; continue; } ;;
+    *)                     dl=1 ;;
   esac
   if curlf "$BASE/$name" -o "$WORK/$name"; then
     got="$(sha256sum "$WORK/$name" | awk '{print $1}')"
