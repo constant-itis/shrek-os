@@ -19,6 +19,7 @@
   "style":   {"icon":"palette",            "label":"Style",   "aliases":["theme","appearance"]},
   "capture": {"icon":"photo_camera",       "label":"Capture", "aliases":["screenshot"]},
   "audio":   {"icon":"volume_up",          "label":"Audio",   "aliases":["sound"]},
+  "dev":     {"icon":"code",               "label":"Dev",     "aliases":["agents","agent","bench","benches"]},
 
   // ── System (logind power actions + DMS lock) ────────────────────────────
   "system.lock":     {"icon":"lock",               "label":"Lock",      "action":"dms ipc call lock lock"},
@@ -56,5 +57,21 @@
   "audio.mic-mute": {"icon":"mic_off", "label":"Mute Microphone",
     "when":"shrek-cmd-present wpctl",
     "checked":"wpctl get-volume @DEFAULT_AUDIO_SOURCE@ | grep -q MUTED",
-    "action":"dms ipc call audio micmute"}
+    "action":"dms ipc call audio micmute"},
+
+  // ── Dev (Benches, agents, model hook-up — the sealed-OS way to install & run software) ──
+  // Everything here is CLI today; these entries just make the already-built engine DISCOVERABLE
+  // (a fresh user can't `apt install` — Benches are the answer, so surface them in the menu).
+  "dev.terminal": {"icon":"terminal", "label":"Terminal",
+    "when":"shrek-cmd-present foot",
+    "action":"foot"},
+  "dev.benches": {"icon":"developer_board", "label":"Benches…",
+    "when":"shrek-cmd-present shrek",
+    "action":"foot --app-id=shrek.bench sh -c 'shrek bench list; echo; echo \"new: shrek bench create <name>   grant: shrek bench grant <name> <dir> --rw   run: shrek bench run <name> -- <cmd>\"; exec bash'"},
+  "dev.agent": {"icon":"smart_toy", "label":"Launch Agent…",
+    "when":"shrek-cmd-present shrek-agent",
+    "action":"foot --app-id=shrek.agent shrek-agent --pick"},
+  "dev.connect": {"icon":"cable", "label":"Connect a Model…",
+    "when":"shrek-cmd-present shrek-connect",
+    "action":"foot --app-id=shrek.connect sh -c 'shrek-connect --list; echo; echo \"bind: shrek-connect <provider> <ipv4>   (providers: local anthropic claude codex)\"; exec bash'"}
 }
