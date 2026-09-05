@@ -33,6 +33,35 @@ STORE="${STORE:-out/layer-store.raw}"
 # Fail fast with the exact fix instead of wasting the ~300s boot budget on a store that can't pass M2.
 grep -qa 'shrek-dev.raw' "$STORE" || { echo "$STORE has no shrek-dev toolchain — M2 will FAIL. Rebuild: INCLUDE_DEV=1 scripts/build-layers.sh desktop" >&2; exit 1; }
 
+# --- STALENESS GUARD (ADR-008 S5 lesson, 2026-09-04) -------------------------------------------------
+# The store + layer DDIs are REUSED across runs. A slice that edits a layer's SOURCE (e.g. shrek-connect,
+# menu.jsonc, shell.qml under layers/shrek-desktop/) but forgets to rebuild that layer's DDI makes this
+# dogfood boot the OLD artifact and pass GREEN on code that is not in the image — a stale desktop DDI
+# (pre-ADR-008 shrek-connect) cost a full S5 cycle before this guard existed. Refuse to PROVE a stale
+# artifact: fail fast if any in-store layer's overlay source is newer than its built DDI, or a rebuilt DDI
+# is newer than the assembled store. Override with STALE_OK=1 only when the source delta is knowingly moot.
+if [ "${STALE_OK:-0}" != 1 ]; then
+  stale=""
+  for name in shrek-desktop shrek-dev shrek-browser shrek-apps shrek-bench shrek-ai shrek-installer; do
+    grep -qa "$name.raw" "$STORE" || continue          # only layers actually staged into THIS store
+    ddi="out/layers/$name.raw"
+    src="layers/$name"
+    [ -f "$ddi" ] || { echo "store references $name.raw but $ddi is missing — rebuild scripts/build-${name#shrek-}-layer.sh" >&2; exit 1; }
+    if [ -d "$src" ] && [ -n "$(find "$src" -type f -newer "$ddi" -print -quit 2>/dev/null)" ]; then
+      stale="$stale
+  - $name: source under $src/ is NEWER than $ddi -> rebuild scripts/build-${name#shrek-}-layer.sh, then reassemble the store"
+    elif [ "$ddi" -nt "$STORE" ]; then
+      stale="$stale
+  - $name: $ddi is NEWER than $STORE -> reassemble: INCLUDE_DEV=1 [INCLUDE_BROWSER=1] scripts/build-layers.sh desktop"
+    fi
+  done
+  if [ -n "$stale" ]; then
+    echo "STALE LAYER(S) — this dogfood would prove an OUTDATED artifact, not your current source:$stale" >&2
+    echo "Fix the above (or set STALE_OK=1 if you KNOW the delta is irrelevant) before trusting the result." >&2
+    exit 1
+  fi
+fi
+
 # FRESH disposable data disk each run: boot1 must see an EMPTY /home so the probe writes the marker and
 # reboots; a stale marker would short-circuit the persistence proof. (The daily domain uses a persistent
 # out/shrek-data.raw instead — see scripts/dogfood-libvirt.sh.)
