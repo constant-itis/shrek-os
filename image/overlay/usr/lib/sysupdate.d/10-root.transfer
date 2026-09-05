@@ -1,16 +1,20 @@
 # Shrek OS Phase-1 — S7: sysupdate transfer for the root DATA partition (A/B).
 # Adapted from particleos mkosi.sysupdate/12-usr.transfer, retargeted usr→root (we seal the whole
-# root, not just /usr — docs/phase1-s7-sysupdate.md). Source = the mkosi output dir (the split .raw);
-# target = the inactive on-disk root slot. ProtectVersion=%A never overwrites the running version.
+# root, not just /usr — docs/phase1-s7-sysupdate.md). NETWORKED (ADR-007 Q6b / docs/update-network.md):
+# Source = the owner-controlled front over the public GitHub releases; sysupdate GETs <Path>/SHA256SUMS
+# (+ .gpg) and the matched asset, verifies the GPG-signed manifest against the baked import keyring, and
+# installs into the inactive on-disk root slot. ProtectVersion=%A never overwrites the running version.
+# The offline S7 proof still works: scripts/update-in-container.sh passes --transfer-source=out (local
+# pool of .zst splits), which overrides this url Path host-side.
 [Transfer]
 ProtectVersion=%A
 
 [Source]
-Type=regular-file
-Path=/
-PathRelativeTo=explicit
-# VERIFY the split filename against `ls out/` after the first build; correct if %t renders differently.
-MatchPattern=%M_@v_%a.root-%a.@u.raw
+Type=url-file
+Path=https://shrekos-updates.iambu.dev/stable/
+# The published asset is zstd-compressed (fits GitHub's 2GiB cap; sysupdate decompresses transparently),
+# so MatchPattern INCLUDES the .zst suffix — matches shrek_<v>_<arch>.root-<arch>.<hash>.raw.zst.
+MatchPattern=%M_@v_%a.root-%a.@u.raw.zst
 
 [Target]
 Type=partition

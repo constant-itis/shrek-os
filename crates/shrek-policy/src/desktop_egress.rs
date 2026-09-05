@@ -52,12 +52,18 @@ const DESKTOP_NTP: &[EgressRule] = &[
     EgressRule { host: "162.159.200.123", proto: Proto::Udp, port: 123 },
 ];
 
-// desktop-updates — the layer-store / sysupdate fetch baseline. STUB: the actual update source
-// endpoint is not yet defined in-repo (ADR-007 Q6b, TBD). Intentionally EMPTY so it renders an INERT
-// allow (empty set matches nothing = fail-closed, NOT accept-all) — the box does not silently reach
-// anything for "updates" until S5 wires a real endpoint here. Baseline-tier (matched by the updater's
-// service uid), so blessing it is never a uid-1000 action; it simply reaches nothing yet.
-const DESKTOP_UPDATES: &[EgressRule] = &[];
+// desktop-updates — the systemd-sysupdate fetch baseline (ADR-007 Q6b RESOLVED 2026-09-05,
+// docs/update-network.md). The ONE owner-controlled update front over the public GitHub releases: a
+// NAME (not a literal IP), resolved over sealed-DoT like `weather`, so egress reaches exactly this host
+// and NOT GitHub's rotating CDN IPs. Baseline-tier (matched by the updater's service uid, always-on, no
+// uid-1000 bless). The update's authenticity does not depend on this pin: the fetched image is authority-
+// checked by the SB-signed UKI (verity roothash) + the GPG-signed SHA256SUMS against the baked
+// /usr/lib/systemd/import-pubring.gpg, so the front is untrusted plumbing — this rule only bounds WHERE
+// the updater may dial. https/tcp:443. Host must equal the sysupdate.d [Source] Path host + the CF Worker
+// route + the published cert SAN. Changing it is a signed-image trust-policy change (rebuild + A/B).
+const DESKTOP_UPDATES: &[EgressRule] = &[
+    EgressRule { host: "shrekos-updates.iambu.dev", proto: Proto::Tcp, port: 443 },
+];
 
 // weather — the one keyless weather API (Q6c: open-meteo, no account, privacy-forward). User-blessed,
 // deny-until-blessed. A NAME (not a literal IP): the supervisor resolves it over sealed-DoT at bless
@@ -280,7 +286,7 @@ mod tests {
     fn resolve_known_desktop_profiles() {
         assert_eq!(resolve_desktop("desktop-ntp").unwrap().rules.len(), 2);
         assert_eq!(resolve_desktop("weather").unwrap().rules.len(), 1);
-        assert!(resolve_desktop("desktop-updates").unwrap().is_empty());
+        assert_eq!(resolve_desktop("desktop-updates").unwrap().rules.len(), 1);
         assert!(resolve_desktop("web-browsing").unwrap().is_empty());
     }
 
@@ -372,9 +378,11 @@ mod tests {
     #[test]
     fn empty_profiles_render_inert_allows_not_accept_all() {
         // THE S1 test (ADR-007 §11): an empty set / empty profile grants NOTHING — never accept-all.
-        // Both desktop-updates (stub, Q6b) and web-browsing (broad) are empty; neither allows a packet
-        // through the pin path. This is what makes the baked nft named sets fail-closed when empty.
-        for name in ["desktop-updates", "web-browsing"] {
+        // web-browsing (broad) is empty of pins; it allows nothing through the PIN path (its breadth
+        // rides an nft cgroup accept, not a destination set). This is what makes the baked nft named sets
+        // fail-closed when empty. (desktop-updates is no longer empty — Q6b resolved; see the dedicated
+        // desktop_updates test below.)
+        for name in ["web-browsing"] {
             let p = resolve_desktop(name).unwrap();
             assert!(p.is_empty(), "{name} is empty");
             assert!(!p.allows("anything", Proto::Tcp, 443), "{name} must allow nothing via pins");
@@ -383,12 +391,24 @@ mod tests {
     }
 
     #[test]
-    fn desktop_updates_is_baseline_stub() {
-        // Stub, not broad: baseline-tier (updater service uid), empty until S5 wires Q6b's endpoint.
+    fn desktop_updates_is_baseline_dot_resolved_update_host() {
+        // Q6b resolved (2026-09-05): baseline-tier (updater service uid), a single DoT-resolved NAME —
+        // NOT broad, NOT pre-pinned (it is a name to resolve over sealed-DoT, not a literal IP), NOT empty.
         assert!(is_baseline_profile("desktop-updates"));
         assert!(!is_broad_profile("desktop-updates"));
         assert!(!is_prepinned_profile("desktop-updates"));
-        assert!(resolve_desktop("desktop-updates").unwrap().is_empty());
+        let p = resolve_desktop("desktop-updates").unwrap();
+        assert!(!p.is_empty(), "desktop-updates now has the update host");
+        assert_eq!(p.rules.len(), 1, "exactly one update host");
+        let r = &p.rules[0];
+        assert_eq!(r.host, "shrekos-updates.iambu.dev");
+        assert_eq!(r.proto, Proto::Tcp);
+        assert_eq!(r.port, 443);
+        // A name, not a literal IP → resolved over DoT (matches the weather-profile discipline).
+        assert!(r.host.parse::<std::net::Ipv4Addr>().is_err(), "update host is a name, not a literal IP");
+        // Must match the sysupdate.d [Source] host + the CF Worker route + the cert SAN.
+        assert!(p.allows("shrekos-updates.iambu.dev", Proto::Tcp, 443));
+        assert!(!p.allows("shrekos-updates.iambu.dev", Proto::Tcp, 80), "https only");
     }
 
     #[test]

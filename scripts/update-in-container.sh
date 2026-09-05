@@ -19,6 +19,17 @@ UPDATED="out/shrek-updated.raw"
 [ -f "$FROM" ]                 || { echo "missing $FROM — run scripts/build-in-container.sh 1 first" >&2; exit 1; }
 ls out/shrek_2_x86-64.* >/dev/null 2>&1 || { echo "missing v2 split artifacts — run scripts/build-in-container.sh 2 first" >&2; exit 1; }
 
+# The networked [Source] MatchPattern now expects zstd-compressed splits (...raw.zst) — see the flip in
+# image/overlay/usr/lib/sysupdate.d/. The offline proof feeds a LOCAL pool via --transfer-source, so that
+# pool must ALSO carry .zst (the url Path is overridden host-side, but the filename pattern is not). Compress
+# the v2 root+verity splits (idempotent; UKI stays uncompressed). This is what keeps the S7 offline proof
+# working after the url-file flip.
+echo "=== compressing v2 root/verity splits to .zst for the local pool ==="
+for f in out/shrek_2_x86-64.root-*.raw; do
+  [ -e "$f" ] || continue
+  [ -f "$f.zst" ] && [ "$f.zst" -nt "$f" ] || { echo "  zstd $(basename "$f")"; zstd -q -f -T0 -19 "$f" -o "$f.zst"; }
+done
+
 echo "=== copying $FROM → $UPDATED (built artifact stays untouched) ==="
 cp --reflink=auto "$FROM" "$UPDATED"
 

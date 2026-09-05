@@ -9,9 +9,9 @@
 ProtectVersion=%A
 
 [Source]
-Type=regular-file
-Path=/
-PathRelativeTo=explicit
+Type=url-file
+Path=https://shrekos-updates.iambu.dev/stable/
+# The UKI ships UNCOMPRESSED (~76M, under the cap) — no .zst suffix here.
 MatchPattern=%M_@v_%a.efi
 
 [Target]

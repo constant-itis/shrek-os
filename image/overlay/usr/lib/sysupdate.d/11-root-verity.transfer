@@ -5,11 +5,10 @@
 ProtectVersion=%A
 
 [Source]
-Type=regular-file
-Path=/
-PathRelativeTo=explicit
-# VERIFY the split filename against `ls out/` after the first build.
-MatchPattern=%M_@v_%a.root-%a-verity.@u.raw
+Type=url-file
+Path=https://shrekos-updates.iambu.dev/stable/
+# zstd-compressed like the data split (see 10-root.transfer); MatchPattern includes the .zst suffix.
+MatchPattern=%M_@v_%a.root-%a-verity.@u.raw.zst
 
 [Target]
 Type=partition
