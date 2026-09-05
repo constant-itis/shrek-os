@@ -1,4 +1,4 @@
-# updates.shrekos.iambu.dev — update front (Cloudflare Worker)
+# shrekos-updates.iambu.dev — update front (Cloudflare Worker)
 
 A dumb, owner-controlled, stateless front over the public `constant-itis/shrek-os` GitHub Releases. It is
 the boring, independently-operable update origin the sealed image bakes in — deliberately **not** the
@@ -34,7 +34,7 @@ chmod 600 ~/vault/iambu-dev-CF-workers-token.txt
 
 ### 2. A proxied `updates` DNS record
 
-Workers routes only fire on **proxied (orange-cloud)** hostnames. If `updates.shrekos.iambu.dev` doesn't
+Workers routes only fire on **proxied (orange-cloud)** hostnames. If `shrekos-updates.iambu.dev` doesn't
 resolve through Cloudflare yet, create a proxied record (target is irrelevant — the Worker route intercepts;
 a placeholder like `192.0.2.1` or a CNAME to the zone apex is fine) using the DNS-scoped vault token. The
 `shrekos` label under `iambu.dev` must exist too (as a proxied A/AAAA/CNAME) so the FQDN is in-zone.

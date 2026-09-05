@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prove-front.sh — prove the live update front BEFORE baking any trust into an image.
 #
-# Simulates a fresh client hitting https://updates.shrekos.iambu.dev/stable/ and checks the full contract:
+# Simulates a fresh client hitting https://shrekos-updates.iambu.dev/stable/ and checks the full contract:
 # manifest fetch, GPG verification against the repo public key, real asset fetch + checksum, a missing-file
 # 404, redirect/cache behavior, and a BAD-SIGNATURE negative case (a tampered manifest MUST fail). Nothing
 # here trusts anything baked — it verifies against keys/shrek-update-pub.gpg from the repo.
@@ -10,7 +10,7 @@
 #   FULL=1 deploy/update-front/prove-front.sh     # also downloads + checksums the big root split
 #   HOST=https://... deploy/update-front/prove-front.sh   # test a staging host
 set -uo pipefail
-HOST="${HOST:-https://updates.shrekos.iambu.dev}"
+HOST="${HOST:-https://shrekos-updates.iambu.dev}"
 BASE="$HOST/stable"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 PUBKEY="$REPO_ROOT/keys/shrek-update-pub.gpg"

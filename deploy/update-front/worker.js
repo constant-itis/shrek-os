@@ -1,4 +1,4 @@
-// updates.shrekos.iambu.dev — Shrek OS update front (Cloudflare Worker)
+// shrekos-updates.iambu.dev — Shrek OS update front (Cloudflare Worker)
 //
 // A DUMB, owner-controlled, stateless front over the public constant-itis/shrek-os GitHub Releases.
 // It holds NO key material and does NO dynamic signing. Authority is the Secure-Boot-signed UKI (carries
@@ -9,7 +9,7 @@
 //   GET /<channel>/SHA256SUMS.gpg   -> its detached GPG signature
 //   GET /<channel>/<asset>          -> the versioned release asset holding <asset>
 //
-// systemd-sysupdate (Type=url-file, Path=https://updates.shrekos.iambu.dev/stable/) fetches exactly these.
+// systemd-sysupdate (Type=url-file, Path=https://shrekos-updates.iambu.dev/stable/) fetches exactly these.
 //
 // Asset->release mapping is STATELESS: content-hash asset names begin with `shrek_<VERSION>_`, so the
 // version (hence the `v<VERSION>` release tag) is parsed straight from the filename. No API calls, no

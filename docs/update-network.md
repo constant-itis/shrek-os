@@ -9,7 +9,7 @@ sealed image. This is Chunk 2 of "updates on GitHub" — Chunk 1 (public repo + 
 GitHub is the transparency authority: every versioned build publishes its systemd-sysupdate payload
 (zstd-compressed split root partition, dm-verity hash partition, Secure-Boot-signed UKI) + a manifest as a
 public, immutable Release. The OS fetches over a stable owner-controlled hostname
-`updates.shrekos.iambu.dev/<channel>/` (a thin front over the public releases), checksum- and
+`shrekos-updates.iambu.dev/<channel>/` (a thin front over the public releases), checksum- and
 signature-verifies, and A/B installs with boot-counted rollback (the S7/S8 engine, already proven).
 
 Authority = the SB-signed UKI (carries the verity roothash) + the GPG-signed manifest. The front is
@@ -41,7 +41,7 @@ untrusted plumbing — it cannot ship a bootable tampered image, and it cannot f
 
 2. **Front is dumb.** It serves the cumulative `SHA256SUMS` + `SHA256SUMS.gpg` + proxies each asset to its
    GitHub release-asset URL. No key, no dynamic signing. Candidate mechanisms: a Cloudflare Worker on
-   `updates.shrekos.iambu.dev` (serverless, no prod-host risk — preferred), or the existing `iambu-stats`
+   `shrekos-updates.iambu.dev` (serverless, no prod-host risk — preferred), or the existing `iambu-stats`
    cloudflared tunnel on claude-remote → a tiny proxy (touches prod infra; less preferred). DNS: the
    iambu.dev zone token at ~/vault/iambu-dev-CF-token.txt is DNS-scoped; a Worker deploy additionally
    needs a Workers-scoped token.
@@ -50,13 +50,13 @@ untrusted plumbing — it cannot ship a bootable tampered image, and it cannot f
    - Bake the update-signing GPG PUBLIC key into the sealed image's systemd import keyring
      (`/usr/lib/systemd/import-pubring.gpg`) so sysupdate trusts the manifest signature.
    - Flip `image/overlay/usr/lib/sysupdate.d/*.transfer` `[Source]` from `Type=regular-file` `Path=/`
-     to `Type=url-file` `Path=https://updates.shrekos.iambu.dev/stable/`, and change the root/verity
+     to `Type=url-file` `Path=https://shrekos-updates.iambu.dev/stable/`, and change the root/verity
      `MatchPattern` to the `...raw.zst` names (UKI stays uncompressed).
    - Keep the S7 OFFLINE A/B proof working: it injects a local source via `--transfer-source` (host-side),
      so the baked url-file `[Source]` does not break it — VERIFY this override still applies after the flip.
 
 4. **Sealed egress bless.** `crates/shrek-policy/src/desktop_egress.rs` `DESKTOP_UPDATES` is an empty
-   fail-closed stub. Add the one host `updates.shrekos.iambu.dev`, resolved via sealed DoT (ADR-008, like
+   fail-closed stub. Add the one host `shrekos-updates.iambu.dev`, resolved via sealed DoT (ADR-008, like
    `weather`/open-meteo) — one hostname, not GitHub's rotating CDN IPs. Rust change → system-index bump.
 
 5. **Networked A/B dogfood.** The sealed-VM dogfood is offline by design; a networked-pull proof needs a
@@ -89,14 +89,24 @@ the trusted key + front URL + egress bless as ONE trust-policy change.
 2. [DONE] `publish-release.sh` signs the manifest (SHA256SUMS.gpg) using an explicit `--signing-key DIR`
    (default: the vault keyring, override via `$UPDATE_GNUPGHOME`), FAILS CLOSED if the key is absent, and
    self-verifies before publishing; v1 re-cut and now carries the signed manifest.
-3. [TODO] Front: aggregate a CUMULATIVE signed manifest across releases + serve/proxy assets. For v1 the
-   per-release manifest == cumulative; from v2 on, maintain one canonical SHA256SUMS(+.gpg) (e.g. a stable
-   `manifest` release the publish step re-signs) and map flat filenames → their version's release. Stand up
-   `updates.shrekos.iambu.dev` (CF Worker preferred — needs a Workers-scoped token; the iambu.dev vault
-   token is DNS-only). Verify `sysupdate list` (verify ON) against the live host.
+3. [DONE 2026-09-05] Front stood up + PROVEN externally. `scripts/sync-manifest.sh` aggregates all v<N>
+   manifests into one cumulative signed SHA256SUMS on a stable `manifest` release (for v1, cumulative ==
+   per-release). Stateless Cloudflare Worker (`deploy/update-front/`) serves `/stable/SHA256SUMS(.gpg)` from
+   that release and proxies assets to the versioned release parsed from the filename — no key material, no
+   dynamic signing. LIVE at https://shrekos-updates.iambu.dev.
+   HOST DECISION: a 1-LEVEL host under iambu.dev (not `updates.shrekos.iambu.dev`) — Cloudflare free
+   Universal SSL covers `*.iambu.dev` (one level) only; the 2-level name fails the TLS handshake without
+   Advanced Certificate Manager. `shrekos-updates` keeps the identity + matches the `*-stats.iambu.dev`
+   sidecar convention. THIS is the host to bake.
+   PROOF: `deploy/update-front/prove-front.sh` (fresh-client trust = repo pubkey only) = 15/15 against the
+   live edge — manifest fetch, GPG verify, real root+verity+UKI checksum through the proxy (FULL=1),
+   client-visible 200 (no leaked redirect), cache + provenance headers, path-traversal/bad-name/unknown-
+   channel 404s, and the bad-signature negative case (tampered manifest + bogus sig both REJECTED).
+   STILL TODO as the FIRST step of the bake run: a real `systemd-sysupdate list` (verify ON) against this
+   live host, using the actual transfer def + import keyring about to be baked (validate-then-bake).
 4. [TODO] Bake (signed-image change): image/overlay/usr/lib/systemd/import-pubring.gpg (from
-   keys/shrek-update-pub.gpg) + transfer defs → url-file/.raw.zst @ updates.shrekos.iambu.dev/stable/ +
-   egress bless updates.shrekos.iambu.dev via sealed DoT; system-index bump. Keep the S7 offline proof via
+   keys/shrek-update-pub.gpg) + transfer defs → url-file/.raw.zst @ shrekos-updates.iambu.dev/stable/ +
+   egress bless shrekos-updates.iambu.dev via sealed DoT; system-index bump. Keep the S7 offline proof via
    --transfer-source override.
 5. [TODO] Networked A/B dogfood (fresh install → pull v-next → boot → rollback proof).
 6. [TODO] Owner-split commits + dual-gh push.

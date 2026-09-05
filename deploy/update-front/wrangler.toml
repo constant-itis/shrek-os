@@ -14,7 +14,7 @@ compatibility_date = "2025-09-01"
 
 # Bind to the update hostname. `zone_name` lets wrangler resolve the zone without a numeric zone id.
 routes = [
-  { pattern = "updates.shrekos.iambu.dev/*", zone_name = "iambu.dev" }
+  { pattern = "shrekos-updates.iambu.dev/*", zone_name = "iambu.dev" }
 ]
 
 # No secrets, no KV, no bindings — the front is stateless and holds no key material.

@@ -4,7 +4,7 @@
 # GitHub is the transparency authority for updates (docs/adr-007 Q6b decision, 2026-09-04): every versioned
 # build publishes its systemd-sysupdate payload — the split root partition, its dm-verity hash partition, and
 # the Secure-Boot-signed UKI — plus a SHA256SUMS manifest, as a public, immutable Release. The updater
-# (systemd-sysupdate) fetches these over https://updates.shrekos.iambu.dev/<channel>/ (an owner-controlled
+# (systemd-sysupdate) fetches these over https://shrekos-updates.iambu.dev/<channel>/ (an owner-controlled
 # front over these releases), checksum-verifies, and A/B installs. Authority is the SB-signed UKI + the
 # checksums, so the transport/front is untrusted plumbing — a mirror cannot ship a bootable tampered image.
 #
@@ -114,7 +114,7 @@ Shrek OS ${TAG} — sealed A/B update payload.
 Transparency: GitHub is the authoritative, immutable public record of what Shrek OS ships. This release is
 the systemd-sysupdate payload — the zstd-compressed split root partition, its dm-verity hash partition, and
 the Secure-Boot-signed UKI — plus \`SHA256SUMS\`. Authority is the signed UKI (which carries the verity roothash)
-+ the checksums, so any mirror or front (e.g. updates.shrekos.iambu.dev) is untrusted plumbing: it cannot
++ the checksums, so any mirror or front (e.g. shrekos-updates.iambu.dev) is untrusted plumbing: it cannot
 ship a bootable tampered image.
 
 Verify: \`sha256sum -c SHA256SUMS\`. The UKI is signed by the Shrek Secure Boot key; the running OS only
