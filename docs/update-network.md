@@ -63,24 +63,32 @@ untrusted plumbing — it cannot ship a bootable tampered image, and it cannot f
    VM with egress reaching the live front (or the front mocked in-VM). New harness — the remaining gate
    after the above.
 
-## OPEN DECISION (owner) — the update-signing trust root
+## DECISION (owner, resolved 2026-09-05) — the update-signing trust root
 
-The GPG key that signs `SHA256SUMS` is the cryptographic root of every future update. Decide before baking:
-- Which key (a new dedicated Shrek update-signing key vs. reuse of an existing one), where the private key
-  lives (e.g. keys/ gitignored like the throwaway Secure-Boot key, or ~/vault, or an offline/HSM setup),
-  and the rotation story. The public half gets baked into the sealed image (irreversible until the next
-  signed-image rollout), so this is a bake-once-decide-carefully choice.
+The GPG key that signs `SHA256SUMS` is the cryptographic root of every future update. Resolved:
+- **Which key:** a dedicated Shrek update-signing key (RSA-3072, keyid 28143FEC30F15C8C), separate from the
+  Secure-Boot key — two independent roots by design.
+- **Where the private key lives:** the encrypted vault at `~/vault/shrek-os/update-signing/gnupg`, OUTSIDE
+  the checkout, with an armored offline backup at `~/vault/shrek-os/update-signing/backup/`. It is NOT under
+  `keys/` — gitignore protects against accidental commits, not filesystem loss or an over-broad tool. The
+  repo carries only the PUBLIC half (`keys/shrek-update-pub.gpg`, now tracked) + the signing contract.
+- **Rotation:** the keyring baked into the image is a SET, so a future image can trust old+new keys for one
+  transition release, then drop the old one. Full bootstrap + rotation procedure: **docs/update-key-rotation.md**.
+
+The public half gets baked into the sealed image (irreversible until the next signed-image rollout), so bake
+the trusted key + front URL + egress bless as ONE trust-policy change.
 
 ## Go-live checklist (after the decision)
 
-Decision made (2026-09-05): dedicated update-signing key in keys/ (gitignored), mirroring the Secure-Boot key.
-
-1. [DONE] Update-signing keypair generated — keys/gnupg (private, gitignored, keyid 28143FEC30F15C8C),
-   public key keys/shrek-update-pub.gpg. Signed-manifest path PROVEN end-to-end: a GPG-signed SHA256SUMS.gpg
-   + the pubkey in /etc/systemd/import-pubring.gpg made real systemd-sysupdate 257 verify ("Good signature")
-   and list v1 as an available candidate with verification ON. (scratchpad/signed-path-proof.sh.)
-2. [DONE] `publish-release.sh` signs the manifest (SHA256SUMS.gpg, guarded on keys/gnupg, fail-closed
-   self-verify); v1 re-cut and now carries the signed manifest.
+1. [DONE] Update-signing keypair generated — keyid 28143FEC30F15C8C; private keyring now at
+   `~/vault/shrek-os/update-signing/gnupg` (relocated out of the repo 2026-09-05, armored offline backup +
+   README in `backup/`); public key `keys/shrek-update-pub.gpg` (tracked). Signed-manifest path PROVEN
+   end-to-end: a GPG-signed SHA256SUMS.gpg + the pubkey in /etc/systemd/import-pubring.gpg made real
+   systemd-sysupdate 257 verify ("Good signature") and list v1 as an available candidate with verification
+   ON. (scratchpad/signed-path-proof.sh.)
+2. [DONE] `publish-release.sh` signs the manifest (SHA256SUMS.gpg) using an explicit `--signing-key DIR`
+   (default: the vault keyring, override via `$UPDATE_GNUPGHOME`), FAILS CLOSED if the key is absent, and
+   self-verifies before publishing; v1 re-cut and now carries the signed manifest.
 3. [TODO] Front: aggregate a CUMULATIVE signed manifest across releases + serve/proxy assets. For v1 the
    per-release manifest == cumulative; from v2 on, maintain one canonical SHA256SUMS(+.gpg) (e.g. a stable
    `manifest` release the publish step re-signs) and map flat filenames → their version's release. Stand up
