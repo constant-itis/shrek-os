@@ -799,13 +799,21 @@ else
     say "Sconnect map=FAIL [$cmap]"
 fi
 # bind/list/forget round-trip against the REAL supervisor socket, as the dev user (SO_PEERCRED uid 1000).
+# The supervisor socket only APPEARS once egressd.service runs serve() (there is NO socket-activation unit),
+# and egressd is After=shrek-desktop-egress.service — so it comes up WITH the desktop session and can lag
+# this probe by a beat (Type=simple => "active" the instant it execs, a moment BEFORE serve() binds the
+# socket). Wait bounded for the socket file + an active daemon so the round-trip exercises the real product
+# path instead of a boot race (same idiom as the user@1000 / bluetooth waits above).
+esock=/run/shrek/egress/sock
+es=0; while [ "$es" -lt 45 ]; do [ -S "$esock" ] && [ "$(systemctl is-active egressd.service 2>/dev/null)" = active ] && break; sleep 1; es=$((es + 1)); done
+say "Sconnect egressd-wait t=${es}s active=$(systemctl is-active egressd.service 2>/dev/null || echo unknown) sock=$([ -S "$esock" ] && echo present || echo absent)"
 asdev sh -c "shrek-connect --forget local >/dev/null 2>&1" || true
-asdev sh -c "shrek-connect local 127.0.0.1 >/dev/null 2>&1" || true
+bindrc=0; bindout="$(asdev sh -c "shrek-connect local 127.0.0.1 2>&1")" || bindrc=$?
 cbound="$(asdev sh -c "shrek-connect --list 2>/dev/null" | awk '$1=="local"{print $3}')"
 if [ "$cbound" = "127.0.0.1" ] && grep -qx '127.0.0.1 shrek-model' /run/shrek/hosts 2>/dev/null; then
     say "Sconnect bind=ok"
 else
-    say "Sconnect bind=FAIL [local=$cbound proj=$(tr '\n' '|' < /run/shrek/hosts 2>&1)]"
+    say "Sconnect bind=FAIL [local=$cbound bindrc=$bindrc bindout=$(printf '%s' "$bindout" | tr '\n' '/') proj=$(tr '\n' '|' < /run/shrek/hosts 2>&1)]"
 fi
 # the unbound provider guard: with `local` bound but `claude` not, shrek-agent must fail-closed (exit 3)
 # on --provider claude and emit the hook-up hint — never reach a launch. Capture is set -e-SAFE: the
