@@ -55,7 +55,7 @@ Item {
                     Layout.alignment: Qt.AlignHCenter
                 }
                 Text {
-                    text: "After reboot, you'll finish setting up your owner account and passphrase. Remove the install media before you restart."
+                    text: "After reboot, the first screen is a plain text console where you set your passphrase — that's intentional, not an error. The graphical setup resumes right after to finish your owner account. Remove the install media before you restart."
                     color: Tokens.textSecondary
                     font.family: Tokens.fontFamily
                     font.pixelSize: Tokens.fontBody
