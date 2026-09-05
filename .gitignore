@@ -3,7 +3,12 @@
 # Spike artifacts — image builds and throwaway signing keys never get committed
 /build/
 /out/
-/keys/
+/keys/*
+# ...EXCEPT the update-signing PUBLIC key: it is public by design, gets baked into
+# the sealed image, and is the repo's committed record of the update trust root.
+# The PRIVATE keyring lives outside the checkout (~/vault/shrek-os/update-signing/gnupg).
+# (/keys/* ignores CONTENTS, not the dir itself, so this re-include can take effect.)
+!/keys/shrek-update-pub.gpg
 *.raw
 *.efi
 *.img

@@ -12,11 +12,14 @@
 # GitHub caps a release asset at 2 GiB, and it is not an update artifact. Installer-image distribution is a
 # separate concern.
 #
-#   scripts/publish-release.sh [VERSION] [--draft] [--repo OWNER/REPO] [--notes-only]
-#     VERSION      build/version tag component (default: 1 -> release tag v1). Matches build-in-container.sh <v>.
-#     --draft      create the release as a DRAFT (staged + uploaded, not public until you hit Publish).
-#     --repo       target repo (default: constant-itis/shrek-os).
-#     --notes-only print the resolved artifact set + notes and exit WITHOUT touching GitHub (dry run).
+#   scripts/publish-release.sh [VERSION] [--draft] [--repo OWNER/REPO] [--signing-key DIR] [--notes-only]
+#     VERSION        build/version tag component (default: 1 -> release tag v1). Matches build-in-container.sh <v>.
+#     --draft        create the release as a DRAFT (staged + uploaded, not public until you hit Publish).
+#     --repo         target repo (default: constant-itis/shrek-os).
+#     --signing-key  GNUPGHOME dir holding the update-signing PRIVATE key. Default: the vault location
+#                    below (also settable via $UPDATE_GNUPGHOME). Publishing FAILS CLOSED if this is
+#                    absent — a signed manifest is mandatory (systemd-sysupdate refuses an unsigned one).
+#     --notes-only   print the resolved artifact set + notes and exit WITHOUT touching GitHub (dry run).
 set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"; cd "$REPO_ROOT"
 
@@ -27,13 +30,18 @@ REPO=constant-itis/shrek-os
 GH_PUSH_USER=constant-itis          # the account that owns REPO
 GH_RESTORE_USER=BuberryWorldwide    # the default active account to restore afterward
 ARCH=x86-64
+# The update-signing PRIVATE keyring lives OUTSIDE the checkout (the repo carries only the public half,
+# keys/shrek-update-pub.gpg). Default home is the encrypted vault; override with --signing-key or
+# $UPDATE_GNUPGHOME (e.g. after restoring from the offline backup to a different path).
+SIGNING_KEY="${UPDATE_GNUPGHOME:-$HOME/vault/shrek-os/update-signing/gnupg}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --draft) DRAFT=1 ;;
     --notes-only) NOTES_ONLY=1 ;;
     --repo) shift; REPO="$1" ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    --signing-key) shift; SIGNING_KEY="$1" ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     --*) echo "unknown flag: $1" >&2; exit 2 ;;
     *) VERSION="$1" ;;
   esac
@@ -83,20 +91,22 @@ echo "SHA256SUMS:"; sed 's/^/  /' "$SUMS"
 # GPG-sign the manifest -> SHA256SUMS.gpg (detached). systemd-sysupdate MANDATES this: with verification
 # on (the unattended default) it fetches SHA256SUMS.gpg and refuses the update without a good signature
 # against the pubkey baked into the sealed image's /usr/lib/systemd/import-pubring.gpg (proven 2026-09-05).
-# The private key lives in keys/gnupg (gitignored, owner-chosen — mirrors the throwaway Secure-Boot key).
+# The private key lives at $SIGNING_KEY (default: the encrypted vault, outside the checkout). FAIL CLOSED
+# if it is missing — an unsigned manifest is worse than useless (every sealed client will reject it), so
+# we refuse to publish rather than ship a release the fleet can never install.
 SUMS_SIG="${SUMS}.gpg"
-UPDATE_GNUPGHOME="${UPDATE_GNUPGHOME:-keys/gnupg}"
-if [ -d "$UPDATE_GNUPGHOME" ]; then
-  GNUPGHOME="$UPDATE_GNUPGHOME" gpg --batch --yes --detach-sign -o "$SUMS_SIG" "$SUMS"
-  # Fail closed: a manifest that does not verify against the baked pubkey would brick the update path.
-  GNUPGHOME="$UPDATE_GNUPGHOME" gpg --verify "$SUMS_SIG" "$SUMS" 2>/dev/null \
-    || { echo "SHA256SUMS.gpg failed self-verify against keys/gnupg — aborting" >&2; exit 1; }
-  echo "signed manifest -> $(basename "$SUMS_SIG") ($(stat -c%s "$SUMS_SIG")B)"
-else
-  echo "WARN: no update-signing key at $UPDATE_GNUPGHOME — publishing an UNSIGNED manifest." >&2
-  echo "      systemd-sysupdate (verify on) will REFUSE this. Generate the key first (docs/update-network.md)." >&2
-  SUMS_SIG=""
+if [ ! -d "$SIGNING_KEY" ]; then
+  echo "ABORT: update-signing key not found at: $SIGNING_KEY" >&2
+  echo "       A signed SHA256SUMS.gpg is mandatory (systemd-sysupdate refuses unsigned)." >&2
+  echo "       Pass --signing-key DIR / set \$UPDATE_GNUPGHOME, or restore from the offline backup" >&2
+  echo "       (~/vault/shrek-os/update-signing/backup/, see docs/update-key-rotation.md)." >&2
+  exit 1
 fi
+GNUPGHOME="$SIGNING_KEY" gpg --batch --yes --detach-sign -o "$SUMS_SIG" "$SUMS"
+# Fail closed: a manifest that does not verify against its own key would brick the update path.
+GNUPGHOME="$SIGNING_KEY" gpg --verify "$SUMS_SIG" "$SUMS" 2>/dev/null \
+  || { echo "SHA256SUMS.gpg failed self-verify against $SIGNING_KEY — aborting" >&2; exit 1; }
+echo "signed manifest -> $(basename "$SUMS_SIG") ($(stat -c%s "$SUMS_SIG")B) [key: $SIGNING_KEY]"
 
 NOTES="$(cat <<EOF
 Shrek OS ${TAG} — sealed A/B update payload.
