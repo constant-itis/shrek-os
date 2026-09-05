@@ -73,9 +73,22 @@ The GPG key that signs `SHA256SUMS` is the cryptographic root of every future up
 
 ## Go-live checklist (after the decision)
 
-1. Generate the update-signing keypair; store the private key securely; export the public key.
-2. `publish-release.sh`: cumulative `SHA256SUMS` + `SHA256SUMS.gpg`; re-cut v1 with the signed manifest.
-3. Stand up the front (Worker) + DNS `updates.shrekos.iambu.dev`; verify `sysupdate list` (verify ON) against it.
-4. Bake: import-pubring.gpg + transfer defs url-file/.raw.zst + egress bless; system-index bump.
-5. Networked A/B dogfood (fresh install → pull v-next → boot → rollback proof).
-6. Owner-split commits + dual-gh push.
+Decision made (2026-09-05): dedicated update-signing key in keys/ (gitignored), mirroring the Secure-Boot key.
+
+1. [DONE] Update-signing keypair generated — keys/gnupg (private, gitignored, keyid 28143FEC30F15C8C),
+   public key keys/shrek-update-pub.gpg. Signed-manifest path PROVEN end-to-end: a GPG-signed SHA256SUMS.gpg
+   + the pubkey in /etc/systemd/import-pubring.gpg made real systemd-sysupdate 257 verify ("Good signature")
+   and list v1 as an available candidate with verification ON. (scratchpad/signed-path-proof.sh.)
+2. [DONE] `publish-release.sh` signs the manifest (SHA256SUMS.gpg, guarded on keys/gnupg, fail-closed
+   self-verify); v1 re-cut and now carries the signed manifest.
+3. [TODO] Front: aggregate a CUMULATIVE signed manifest across releases + serve/proxy assets. For v1 the
+   per-release manifest == cumulative; from v2 on, maintain one canonical SHA256SUMS(+.gpg) (e.g. a stable
+   `manifest` release the publish step re-signs) and map flat filenames → their version's release. Stand up
+   `updates.shrekos.iambu.dev` (CF Worker preferred — needs a Workers-scoped token; the iambu.dev vault
+   token is DNS-only). Verify `sysupdate list` (verify ON) against the live host.
+4. [TODO] Bake (signed-image change): image/overlay/usr/lib/systemd/import-pubring.gpg (from
+   keys/shrek-update-pub.gpg) + transfer defs → url-file/.raw.zst @ updates.shrekos.iambu.dev/stable/ +
+   egress bless updates.shrekos.iambu.dev via sealed DoT; system-index bump. Keep the S7 offline proof via
+   --transfer-source override.
+5. [TODO] Networked A/B dogfood (fresh install → pull v-next → boot → rollback proof).
+6. [TODO] Owner-split commits + dual-gh push.

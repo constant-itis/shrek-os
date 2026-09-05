@@ -75,9 +75,28 @@ done
 [ "$fail" = 0 ] || { echo "aborting: an asset is at/over GitHub's 2 GiB cap even after compression" >&2; exit 1; }
 
 # SHA256SUMS over the published payload (basenames, so it verifies wherever the assets are downloaded to).
+# Checksums are over the COMPRESSED bytes — exactly what systemd-sysupdate's Type=url-file expects.
 SUMS="out/SHA256SUMS"
 ( cd out && sha256sum "$(basename "$ROOTZ")" "$(basename "$VERITYZ")" "$(basename "$UKI")" > "$(basename "$SUMS")" )
 echo "SHA256SUMS:"; sed 's/^/  /' "$SUMS"
+
+# GPG-sign the manifest -> SHA256SUMS.gpg (detached). systemd-sysupdate MANDATES this: with verification
+# on (the unattended default) it fetches SHA256SUMS.gpg and refuses the update without a good signature
+# against the pubkey baked into the sealed image's /usr/lib/systemd/import-pubring.gpg (proven 2026-09-05).
+# The private key lives in keys/gnupg (gitignored, owner-chosen — mirrors the throwaway Secure-Boot key).
+SUMS_SIG="${SUMS}.gpg"
+UPDATE_GNUPGHOME="${UPDATE_GNUPGHOME:-keys/gnupg}"
+if [ -d "$UPDATE_GNUPGHOME" ]; then
+  GNUPGHOME="$UPDATE_GNUPGHOME" gpg --batch --yes --detach-sign -o "$SUMS_SIG" "$SUMS"
+  # Fail closed: a manifest that does not verify against the baked pubkey would brick the update path.
+  GNUPGHOME="$UPDATE_GNUPGHOME" gpg --verify "$SUMS_SIG" "$SUMS" 2>/dev/null \
+    || { echo "SHA256SUMS.gpg failed self-verify against keys/gnupg — aborting" >&2; exit 1; }
+  echo "signed manifest -> $(basename "$SUMS_SIG") ($(stat -c%s "$SUMS_SIG")B)"
+else
+  echo "WARN: no update-signing key at $UPDATE_GNUPGHOME — publishing an UNSIGNED manifest." >&2
+  echo "      systemd-sysupdate (verify on) will REFUSE this. Generate the key first (docs/update-network.md)." >&2
+  SUMS_SIG=""
+fi
 
 NOTES="$(cat <<EOF
 Shrek OS ${TAG} — sealed A/B update payload.
@@ -108,10 +127,10 @@ trap 'gh auth switch --user "$GH_RESTORE_USER" >/dev/null 2>&1 || true' EXIT
 draftflag=(); [ "$DRAFT" = 1 ] && draftflag=(--draft)
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   echo "release $TAG already exists on $REPO — uploading/clobbering assets" >&2
-  gh release upload "$TAG" --repo "$REPO" --clobber "$ROOTZ" "$VERITYZ" "$UKI" "$SUMS"
+  gh release upload "$TAG" --repo "$REPO" --clobber "$ROOTZ" "$VERITYZ" "$UKI" "$SUMS" ${SUMS_SIG:+"$SUMS_SIG"}
 else
   gh release create "$TAG" --repo "$REPO" "${draftflag[@]}" \
     --title "Shrek OS ${TAG}" --notes "$NOTES" \
-    "$ROOTZ" "$VERITYZ" "$UKI" "$SUMS"
+    "$ROOTZ" "$VERITYZ" "$UKI" "$SUMS" ${SUMS_SIG:+"$SUMS_SIG"}
 fi
 echo "published: $(gh release view "$TAG" --repo "$REPO" --json url -q .url 2>/dev/null)"
