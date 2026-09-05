@@ -1,0 +1,21 @@
+# Cloudflare Worker config for the Shrek OS update front.
+#
+# Deploy:  cd deploy/update-front && npx wrangler deploy
+# Needs:   a Workers-scoped API token (the ~/vault iambu.dev token is DNS-only). See README.md.
+#
+# The route binds the Worker to the owner-controlled hostname. The `updates` DNS record for
+# iambu.dev must be a proxied (orange-cloud) record pointing anywhere (e.g. a placeholder A/AAAA
+# or CNAME) so Cloudflare terminates TLS and the Worker route intercepts — Workers routes only
+# fire on proxied hostnames. Create that record with the DNS-scoped vault token if it doesn't exist.
+
+name = "shrek-os-update-front"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+
+# Bind to the update hostname. `zone_name` lets wrangler resolve the zone without a numeric zone id.
+routes = [
+  { pattern = "updates.shrekos.iambu.dev/*", zone_name = "iambu.dev" }
+]
+
+# No secrets, no KV, no bindings — the front is stateless and holds no key material.
+workers_dev = false
