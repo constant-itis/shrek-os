@@ -25,6 +25,7 @@
 //!     re-resolves a blessed-but-pinless profile at boot (the first-run self-heal). ← this slice
 
 pub mod apply;
+pub mod catalog;
 pub mod client;
 pub mod confirmed;
 pub mod dot;

@@ -25,7 +25,6 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::net::Ipv4Addr;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{chown, PermissionsExt};
 use std::os::unix::net::UnixListener;
@@ -107,6 +106,12 @@ pub enum Request {
     /// Remove a provider binding (idempotent — an unbound provider is a clean `OK`).
     Unbind(String), // (provider-token)
 
+    /// ADR-009 §2/§6: file a capability REQUEST into the inbox — a CLOSED CATALOG TOKEN, never free text.
+    /// uid-1000, identity-gated. Grants NOTHING (only makes a pending card appear); the daemon refuses a
+    /// token that names no catalog capability, so a spoofed prompt can at most re-surface a root-vetted
+    /// name. This buys B's discoverability with zero new authority and zero attacker-authored text.
+    Want(String), // (catalog capability token)
+
     // ---- PRIVILEGED ceremony-commit verbs (ADR-007 S6 fix #4 redesign) ----
     // These are the CONFIRMED result of a console SAK/VT ceremony. They carry the very things the
     // uid-1000 verbs forbid — a broad profile or a raw `host:proto:port` destination — so they are gated
@@ -120,6 +125,14 @@ pub enum Request {
     ConfirmedUnbless(String),   // profile
     ConfirmedAddRaw(String),    // raw `host:proto:port` wire form (re-validated by the sealed grammar)
     ConfirmedRemoveRaw(String), // raw `host:proto:port` wire form
+
+    /// ADR-009 §4.2: commit / remove an OWNER capability manifest (root peer only — the ceremony ran in
+    /// gatekeeperd, which STAGED the confirmed bytes to the volatile staging dir and relays this verb; the
+    /// content never rides the wire, only the capability NAME token). egressd is the SOLE writer of the
+    /// live owner dir: install re-parses the staged candidate + enforces the §4.4 install-refuses before
+    /// committing; remove drops the manifest + withdraws any grant referencing it.
+    ConfirmedManifestInstall(String), // capability name (staged candidate read from the staging dir)
+    ConfirmedManifestRemove(String),  // capability name
 }
 
 impl Request {
@@ -134,6 +147,8 @@ impl Request {
                 | Request::ConfirmedUnbless(_)
                 | Request::ConfirmedAddRaw(_)
                 | Request::ConfirmedRemoveRaw(_)
+                | Request::ConfirmedManifestInstall(_)
+                | Request::ConfirmedManifestRemove(_)
         )
     }
     /// An ADR-008 hosts verb (`bind`/`unbind`) — mutates the HOSTS store/projection, not the egress
@@ -150,10 +165,13 @@ impl Request {
             Request::BrowserUp => "browser-up",
             Request::Bind(..) => "bind",
             Request::Unbind(_) => "unbind",
+            Request::Want(_) => "want",
             Request::ConfirmedBless(_) => "confirmed-bless",
             Request::ConfirmedUnbless(_) => "confirmed-unbless",
             Request::ConfirmedAddRaw(_) => "confirmed-add-raw",
             Request::ConfirmedRemoveRaw(_) => "confirmed-remove-raw",
+            Request::ConfirmedManifestInstall(_) => "confirmed-manifest-install",
+            Request::ConfirmedManifestRemove(_) => "confirmed-manifest-remove",
         }
     }
     pub fn profile(&self) -> &str {
@@ -162,6 +180,9 @@ impl Request {
             Request::Bless(p) | Request::Unbless(p) | Request::Repin(p) => p,
             // the hosts verbs journal under their provider token.
             Request::Bind(t, _) | Request::Unbind(t) => t,
+            // the want verb + the manifest verbs journal under their capability-name token.
+            Request::Want(t) => t,
+            Request::ConfirmedManifestInstall(n) | Request::ConfirmedManifestRemove(n) => n,
             Request::ConfirmedBless(p) | Request::ConfirmedUnbless(p) => p,
             // raw ops journal under a fixed "raw" label, not the destination (which the audit line + the
             // events projection carry separately); keeps the profile column stable.
@@ -250,10 +271,17 @@ pub fn parse_request(raw: &str) -> Result<Request, &'static str> {
             }
             Ok(Request::Unbind(token.to_string()))
         }
+        // uid-1000 capability request — a single CLOSED catalog token (validated against the catalog in
+        // the handler; the parser only enforces the token grammar, mirroring `bless`).
+        "want" => Ok(Request::Want(want_profile(a)?)),
         "confirmed-bless" => Ok(Request::ConfirmedBless(want_profile(a)?)),
         "confirmed-unbless" => Ok(Request::ConfirmedUnbless(want_profile(a)?)),
         "confirmed-add-raw" => Ok(Request::ConfirmedAddRaw(want_raw(a)?)),
         "confirmed-remove-raw" => Ok(Request::ConfirmedRemoveRaw(want_raw(a)?)),
+        // root-peer owner-manifest commit — a single capability NAME token; the content is read from the
+        // staging dir by the handler (never on the wire).
+        "confirmed-manifest-install" => Ok(Request::ConfirmedManifestInstall(want_profile(a)?)),
+        "confirmed-manifest-remove" => Ok(Request::ConfirmedManifestRemove(want_profile(a)?)),
         _ => Err("unknown verb"),
     }
 }
@@ -337,6 +365,9 @@ pub fn authorize(peer_uid: u32, req: &Request, desktop_uid: u32) -> Decision {
         // firewall-plane authority (§3), so there is no Tier-B check to make — the closed token IS the
         // authority. The engine re-validates both in the handler (defense in depth).
         Request::Bind(..) | Request::Unbind(_) => Decision::Allow,
+        // The `want` inbox verb: identity is the ONLY gate — it grants nothing (the handler refuses a
+        // token that names no catalog capability, and even a valid one only surfaces a pending card).
+        Request::Want(_) => Decision::Allow,
         // privileged verbs handled above; unreachable but keep the match exhaustive + fail-closed.
         _ => Decision::Deny("unexpected verb"),
     }
@@ -540,6 +571,11 @@ impl Supervisor {
             // ADR-008 hosts verbs (uid-1000 identity-gated). They touch the hosts store + projection only.
             Request::Bind(token, addr) => self.do_bind(cred, token, addr, at),
             Request::Unbind(token) => self.do_unbind(cred, token, at),
+            // ADR-009 uid-1000 capability request inbox.
+            Request::Want(token) => self.do_want(cred, token, at),
+            // ADR-009 root-peer owner-manifest commit (ceremony relay).
+            Request::ConfirmedManifestInstall(name) => self.confirmed_manifest_install(cred, name, at),
+            Request::ConfirmedManifestRemove(name) => self.confirmed_manifest_remove(cred, name, exec, at),
             // PRIVILEGED ceremony-commit (root peer only — already gated in `authorize`). The daemon does
             // the store write + nft mutation in-process (it holds CAP_NET_ADMIN), so no transient root
             // process runs nft and gatekeeperd needs no net capability.
@@ -561,7 +597,7 @@ impl Supervisor {
         }
         match crate::confirmed::reconcile_web_browsing(&self.store, exec, self.desktop_uid) {
             Ok(true) => {
-                let _ = store::project_state(&self.store, &self.run);
+                let _ = store::project_state(&self.store, &self.run, &crate::catalog::load_catalog());
                 journal(cred, "browser-up", "web-browsing", "accept", "-", "rules installed");
                 let _ = append_event(&self.run, at, "browser-up", "web-browsing", "live");
                 "OK browser-up live".to_string()
@@ -590,7 +626,7 @@ impl Supervisor {
         let _lock = hosts::lock_hosts(&home).ok();
         match hosts::write_binding(&home, token, addr) {
             Ok(ip) => {
-                let _ = hosts::compose_hosts(&home, &run);
+                let _ = hosts::compose_hosts(&home, &run, &crate::catalog::load_catalog());
                 journal(cred, "bind", token, "accept", "-", &ip.to_string());
                 let _ = append_event(&self.run, at, "bind", token, &ip.to_string());
                 format!("OK bind {token} {ip}")
@@ -609,7 +645,7 @@ impl Supervisor {
         let _lock = hosts::lock_hosts(&home).ok();
         match hosts::remove_binding(&home, token) {
             Ok(()) => {
-                let _ = hosts::compose_hosts(&home, &run);
+                let _ = hosts::compose_hosts(&home, &run, &crate::catalog::load_catalog());
                 journal(cred, "unbind", token, "accept", "-", "unbound");
                 let _ = append_event(&self.run, at, "unbind", token, "unbound");
                 format!("OK unbind {token}")
@@ -619,6 +655,103 @@ impl Supervisor {
                 "ERR store".to_string()
             }
         }
+    }
+
+    // ---- ADR-009 capability request inbox + owner-manifest ceremony verbs (S2f) ---------------------
+
+    /// File a uid-1000 capability REQUEST (ADR-009 §2/§6). The token must name an EXISTING catalog
+    /// capability — a token that names no capability is refused, so uid 1000 can only ever surface a
+    /// root-vetted name, never author a destination or free text. Grants NOTHING; it only makes a pending
+    /// card appear (discoverability with zero authority). Recorded into the bounded `/run` inbox.
+    fn do_want(&mut self, cred: &uapi::Ucred, token: &str, at: u64) -> String {
+        let catalog = crate::catalog::load_catalog();
+        if catalog.get(token).is_none() {
+            journal(cred, "want", token, "deny", "-", "not a catalog capability");
+            return "ERR unknown-capability".to_string();
+        }
+        match store::record_want(&self.run, token, at) {
+            Ok(_) => {
+                journal(cred, "want", token, "accept", "-", "requested");
+                let _ = append_event(&self.run, at, "want", token, "requested");
+                format!("OK want {token}")
+            }
+            Err(e) => {
+                journal(cred, "want", token, "store-fail", "-", &e.to_string());
+                "ERR store".to_string()
+            }
+        }
+    }
+
+    /// Commit a CONFIRMED owner-manifest install (root peer only — the ceremony ran in gatekeeperd, which
+    /// STAGED the confirmed bytes to the volatile staging dir and relayed this verb; only the NAME rides
+    /// the wire). egressd is the SOLE writer of the live owner dir: it reads the staged candidate,
+    /// RE-PARSES it (the ceremony proved human intent, not well-formedness — the confirmed-* doctrine),
+    /// checks the staged name matches, enforces the §4.4 install-refuses (sealed-name collision /
+    /// system-reserved host / owner `deliver hosts`), then commits + clears staging + reprojects. No nft
+    /// change — an installed owner capability is not one-click-blessable over the socket in S2.
+    fn confirmed_manifest_install(&mut self, cred: &uapi::Ucred, name: &str, at: u64) -> String {
+        let verb = "confirmed-manifest-install";
+        let staging = crate::catalog::staging_cap_dir();
+        let owner = crate::catalog::owner_cap_dir();
+        let Some(text) = crate::catalog::read_staged(&staging, name) else {
+            journal(cred, verb, name, "deny", "-", "no staged candidate");
+            return "ERR no-staged-candidate".to_string();
+        };
+        let m = match shrek_policy::egress_capability::parse_manifest(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = crate::catalog::clear_staged(&staging, name);
+                journal(cred, verb, name, "deny", "-", &e.reason());
+                return format!("ERR invalid-manifest: {}", e.reason());
+            }
+        };
+        if m.name != name {
+            let _ = crate::catalog::clear_staged(&staging, name);
+            journal(cred, verb, name, "deny", "-", "staged name mismatch");
+            return "ERR name-mismatch".to_string();
+        }
+        let sealed = crate::catalog::load_sealed_catalog();
+        if let Err(reason) = crate::catalog::validate_owner_install(&m, &sealed) {
+            let _ = crate::catalog::clear_staged(&staging, name);
+            journal(cred, verb, name, "refuse", "-", &reason);
+            return format!("ERR refused: {reason}");
+        }
+        if let Err(e) = crate::catalog::write_owner_manifest(&owner, name, &text) {
+            journal(cred, verb, name, "store-fail", "-", &e.to_string());
+            return "ERR store".to_string();
+        }
+        let _ = crate::catalog::clear_staged(&staging, name);
+        self.reproject(); // the state view now carries the new capability card (source=owner)
+        journal(cred, verb, name, "accept", "-", "installed");
+        let _ = append_event(&self.run, at, "manifest-install", name, "installed");
+        format!("OK confirmed-manifest-install {name}")
+    }
+
+    /// Commit a CONFIRMED owner-manifest removal (root peer only). Removes the live owner manifest and —
+    /// defensively — withdraws any grant that referenced it, then reconciles the `@cap_pinned` union so
+    /// its tuples (if any) are gone and the hosts bridge drops its lines at the next compose (ADR-009
+    /// §4.6). An owner capability is not one-click-blessable over the socket in S2 so there is normally no
+    /// grant, but a future granted capability MUST tear down here. Idempotent.
+    fn confirmed_manifest_remove(&mut self, cred: &uapi::Ucred, name: &str, exec: &mut dyn NftExec, at: u64) -> String {
+        let verb = "confirmed-manifest-remove";
+        let owner = crate::catalog::owner_cap_dir();
+        if let Err(e) = crate::catalog::remove_owner_manifest(&owner, name) {
+            journal(cred, verb, name, "store-fail", "-", &e.to_string());
+            return "ERR store".to_string();
+        }
+        let _ = store::remove_bless(&self.store, name);
+        let _ = store::remove_pin(&self.store, name);
+        let _ = store::clear_fault(&self.store, name);
+        if let Err(e) = crate::confirmed::reconcile_cap(&self.store, exec) {
+            let msg = format!("{e:?}");
+            self.reproject();
+            journal(cred, verb, name, "apply-fail", "-", &msg);
+            return "ERR apply-failed".to_string();
+        }
+        self.reproject();
+        journal(cred, verb, name, "accept", "-", "removed");
+        let _ = append_event(&self.run, at, "manifest-remove", name, "removed");
+        format!("OK confirmed-manifest-remove {name}")
     }
 
     // ---- PRIVILEGED ceremony-commit handlers (root peer only; ADR-007 S6 fix #4 redesign) -----------
@@ -692,8 +825,9 @@ impl Supervisor {
             return "ERR store".to_string();
         }
         let mut resolver = crate::confirmed::DotRawResolver;
-        match crate::confirmed::reconcile_raw(&self.store, exec, &mut resolver, at) {
-            Ok((_, pending)) => {
+        let (_, pending) = crate::confirmed::resolve_raw(&self.store, &mut resolver, at);
+        match crate::confirmed::reconcile_cap(&self.store, exec) {
+            Ok(_) => {
                 self.reproject();
                 let live = store::list_raw_pins(&self.store).iter().any(|r| r.triple == t);
                 journal(cred, "confirmed-add-raw", "raw", "accept", "-", if live { "pinned" } else { "pending" });
@@ -731,7 +865,8 @@ impl Supervisor {
             return "ERR store".to_string();
         }
         let mut resolver = crate::confirmed::DotRawResolver;
-        match crate::confirmed::reconcile_raw(&self.store, exec, &mut resolver, at) {
+        let _ = crate::confirmed::resolve_raw(&self.store, &mut resolver, at);
+        match crate::confirmed::reconcile_cap(&self.store, exec) {
             Ok(_) => {
                 self.reproject();
                 journal(cred, "confirmed-remove-raw", "raw", "accept", "-", "revoked");
@@ -753,16 +888,21 @@ impl Supervisor {
     /// backend via NSS `files` (the delivery half of ADR-007 S7). Best-effort: a projection or compose
     /// failure never fails the bless it reports.
     fn reproject(&self) {
+        // Load the catalog once for BOTH consumers: the state view (source/purpose/feature card tokens)
+        // and the hosts bridge (sealed-source delivery filter). A cheap two-dir read; no shared mutable
+        // state to keep in sync.
+        let catalog = crate::catalog::load_catalog();
         let _ = store::project_pinned(&self.store, &self.run);
-        let _ = store::project_state(&self.store, &self.run);
+        let _ = store::project_state(&self.store, &self.run, &catalog);
         // ADR-009 delivery bridge: recompose /run/shrek/hosts (← /etc/hosts) so it carries the blessed
-        // egress pins we just projected. Under the hosts lock so it never interleaves with a provider
-        // bind/unbind; a distinct lock from the store lock held above, always taken store→hosts, so no
-        // cycle. compose reads the pinned map from the egress `/run` view we just refreshed.
+        // SEALED-source egress pins we just projected (owner pins are structurally excluded, §4.4). Under
+        // the hosts lock so it never interleaves with a provider bind/unbind; a distinct lock from the
+        // store lock held above, always taken store→hosts, so no cycle. compose reads the pinned map from
+        // the egress `/run` view we just refreshed.
         let home = hosts::hosts_home_dir();
         let hosts_run = hosts::hosts_run_dir();
         if let Ok(_lock) = hosts::lock_hosts(&home) {
-            let _ = hosts::compose_hosts(&home, &hosts_run);
+            let _ = hosts::compose_hosts(&home, &hosts_run, &catalog);
         }
     }
 
@@ -807,16 +947,17 @@ impl Supervisor {
             journal(cred, verb, profile, "store-fail", &rip, &e.to_string());
             return "ERR store".to_string();
         }
-        // 3. apply element-only (reconcile @set to the resolved addrs).
-        let desired: Vec<Ipv4Addr> = pins.iter().map(|p| p.addr).collect();
-        match apply::apply_pins(&self.store, exec, profile, &desired) {
-            Ok(a) => {
+        // 3. apply element-only: reconcile the WHOLE @cap_pinned union (this profile's fresh pins folded
+        //    in with every other grant's — weather's tuples land as `<ip> . tcp . 443` alongside any raw
+        //    tuples; ADR-009 §4.5). The pin record is written above, so the union already sees it.
+        match crate::confirmed::reconcile_cap(&self.store, exec) {
+            Ok(_) => {
                 let _ = store::clear_fault(&self.store, profile);
                 self.reproject();
-                let detail = format!("{} ip(s)", a.len());
+                let detail = format!("{} ip(s)", pins.len());
                 journal(cred, verb, profile, "accept", &rip, &detail);
                 let _ = append_event(&self.run, at, verb, profile, &detail);
-                format!("OK {verb} {profile} {}", a.len())
+                format!("OK {verb} {profile} {}", pins.len())
             }
             Err(e) => {
                 let msg = format!("{e:?}");
@@ -830,11 +971,13 @@ impl Supervisor {
     }
 
     fn unbless(&mut self, cred: &uapi::Ucred, profile: &str, exec: &mut dyn NftExec, at: u64) -> String {
-        // Reconcile the set to empty FIRST; only clear the durable records if that succeeded, so a
-        // delete failure leaves the profile consistently "still blessed, retry-able", never a drift
-        // where records say revoked but elements linger.
-        match apply::unapply(&self.store, exec, profile) {
-            Ok(()) => {
+        // Reconcile @cap_pinned to the union EXCLUDING this profile FIRST (tears down its tuples while
+        // leaving every other grant's in place, ADR-009 §4.5); only clear the durable records if that
+        // succeeded, so a delete failure leaves the profile consistently "still blessed, retry-able",
+        // never a drift where records say revoked but elements linger.
+        let desired = crate::confirmed::desired_cap_union(&self.store, Some(profile));
+        match apply::apply_cap(exec, &desired) {
+            Ok(_) => {
                 let _ = store::remove_bless(&self.store, profile);
                 let _ = store::remove_pin(&self.store, profile);
                 let _ = store::clear_fault(&self.store, profile);
@@ -866,23 +1009,21 @@ impl Supervisor {
 /// live allow on a later boot without the user re-discovering the Settings toggle, and stays a legible
 /// pending until then. Returns a one-line summary for the journal.
 pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mut dyn PinResolver, at: u64) -> String {
-    let mut ok = 0usize;
-    let mut failed = 0usize;
     let mut healed = 0usize;
+    // 1. SELF-HEAL capability pins (no nft): a blessed one-click profile with NO stored pin — the
+    //    intent-first residue of a first-run bless before the clock/network converged — gets a fresh DoT
+    //    re-resolve now. NO per-profile apply anymore: the single `@cap_pinned` union apply (step 3)
+    //    folds every capability + raw grant together (ADR-009 §4.5).
     for b in store::list_bless(store) {
         if !admits_socket_bless(&b.profile) {
             continue; // only pinnable one-click profiles carry runtime elements
         }
-        let mut desired: Vec<Ipv4Addr> = store::load_pin(store, &b.profile)
-            .map(|r| r.pins.iter().map(|p| p.addr).collect())
-            .unwrap_or_default();
-        if desired.is_empty() {
-            // Blessed but pin-deferred: try to complete it now that (maybe) the network/clock are up.
+        let has_pin = store::load_pin(store, &b.profile).map(|r| !r.pins.is_empty()).unwrap_or(false);
+        if !has_pin {
             match resolver.resolve(&b.profile) {
                 Ok((pins, _)) if !pins.is_empty() => {
-                    let rec = PinRecord { profile: b.profile.clone(), pins: pins.clone(), resolved: at };
+                    let rec = PinRecord { profile: b.profile.clone(), pins, resolved: at };
                     if store::write_pin(store, &rec).is_ok() {
-                        desired = pins.iter().map(|p| p.addr).collect();
                         let _ = store::clear_fault(store, &b.profile);
                         healed += 1;
                     }
@@ -893,29 +1034,28 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mu
                 }
             }
         }
-        match apply::apply_pins(store, exec, &b.profile, &desired) {
-            Ok(_) => ok += 1,
-            Err(e) => {
-                let _ = store::write_fault(store, &b.profile, FaultKind::ApplyFail, &format!("reconcile: {e:?}"), at);
-                failed += 1;
-            }
-        }
     }
 
-    // S4: survive the CEREMONY tier across reboot (MF-3/Q4). Raw destinations re-resolve into the
-    // `@raw_pinned` union; a blessed `web-browsing` re-installs its cgroup rule IFF the slice exists yet
-    // (else it stays legibly pending and heals at browser launch via `browser-up`). Uses the production
-    // raw resolver — this is a boot path, not a unit seam (confirmed::reconcile_raw is unit-tested
-    // directly with a fake resolver). With no raw entries + no web-browsing bless this is inert (no
-    // network, no nft mutation), so it does not perturb the profile-tier reconcile above.
+    // 2. Re-resolve raw destinations into the resolved cache (S4; MF-3/Q4 survive-reboot). No nft here —
+    //    this only refreshes the cache the union apply below reads.
     let mut raw_resolver = crate::confirmed::DotRawResolver;
-    let (raw_ok, raw_pending) = match crate::confirmed::reconcile_raw(store, exec, &mut raw_resolver, at) {
-        Ok((p, pend)) => (p, pend),
+    let (raw_ok, raw_pending) = crate::confirmed::resolve_raw(store, &mut raw_resolver, at);
+
+    // 3. ONE element-only union apply: `@cap_pinned` = every blessed capability's stored pins + every raw
+    //    cache pin (ADR-009 §4.5). Restores runtime allows across a restart/reboot without touching the
+    //    S1 deny floor. A blessed profile whose baked set is absent (the oneshot didn't run) fails here
+    //    and leaves the deny floor — fail-closed.
+    let cap = match crate::confirmed::reconcile_cap(store, exec) {
+        Ok(present) => present.len(),
         Err(e) => {
-            eprintln!("egressd[boot]: raw reconcile failed: {e:?}");
-            (0, 0)
+            eprintln!("egressd[boot]: cap reconcile failed (deny floor stands): {e:?}");
+            0
         }
     };
+
+    // 4. web-browsing cgroup rules (separate from @cap_pinned): a blessed `web-browsing` re-installs its
+    //    cgroup accept-pair IFF the slice exists yet (else it stays legibly pending and heals at browser
+    //    launch via `browser-up`). Inert with no web-browsing bless.
     let browser = match crate::confirmed::reconcile_web_browsing(store, exec, desktop_uid()) {
         Ok(installed) => installed,
         Err(e) => {
@@ -925,9 +1065,9 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mu
     };
 
     let _ = store::project_pinned(store, run);
-    let _ = store::project_state(store, run);
+    let _ = store::project_state(store, run, &crate::catalog::load_catalog());
     let summary = format!(
-        "reconcile: {ok} restored, {healed} re-resolved, {failed} faulted; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
+        "reconcile: {cap} cap element(s), {healed} re-resolved; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
         if browser { "installed" } else { "pending/na" }
     );
     eprintln!("egressd[boot]: {summary}");
@@ -1000,6 +1140,7 @@ pub fn now_unix() -> u64 {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::net::Ipv4Addr;
 
     // ---- parser abuse (first-class, per the owner) ----
     #[test]
@@ -1170,6 +1311,64 @@ mod tests {
         let bad = sup.handle(&root, "confirmed-bless weather", &mut NoopExec, &mut NoopResolver, t, 11);
         assert!(bad.starts_with("ERR"), "{bad}");
         assert!(store::load_bless(&store, "weather").is_none());
+    }
+
+    #[test]
+    fn parse_accepts_want_and_manifest_verbs() {
+        assert_eq!(parse_request("want weather"), Ok(Request::Want("weather".into())));
+        assert_eq!(
+            parse_request("confirmed-manifest-install radar"),
+            Ok(Request::ConfirmedManifestInstall("radar".into()))
+        );
+        assert_eq!(
+            parse_request("confirmed-manifest-remove radar\n"),
+            Ok(Request::ConfirmedManifestRemove("radar".into()))
+        );
+        assert!(parse_request("want").is_err()); // needs a token
+        assert!(parse_request("want weather extra").is_err()); // no third field
+        assert!(parse_request("confirmed-manifest-install ../escape").is_err()); // traversal token
+    }
+
+    #[test]
+    fn authorize_want_is_identity_gated_manifest_is_root_only() {
+        let desktop = 1000;
+        let root = 0;
+        // `want`: the desktop uid may file; any other uid (INCLUDING root) may not — it is the owner's verb.
+        assert_eq!(authorize(desktop, &Request::Want("weather".into()), desktop), Decision::Allow);
+        assert!(matches!(authorize(1001, &Request::Want("weather".into()), desktop), Decision::Deny(_)));
+        assert!(matches!(authorize(root, &Request::Want("weather".into()), desktop), Decision::Deny(_)));
+        // manifest verbs: PRIVILEGED (root-only); a uid-1000 peer can never reach them.
+        assert!(Request::ConfirmedManifestInstall("r".into()).is_privileged());
+        assert!(Request::ConfirmedManifestRemove("r".into()).is_privileged());
+        assert_eq!(authorize(root, &Request::ConfirmedManifestInstall("r".into()), desktop), Decision::Allow);
+        assert!(matches!(authorize(desktop, &Request::ConfirmedManifestInstall("r".into()), desktop), Decision::Deny(_)));
+        assert!(matches!(authorize(desktop, &Request::ConfirmedManifestRemove("r".into()), desktop), Decision::Deny(_)));
+    }
+
+    #[test]
+    fn want_refuses_a_non_catalog_token() {
+        // With no catalog present (unit env: the sealed `/usr` dir is absent ⇒ empty catalog), a `want`
+        // for any token is refused as unknown-capability — uid 1000 can only ever surface a root-vetted
+        // name. The accept path is exercised end-to-end in the oracle (with a real catalog).
+        let (store, run) = sup_dirs("want");
+        let mut sup = Supervisor::new(store, run, 1000);
+        let desktop = uapi::Ucred { pid: 1, uid: 1000, gid: 1000 };
+        let r = sup.handle(&desktop, "want weather", &mut OkExec, &mut NoopResolver, Instant::now(), 5);
+        assert_eq!(r, "ERR unknown-capability");
+    }
+
+    #[test]
+    fn manifest_install_is_root_only_and_errs_without_a_staged_candidate() {
+        let (store, run) = sup_dirs("manifest");
+        let mut sup = Supervisor::new(store, run, 1000);
+        let root = uapi::Ucred { pid: 2, uid: 0, gid: 0 };
+        let desktop = uapi::Ucred { pid: 3, uid: 1000, gid: 1000 };
+        // uid-1000 is refused at the boundary (the socket is not a ceremony bypass).
+        let denied = sup.handle(&desktop, "confirmed-manifest-install radar", &mut OkExec, &mut NoopResolver, Instant::now(), 7);
+        assert!(denied.starts_with("ERR denied"), "{denied}");
+        // root, but nothing staged ⇒ a clean ERR (no candidate to commit; no fs write).
+        let r = sup.handle(&root, "confirmed-manifest-install radar-absent-xyzzy", &mut OkExec, &mut NoopResolver, Instant::now(), 9);
+        assert_eq!(r, "ERR no-staged-candidate");
     }
 
     // ---- rate limiter: rejected attempts count ----

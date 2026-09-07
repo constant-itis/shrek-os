@@ -19,18 +19,22 @@ delete table inet shrek_desktop_egress
 table inet shrek_desktop_egress {
 	# Named sets the S2 supervisor populates by ELEMENT. `ntp_pinned` is pre-populated with desktop-ntp's
 	# SEALED LITERAL IPs [R2-MF-C] — Cloudflare anycast, known at bake time, NEVER resolved (the clock
-	# bootstrap that lets the later sealed-DoT re-pin of weather succeed). `updates_pinned`/`weather_pinned`
-	# start EMPTY: an empty set matches nothing = inert = fail-closed, NOT accept-all.
+	# bootstrap that lets the later sealed-DoT re-pin of weather succeed). `updates_pinned` starts EMPTY:
+	# an empty set matches nothing = inert = fail-closed, NOT accept-all.
 	set ntp_pinned     { type ipv4_addr; elements = { 162.159.200.1, 162.159.200.123 } }
 	set updates_pinned { type ipv4_addr; }
-	set weather_pinned { type ipv4_addr; }
 
-	# ADR-007 S4 — the ADVANCED raw-destination tier. A CONCATENATED set (ipv4_addr . inet_proto .
-	# inet_service) so ONE set encodes per-element (ip, proto, port) with ZERO runtime rules — the
-	# element-only invariant [R2-MF-B] holds for raw exactly as for the pinned profiles. Starts EMPTY
-	# (inert = fail-closed). Only the root supervisor / confirmed-* verb adds elements, and ONLY for a
-	# host:proto:port the user ceremony-blessed at the console (each resolve-and-pinned over sealed DoT).
-	set raw_pinned { type ipv4_addr . inet_proto . inet_service; }
+	# ADR-009 §4.5 — THE generalized capability-pin set. ONE CONCATENATED set (ipv4_addr . inet_proto .
+	# inet_service) + ONE baked rule serves EVERY catalog capability (weather + any future data-driven
+	# capability) AND the advanced raw-destination tier — so ONE set encodes per-element (ip, proto,
+	# port) with ZERO per-capability runtime rules; the element-only invariant [R2-MF-B] holds for all of
+	# them. This GENERALIZES the ADR-007 S4 `@raw_pinned` concat set (renamed here) and RETIRES the plain-
+	# ipv4 `@weather_pinned` set — weather is now just tuples in this union. Starts EMPTY (inert = fail-
+	# closed). Only the root supervisor adds elements, and the supervisor reconciles the whole set to the
+	# UNION across all grants (never per-entry deletes), so two capabilities sharing a host can't tear
+	# each other's element down. After this ONE image bake, unlimited future capabilities need ZERO nft
+	# changes (ADR-009 §4.5).
+	set cap_pinned { type ipv4_addr . inet_proto . inet_service; }
 
 	chain output {
 		type filter hook output priority 0; policy accept;
@@ -44,15 +48,13 @@ table inet shrek_desktop_egress {
 		# loopback for the session — family-agnostic, covers 127/8 AND ::1 (the stub is already dropped above).
 		meta skuid 1000 oif "lo" accept
 
-		# blessed weather — INERT until the supervisor adds an element to @weather_pinned on bless. IPv4-only
-		# pinning (agent-plane parity); the widget reaches the pinned v4 IP via the /run/shrek/egress map.
-		meta skuid 1000 ip daddr @weather_pinned tcp dport 443 accept
-
-		# blessed RAW destinations (S4) — INERT until the supervisor adds a (ip . proto . port) element to
-		# @raw_pinned on a CONSOLE-CEREMONY raw add. The concat match carries per-element proto+port, so a
-		# raw entry opens EXACTLY its ceremony-blessed host:proto:port, nothing wider. `th dport` needs a
+		# blessed CAPABILITY + RAW destinations (ADR-009 §4.5) — INERT until the supervisor adds a
+		# (ip . proto . port) element to @cap_pinned. ONE rule serves every granted catalog capability
+		# (weather's pins land as `<ip> . tcp . 443` tuples here — no dedicated weather rule anymore) AND
+		# every ceremony-blessed raw host:proto:port. The concat match carries per-element proto+port, so
+		# each element opens EXACTLY its resolved-and-pinned destination, nothing wider. `th dport` needs a
 		# transport header, which is why the grammar restricts proto to tcp|udp.
-		meta skuid 1000 ip daddr . meta l4proto . th dport @raw_pinned accept
+		meta skuid 1000 ip daddr . meta l4proto . th dport @cap_pinned accept
 
 		# default-deny for the desktop session — everything else uid 1000 tries is dropped, v4 AND v6
 		# (the skuid-1000 match is family-agnostic, so a v6 escape is caught here too [R1-MF4]).

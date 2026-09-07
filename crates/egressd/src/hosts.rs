@@ -22,7 +22,7 @@
 //! whatever bindings are readable — store absence/unreadability can NEVER block localhost (`[R2-MF1]`,
 //! the first-boot ordering guarantee: `tmpfiles` runs after this oneshot on a virgin disk).
 
-use shrek_policy::desktop_egress::is_blessable_desktop_host;
+use shrek_policy::egress_capability::{is_sealed_deliverable_host, Catalog};
 use shrek_policy::provider_bind::{provider_host, valid_bind_addr, PROVIDER_BINDINGS};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -271,12 +271,13 @@ fn egress_pinned_file(run: &Path) -> PathBuf {
 
 /// ADR-009: the blessed user-egress pins to lift into `/etc/hosts` so the uid-1000 DMS Go backend
 /// resolves them via NSS `files` (never the dropped 127.0.0.53 DNS), TLS-name intact. Defensively read
-/// the root-owned `{run}/egress/pinned` (already sealed-host-filtered by the egress side) and keep only
-/// lines whose name is a USER-BLESSED sealed desktop-egress host (defense-in-depth re-validation via
-/// shrek-policy — baseline profiles are deliberately excluded) and whose addr is a strict IPv4 literal.
-/// A missing/hostile/garbage projection ⇒ empty, so compose falls back to baseline + provider bindings
-/// exactly as before (`[R2MF1]`). First occurrence of a name wins, mirroring [`read_bindings`].
-fn read_egress_pins(run: &Path) -> Vec<(String, Ipv4Addr)> {
+/// the root-owned `{run}/egress/pinned` and keep only lines whose name is a SEALED-SOURCE, non-baseline,
+/// `deliver hosts` catalog capability host ([`is_sealed_deliverable_host`], §4.4 layer 1 — the STRUCTURAL
+/// owner-pin↔root-resolution isolation: an OWNER-manifest pin can NEVER enter the file root reads, by
+/// construction) and whose addr is a strict IPv4 literal. A missing/hostile/garbage projection ⇒ empty,
+/// so compose falls back to baseline + provider bindings exactly as before (`[R2MF1]`). First occurrence
+/// of a name wins, mirroring [`read_bindings`].
+fn read_egress_pins(run: &Path, catalog: &Catalog) -> Vec<(String, Ipv4Addr)> {
     let Some(body) = defensive_read(&egress_pinned_file(run)) else {
         return Vec::new();
     };
@@ -286,8 +287,8 @@ fn read_egress_pins(run: &Path) -> Vec<(String, Ipv4Addr)> {
         let (Some(name), Some(addr_s), None) = (it.next(), it.next(), it.next()) else {
             continue; // not exactly `<name> <ipv4>` ⇒ skip
         };
-        if !is_blessable_desktop_host(name) {
-            continue; // not a sealed user-blessed profile host ⇒ never lift into name resolution
+        if !is_sealed_deliverable_host(catalog, name) {
+            continue; // not a SEALED-source deliverable host ⇒ never lift (owner pins excluded, §4.4)
         }
         let Some(addr) = valid_bind_addr(addr_s) else {
             continue; // not a strict IPv4 literal ⇒ skip
@@ -303,10 +304,13 @@ fn read_egress_pins(run: &Path) -> Vec<(String, Ipv4Addr)> {
 // ---- compose ------------------------------------------------------------------------------------
 
 /// Compose `/run/shrek/hosts` from the sealed baseline + every readable provider binding + the ADR-009
-/// blessed-egress pins, and install it atomically (`root:root 0644` in a `0755` run dir). UNCONDITIONAL
-/// `[R2MF1]`: migration is best-effort and can never block this; an empty/absent/hostile store just yields
-/// the baseline, so localhost always resolves. Returns the projection path. Caller holds [`lock_hosts`].
-pub fn compose_hosts(home: &Path, run: &Path) -> io::Result<PathBuf> {
+/// blessed-egress pins (SEALED-SOURCE deliverable hosts only, per `catalog`; §4.4), and install it
+/// atomically (`root:root 0644` in a `0755` run dir). UNCONDITIONAL `[R2MF1]`: migration is best-effort
+/// and can never block this; an empty/absent/hostile store just yields the baseline, so localhost always
+/// resolves. `catalog` is the merged sealed+owner catalog ([`crate::catalog::load_catalog`]); an empty
+/// catalog lifts NO egress pin (fail-closed — a variant with no manifests composes baseline+bindings
+/// only). Returns the projection path. Caller holds [`lock_hosts`].
+pub fn compose_hosts(home: &Path, run: &Path, catalog: &Catalog) -> io::Result<PathBuf> {
     // Migration is best-effort and MUST NOT block the projection.
     let _ = migrate_legacy(home);
 
@@ -322,7 +326,7 @@ pub fn compose_hosts(home: &Path, run: &Path) -> io::Result<PathBuf> {
     // name resolution. The nft table still INDEPENDENTLY gates the packet — a name here is resolvable
     // but only reachable if its IP is pinned in the matching `@<profile>_pinned` set, so this removes
     // the DNS-drop deadlock without granting any egress. Sorted for a deterministic projection.
-    let mut pins = read_egress_pins(run);
+    let mut pins = read_egress_pins(run, catalog);
     pins.sort();
     for (name, addr) in pins {
         body.push_str(&format!("{addr} {name}\n"));
@@ -382,7 +386,7 @@ mod tests {
         let stored = fs::read_to_string(bindings_file(&home)).unwrap();
         assert_eq!(stored, "local 192.168.1.152\n");
         // projection maps token → sealed host name, with the baseline first.
-        let p = compose_hosts(&home, &run).unwrap();
+        let p = compose_hosts(&home, &run, &Catalog::default()).unwrap();
         let proj = fs::read_to_string(&p).unwrap();
         assert!(proj.starts_with(HOSTS_BASELINE), "baseline must lead: {proj}");
         assert!(proj.contains("192.168.1.152 shrek-model\n"), "{proj}");
@@ -398,7 +402,7 @@ mod tests {
         write_binding(&home, "anthropic", "10.0.0.2").unwrap();
         write_binding(&home, "claude", "10.0.0.3").unwrap();
         write_binding(&home, "codex", "10.0.0.4").unwrap();
-        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        let proj = fs::read_to_string(compose_hosts(&home, &run, &Catalog::default()).unwrap()).unwrap();
         assert!(proj.contains("10.0.0.1 shrek-model\n"));
         assert!(proj.contains("10.0.0.2 shrek-model-proxy\n"));
         assert!(proj.contains("10.0.0.3 shrek-claude-cli\n"));
@@ -414,32 +418,54 @@ mod tests {
         fs::write(egdir.join("pinned"), body).unwrap();
     }
 
+    /// The catalog as the running box would load it — the sealed `weather` capability (deliver hosts).
+    fn weather_catalog() -> Catalog {
+        use shrek_policy::egress_capability::{build_catalog, parse_manifest, WEATHER_MANIFEST};
+        build_catalog(vec![parse_manifest(WEATHER_MANIFEST).unwrap()], vec![])
+    }
+
+    /// An OWNER capability whose host, even with `deliver hosts` attempted + a live pin, must NEVER be
+    /// lifted into `/etc/hosts` (§4.4 layer 1 STRUCTURAL isolation — owner source is never deliverable).
+    fn catalog_with_owner_deliverable() -> Catalog {
+        use shrek_policy::egress_capability::{build_catalog, parse_manifest, WEATHER_MANIFEST};
+        let owner = parse_manifest(
+            "schema shrek-egress-capability/1\n\
+             name radar\ntitle Radar\npurpose P\nfeature owner:radar\n\
+             tier one-click\ndeliver hosts\nhost radar.example.com tcp 443\n",
+        )
+        .unwrap();
+        build_catalog(vec![parse_manifest(WEATHER_MANIFEST).unwrap()], vec![owner])
+    }
+
     #[test]
     fn adr009_lifts_blessed_weather_pins_into_the_projection() {
         let home = tmp();
         let run = tmp();
         seed_egress_pinned(&run, "api.open-meteo.com 5.6.7.8\ngeocoding-api.open-meteo.com 5.6.7.9\n");
-        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        let proj = fs::read_to_string(compose_hosts(&home, &run, &weather_catalog()).unwrap()).unwrap();
         assert!(proj.starts_with(HOSTS_BASELINE), "baseline must lead: {proj}");
         assert!(proj.contains("5.6.7.8 api.open-meteo.com\n"), "forecast host lifted: {proj}");
         assert!(proj.contains("5.6.7.9 geocoding-api.open-meteo.com\n"), "geocoding host lifted: {proj}");
     }
 
     #[test]
-    fn adr009_never_lifts_an_off_profile_or_baseline_host() {
+    fn adr009_never_lifts_off_profile_baseline_or_owner_host() {
         let home = tmp();
         let run = tmp();
-        // Even though the projection is root-owned, re-validate defensively: a foreign name (poisoned or
-        // legacy) and a BASELINE host (desktop-updates) must NOT enter host-wide name resolution.
+        // Re-validate defensively against the CATALOG: a foreign name (poisoned/legacy), a BASELINE host
+        // (desktop-updates), AND an OWNER capability's host (even one declaring `deliver hosts`) must NEVER
+        // enter host-wide name resolution — only the SEALED weather hosts are lifted (§4.4).
         seed_egress_pinned(
             &run,
-            "api.open-meteo.com 5.6.7.8\nevil.example.com 6.6.6.6\nshrekos-updates.iambu.dev 9.9.9.9\n",
+            "api.open-meteo.com 5.6.7.8\nevil.example.com 6.6.6.6\nshrekos-updates.iambu.dev 9.9.9.9\nradar.example.com 7.7.7.7\n",
         );
-        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        let proj = fs::read_to_string(compose_hosts(&home, &run, &catalog_with_owner_deliverable()).unwrap()).unwrap();
         assert!(proj.contains("5.6.7.8 api.open-meteo.com\n"), "sealed weather host lifted: {proj}");
-        assert!(!proj.contains("6.6.6.6"), "off-profile host must NOT be lifted: {proj}");
-        assert!(!proj.contains("evil.example.com"), "off-profile host must NOT be lifted: {proj}");
+        assert!(!proj.contains("6.6.6.6"), "off-catalog host must NOT be lifted: {proj}");
+        assert!(!proj.contains("evil.example.com"), "off-catalog host must NOT be lifted: {proj}");
         assert!(!proj.contains("shrekos-updates.iambu.dev"), "baseline host must NOT be lifted: {proj}");
+        assert!(!proj.contains("7.7.7.7"), "OWNER pin must NOT be lifted (§4.4 structural): {proj}");
+        assert!(!proj.contains("radar.example.com"), "OWNER host must NOT be lifted (§4.4 structural): {proj}");
     }
 
     #[test]
@@ -448,7 +474,7 @@ mod tests {
         let run = tmp();
         write_binding(&home, "local", "10.0.0.1").unwrap();
         // no {run}/egress/pinned exists at all
-        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        let proj = fs::read_to_string(compose_hosts(&home, &run, &weather_catalog()).unwrap()).unwrap();
         assert!(proj.starts_with(HOSTS_BASELINE));
         assert!(proj.contains("10.0.0.1 shrek-model\n"));
         assert!(!proj.contains("open-meteo"), "no egress pins ⇒ none lifted: {proj}");
@@ -498,7 +524,7 @@ mod tests {
         let home = tmp();
         let run = tmp();
         // No bindings file at all (fresh box) — projection is still installed with localhost [R2MF1].
-        let p = compose_hosts(&home, &run).unwrap();
+        let p = compose_hosts(&home, &run, &Catalog::default()).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), HOSTS_BASELINE);
     }
 
@@ -511,7 +537,7 @@ mod tests {
         let secret = tmp().join("secret");
         fs::write(&secret, "codex 6.6.6.6\n").unwrap();
         std::os::unix::fs::symlink(&secret, bindings_file(&home)).unwrap();
-        let p = compose_hosts(&home, &run).unwrap();
+        let p = compose_hosts(&home, &run, &Catalog::default()).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), HOSTS_BASELINE, "symlinked store must be ignored");
         // the secret was not followed for a bind either.
         assert!(write_binding(&home, "local", "1.2.3.4").is_ok());
@@ -539,7 +565,7 @@ mod tests {
              6.6.6.6 shrek-swamp-broker\n",
         )
         .unwrap();
-        let p = compose_hosts(&home, &run).unwrap();
+        let p = compose_hosts(&home, &run, &Catalog::default()).unwrap();
         let proj = fs::read_to_string(&p).unwrap();
         // The 4 model bindings migrated (first `shrek-model` = 192.168.1.10, NOT 7.7.7.7).
         assert!(proj.contains("192.168.1.10 shrek-model\n"), "{proj}");
@@ -568,7 +594,7 @@ mod tests {
         fs::create_dir_all(legacy_hosts_file(&home)).unwrap(); // legacy path IS a directory
         assert!(defensive_read(&legacy_hosts_file(&home)).is_none());
         // compose still succeeds with the baseline (migration's best-effort failure never blocks it).
-        let p = compose_hosts(&home, &run).unwrap();
+        let p = compose_hosts(&home, &run, &Catalog::default()).unwrap();
         assert_eq!(fs::read_to_string(&p).unwrap(), HOSTS_BASELINE);
         // a planted directory at the STORE path is likewise ignored on read (bindings come back empty).
         let home2 = tmp();

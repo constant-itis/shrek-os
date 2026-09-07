@@ -47,9 +47,10 @@ pub fn ask(args: &[String]) -> i32 {
     let verb = match args.first() {
         Some(v) => v.as_str(),
         None => {
-            eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin|browser-up> [profile]");
+            eprintln!("egressd ask: usage: egressd ask <status|bless|unbless|repin|browser-up|want> [token]");
             eprintln!("             egressd ask bind <provider> <ipv4>   |   egressd ask unbind <provider>");
             eprintln!("             (ROOT only) egressd ask confirmed-<bless|unbless|add-raw|remove-raw> <arg>");
+            eprintln!("             (ROOT only) egressd ask confirmed-manifest-<install|remove> <capability-name>");
             return 2;
         }
     };
@@ -175,6 +176,33 @@ fn build_line(verb: &str, a: Option<&str>, b: Option<&str>) -> Result<String, St
             }
             Ok(line)
         }
+        // ADR-009 uid-1000 capability request: a single CLOSED catalog token (the daemon refuses a token
+        // that names no capability). Discoverability with zero authority.
+        "want" => {
+            let p = profile.ok_or("`want` needs a capability token (e.g. `egressd ask want weather`)")?;
+            if !valid_client_token(p) {
+                return Err(format!("invalid capability token {p:?} (alnum . _ - only, ≤64 chars)"));
+            }
+            let line = format!("want {p}\n");
+            if line.len() > LINE_MAX {
+                return Err("request too large".into());
+            }
+            Ok(line)
+        }
+        // ADR-009 ROOT-only owner-manifest ceremony relay (gatekeeperd post-ceremony). Carries only the
+        // capability NAME token; gatekeeperd staged the confirmed bytes to the staging dir first. The
+        // daemon re-parses + §4.4-validates the staged candidate and authorizes on the ROOT peer uid.
+        "confirmed-manifest-install" | "confirmed-manifest-remove" => {
+            let p = profile.ok_or_else(|| format!("`{verb}` needs a capability name"))?;
+            if !valid_client_token(p) {
+                return Err(format!("invalid capability name {p:?} (alnum . _ - only, ≤64 chars)"));
+            }
+            let line = format!("{verb} {p}\n");
+            if line.len() > LINE_MAX {
+                return Err("request too large".into());
+            }
+            Ok(line)
+        }
         // ROOT-only ceremony-commit relay (gatekeeperd post-ceremony, or the S6 probe's setup). The daemon
         // authorizes on the ROOT peer uid; a uid-1000 process sending these is refused server-side. The
         // profile variants carry a token; the raw variants carry a `host:proto:port`, validated +
@@ -201,7 +229,7 @@ fn build_line(verb: &str, a: Option<&str>, b: Option<&str>) -> Result<String, St
             Ok(line)
         }
         other => Err(format!(
-            "unknown verb `{other}` (want status|bless|unbless|repin|browser-up|confirmed-*)"
+            "unknown verb `{other}` (want status|bless|unbless|repin|browser-up|want|confirmed-*)"
         )),
     }
 }
@@ -267,6 +295,26 @@ mod tests {
         assert!(build_line("confirmed-add-raw", Some("e.com:icmp:0"), None).is_err());
         assert!(build_line("confirmed-add-raw", None, None).is_err());
         assert!(build_line("confirmed-bless", None, None).is_err());
+    }
+
+    #[test]
+    fn build_line_encodes_want_and_manifest_verbs() {
+        // uid-1000 capability request: a single token.
+        assert_eq!(build_line("want", Some("weather"), None).unwrap(), "want weather\n");
+        assert!(build_line("want", None, None).is_err()); // needs a token
+        assert!(build_line("want", Some("../escape"), None).is_err()); // traversal
+        assert!(build_line("want", Some("weather"), Some("extra")).is_err()); // stray 2nd arg
+        // ROOT-only owner-manifest relay: a single capability NAME token.
+        assert_eq!(
+            build_line("confirmed-manifest-install", Some("radar"), None).unwrap(),
+            "confirmed-manifest-install radar\n"
+        );
+        assert_eq!(
+            build_line("confirmed-manifest-remove", Some("radar"), None).unwrap(),
+            "confirmed-manifest-remove radar\n"
+        );
+        assert!(build_line("confirmed-manifest-install", None, None).is_err());
+        assert!(build_line("confirmed-manifest-install", Some("bad name"), None).is_err());
     }
 
     #[test]

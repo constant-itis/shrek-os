@@ -127,13 +127,19 @@ fn apply_cli(args: &[String]) -> i32 {
         }
     };
 
-    // unbless: reconcile to empty
+    // Catalog for the state projection (source/feature card tokens + owner-capability lines).
+    let catalog = egressd::catalog::load_catalog();
+
+    // unbless: reconcile @cap_pinned to the union EXCLUDING this profile (nft-only; the durable records
+    // are untouched — `store unbless`/`store unpin` remove those). Mirrors the daemon's teardown-first
+    // order (ADR-009 §4.5).
     if opts.single.contains_key("unbless") {
-        return match apply::unapply(&store, &mut exec, &profile) {
-            Ok(()) => {
+        let desired = egressd::confirmed::desired_cap_union(&store, Some(&profile));
+        return match apply::apply_cap(&mut exec, &desired) {
+            Ok(_) => {
                 let _ = store::project_pinned(&store, &run);
-                let _ = store::project_state(&store, &run);
-                println!("egressd: unblessed+unpinned {profile}");
+                let _ = store::project_state(&store, &run, &catalog);
+                println!("egressd: withdrew {profile} from @cap_pinned");
                 0
             }
             Err(e) => {
@@ -143,31 +149,19 @@ fn apply_cli(args: &[String]) -> i32 {
         };
     }
 
-    // desired addrs come from the stored pin record (S2c will populate it via sealed DoT; here the
-    // oracle/tests seed it with `store pin`).
-    let desired: Vec<std::net::Ipv4Addr> = match store::load_pin(&store, &profile) {
-        Some(rec) => rec.pins.iter().map(|p| p.addr).collect(),
-        None => Vec::new(),
-    };
-
-    match apply::apply_pins(&store, &mut exec, &profile, &desired) {
-        Ok(addrs) => {
+    // Reconcile the WHOLE @cap_pinned union from stored state (this profile's pins fold in with every
+    // other grant's; ADR-009 §4.5). The oracle seeds the store with `store bless` + `store pin` first.
+    match egressd::confirmed::reconcile_cap(&store, &mut exec) {
+        Ok(present) => {
             let _ = store::clear_fault(&store, &profile);
             let _ = store::project_pinned(&store, &run);
-            let _ = store::project_state(&store, &run);
-            println!("egressd: applied {profile} -> {} element(s)", addrs.len());
+            let _ = store::project_state(&store, &run, &catalog);
+            println!("egressd: applied @cap_pinned union -> {} element(s)", present.len());
             0
-        }
-        Err(ApplyError::Unmanaged(p)) => {
-            // unknown/broad/baseline/pre-pinned: park a fault, install NO element (fail-closed).
-            let _ = store::write_fault(&store, &p, FaultKind::UnknownProfile, "not a pinnable set-managed profile", at);
-            let _ = store::project_state(&store, &run);
-            eprintln!("egressd apply: {p} is not pinnable — parked unknown-profile fault, no element written");
-            1
         }
         Err(ApplyError::Nft(msg)) => {
             let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
-            let _ = store::project_state(&store, &run);
+            let _ = store::project_state(&store, &run, &catalog);
             eprintln!("egressd apply: nft failure (rolled back, deny skeleton stands): {msg}");
             1
         }
@@ -206,7 +200,10 @@ fn compose_hosts_cli() -> i32 {
     let home = egressd::hosts::hosts_home_dir();
     let run = egressd::hosts::hosts_run_dir();
     let _lock = egressd::hosts::lock_hosts(&home).ok();
-    match egressd::hosts::compose_hosts(&home, &run) {
+    // ADR-009: the sealed-source delivery filter needs the catalog (a variant with no manifests composes
+    // baseline + provider-bindings only, fail-closed).
+    let catalog = egressd::catalog::load_catalog();
+    match egressd::hosts::compose_hosts(&home, &run, &catalog) {
         Ok(p) => {
             println!("egressd: composed hosts -> {}", p.display());
             0
@@ -263,13 +260,14 @@ fn resolve_cli(args: &[String]) -> i32 {
             return 2;
         }
     };
+    let catalog = egressd::catalog::load_catalog();
     // Fixed query id (see dot:: docs — over authenticated single-query TLS the transport is the
     // security, not the id). Timeout kept short so a hung resolver fails closed to the next / to fault.
     let pins = match dot::resolve_profile_pins(&profile, 0x7e57, Duration::from_secs(5)) {
         Ok(p) => p,
         Err(e) => {
             let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &e.to_string(), at);
-            let _ = store::project_state(&store, &run);
+            let _ = store::project_state(&store, &run, &catalog);
             eprintln!("egressd resolve: {e} — parked resolve-fail fault, no pin written");
             return 1;
         }
@@ -279,12 +277,12 @@ fn resolve_cli(args: &[String]) -> i32 {
         // write_pin re-validates every name against the sealed profile; a rejection here is a seal/bug
         // fault, not a steer. Fail-closed.
         let _ = store::write_fault(&store, &profile, FaultKind::ResolveFail, &format!("store: {e}"), at);
-        let _ = store::project_state(&store, &run);
+        let _ = store::project_state(&store, &run, &catalog);
         eprintln!("egressd resolve: store pin rejected: {e}");
         return 1;
     }
     let _ = store::clear_fault(&store, &profile);
-    let _ = store::project_state(&store, &run);
+    let _ = store::project_state(&store, &run, &catalog);
     println!("egressd: resolved {profile} -> {} IP(s) over sealed DoT", pins.len());
     for p in &pins {
         println!("  {} {}", p.name, p.addr);
@@ -292,18 +290,18 @@ fn resolve_cli(args: &[String]) -> i32 {
 
     if opts.single.contains_key("apply") {
         let mut exec = ShellNft;
-        let desired: Vec<std::net::Ipv4Addr> = pins.iter().map(|p| p.addr).collect();
-        return match apply::apply_pins(&store, &mut exec, &profile, &desired) {
-            Ok(a) => {
+        // Fold the just-written pins into the @cap_pinned union (ADR-009 §4.5) — not a per-profile set.
+        return match egressd::confirmed::reconcile_cap(&store, &mut exec) {
+            Ok(present) => {
                 let _ = store::project_pinned(&store, &run);
-                let _ = store::project_state(&store, &run);
-                println!("egressd: applied {profile} -> {} element(s)", a.len());
+                let _ = store::project_state(&store, &run, &catalog);
+                println!("egressd: applied @cap_pinned union -> {} element(s)", present.len());
                 0
             }
             Err(e) => {
                 let msg = format!("{e:?}");
                 let _ = store::write_fault(&store, &profile, FaultKind::ApplyFail, &msg, at);
-                let _ = store::project_state(&store, &run);
+                let _ = store::project_state(&store, &run, &catalog);
                 eprintln!("egressd resolve --apply: {msg}");
                 1
             }
@@ -421,8 +419,9 @@ fn store_cli(args: &[String]) -> i32 {
             Ok(0)
         }
         "project" => {
+            let catalog = egressd::catalog::load_catalog();
             let p = store::project_pinned(&store, &run).map_err(|e| e.to_string())?;
-            let s = store::project_state(&store, &run).map_err(|e| e.to_string())?;
+            let s = store::project_state(&store, &run, &catalog).map_err(|e| e.to_string())?;
             println!("egressd: projected pinned map -> {}", p.display());
             println!("egressd: projected state view -> {}", s.display());
             Ok(0)

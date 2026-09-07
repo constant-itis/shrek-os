@@ -1,0 +1,9 @@
+schema shrek-egress-capability/1
+name weather
+title Weather
+purpose Local forecast and location search
+feature dms:weather
+tier one-click
+deliver hosts
+host api.open-meteo.com tcp 443
+host geocoding-api.open-meteo.com tcp 443

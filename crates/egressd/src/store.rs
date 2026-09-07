@@ -26,6 +26,7 @@ use shrek_policy::desktop_egress::{
     bless_tier, is_broad_profile, is_prepinned_profile, parse_raw_triple, resolve_desktop, RawTriple,
     DESKTOP_EGRESS_PROFILES,
 };
+use shrek_policy::egress_capability::{Catalog, Source};
 use std::fs;
 use std::io::{self, Write};
 use std::net::Ipv4Addr;
@@ -674,20 +675,42 @@ pub fn project_pinned(store: &Path, run: &Path) -> io::Result<PathBuf> {
 ///
 /// Line format (schema `shrek-egress-state/1`):
 /// ```text
-/// profile <name> tier=<baseline|one-click|ceremony> blessed=<0|1> pins=<ip,ip,…|-> refreshed=<unix|-> fault=<kind|->
+/// profile <name> tier=<baseline|one-click|ceremony> blessed=<0|1> pins=<ip,ip,…|-> refreshed=<unix|-> fault=<kind|-> [source=<sealed|owner> feature=<token>]
+/// title <name> <root-authored title>          (rest-of-line; per catalog capability)
+/// purpose <name> <root-authored purpose>      (rest-of-line; per catalog capability)
+/// capfault <name> source=<sealed|owner> <reason>   (rest-of-line; per faulted catalog entry)
 /// ```
-/// Deliberately projected: only the CLOSED tier + fault-KIND tokens, never the free-text fault reason
-/// (that stays in the journal + `0700` store) — a closed set crossing a parse boundary, fail-closed for
-/// the QML reader `[Fable S3 fix #1/#4]`. A pre-pinned baseline (`desktop-ntp`) surfaces its sealed
-/// LITERAL IPs from policy (they are baked verbatim, never resolved into the store); everything else
-/// surfaces its stored pins. `blessed=1` with `pins=-`/`fault=resolve-fail` is the legible "blessed,
-/// waiting for network/clock" state that intent-first bless + boot reconcile converge.
-pub fn project_state(store: &Path, run: &Path) -> io::Result<PathBuf> {
+/// Deliberately projected: only the CLOSED tier/fault-KIND/source/feature tokens on the `profile` line,
+/// never the free-text fault reason (that stays in the journal + `0700` store) — a closed set crossing a
+/// parse boundary, fail-closed for the QML reader `[Fable S3 fix #1/#4]`. The ADR-009 additions
+/// (`source`/`feature` + the `title`/`purpose`/`capfault` lines) carry the ROOT-AUTHORED capability card
+/// text — trustworthy for the panel to render (§4.3) and unreachable to uid 1000 for an OWNER manifest
+/// (its `/home` dir is `0700`, so /run is the only delivery). Free text rides its own rest-of-line record
+/// so a space in a title/purpose can never desync the space-delimited `profile` parse. A pre-pinned
+/// baseline (`desktop-ntp`) surfaces its sealed LITERAL IPs from policy (baked verbatim, never resolved);
+/// everything else surfaces its stored pins. `blessed=1` with `pins=-`/`fault=resolve-fail` is the legible
+/// "blessed, waiting for network/clock" state that intent-first bless + boot reconcile converge.
+///
+/// `catalog` is the merged sealed+owner catalog (`crate::catalog::load_catalog`); a compiled profile that
+/// is ALSO a catalog capability (`weather`) gets its `source`/`feature` + card text; an OWNER capability
+/// not in the compiled table gets a display-only line (blessed=0/pins=- — not one-click-blessable over the
+/// socket in S2); a FAULTED owner entry (sealed-name collision) surfaces a legible `capfault` line. Pass
+/// an empty [`Catalog`] to project the compiled-only view (no capability annotations).
+pub fn project_state(store: &Path, run: &Path, catalog: &Catalog) -> io::Result<PathBuf> {
     fs::create_dir_all(run)?;
     let _ = fs::set_permissions(run, fs::Permissions::from_mode(0o755));
     let _ = chown(run, Some(0), Some(0));
 
+    let src_token = |s: Source| match s {
+        Source::Sealed => "sealed",
+        Source::Owner => "owner",
+    };
+
     let mut body = String::from("schema shrek-egress-state/1\n");
+    // Card text (title/purpose/capfault) rides its own rest-of-line records, appended after the profile
+    // block so a free-text value can never desync the space-delimited `profile` parse.
+    let mut cardtext: Vec<String> = Vec::new();
+
     for prof in DESKTOP_EGRESS_PROFILES {
         let name = prof.name;
         // tier is sealed policy (never None here — we iterate the sealed table).
@@ -715,9 +738,48 @@ pub fn project_state(store: &Path, run: &Path) -> io::Result<PathBuf> {
         let refreshed_str = refreshed.map(|t| t.to_string()).unwrap_or_else(|| "-".to_string());
         let fault_str = load_fault(store, name).map(|f| f.kind.as_str()).unwrap_or("-");
 
+        let mut line = format!(
+            "profile {name} tier={tier} blessed={blessed} pins={pins_str} refreshed={refreshed_str} fault={fault_str}"
+        );
+        // ADR-009: a compiled profile that is ALSO a catalog capability (weather) gains the root-authored
+        // source + feature (closed tokens); its title/purpose ride their own lines below.
+        if let Some(e) = catalog.get(name) {
+            line.push_str(&format!(" source={} feature={}", src_token(e.source), e.manifest.feature));
+            cardtext.push(format!("title {name} {}", e.manifest.title));
+            cardtext.push(format!("purpose {name} {}", e.manifest.purpose));
+        }
+        body.push_str(&line);
+        body.push('\n');
+    }
+
+    // ADR-009: catalog capabilities that are NOT a compiled profile (owner-installed capabilities). In S2
+    // these are display-only — not one-click-blessable over the socket yet (that lands with the panel /
+    // ceremony slices) — so blessed=0/pins=- always; source/feature are the root-authored card tokens.
+    for e in &catalog.entries {
+        let name = e.manifest.name.as_str();
+        if resolve_desktop(name).is_some() {
+            continue; // already emitted by the compiled loop above (weather)
+        }
         body.push_str(&format!(
-            "profile {name} tier={tier} blessed={blessed} pins={pins_str} refreshed={refreshed_str} fault={fault_str}\n"
+            "profile {name} tier={} blessed=0 pins=- refreshed=- fault=- source={} feature={}\n",
+            e.manifest.tier.as_str(),
+            src_token(e.source),
+            e.manifest.feature
         ));
+        cardtext.push(format!("title {name} {}", e.manifest.title));
+        cardtext.push(format!("purpose {name} {}", e.manifest.purpose));
+    }
+    // Faulted catalog entries (an owner name shadowing a sealed one, [R-MF3]) — a legible disabled card,
+    // never silently dropped (ADR-009 §4.3). The reason is root-generated (embeds only a valid token), so
+    // it is a safe rest-of-line value.
+    for e in &catalog.faulted {
+        let name = e.manifest.name.as_str();
+        let reason = e.fault.as_deref().unwrap_or("disabled");
+        cardtext.push(format!("capfault {name} source={} {reason}", src_token(e.source)));
+    }
+    for l in cardtext {
+        body.push_str(&l);
+        body.push('\n');
     }
 
     // Advanced raw-destination tier (S4): one `raw` line per blessed triple, from the intent file joined
@@ -749,6 +811,55 @@ pub fn project_state(store: &Path, run: &Path) -> io::Result<PathBuf> {
         body.push('\n');
     }
     atomic_write(run, "state", &body, 0o644)
+}
+
+// ---- capability request inbox (ADR-009 §6 "Pending needs"; the `want` verb, S2f) ----------------
+
+/// The world-readable capability-request inbox the Network Access panel renders (ADR-009 §2/§6). A
+/// uid-1000 process files a request via the `want` socket verb — a CLOSED catalog token, NEVER free text
+/// (§2: "a catalog token — never free text") — buying B's discoverability with zero new authority. This
+/// bounded, deduped `/run` projection is the daemon's record of it. `root:root 0644`.
+pub fn wants_map(run: &Path) -> PathBuf {
+    run.join("wants")
+}
+
+/// Max distinct pending requests kept (oldest-by-timestamp evicted). Bounds `/run` growth under a
+/// hammering uid-1000 process (the socket rate-limiter is the first line; this is the storage backstop).
+const WANTS_KEEP: usize = 20;
+
+/// Record a capability request into the bounded inbox (`want <token> <at>` lines: one per token, latest
+/// timestamp wins, sorted by token, capped at the [`WANTS_KEEP`] most-recent). `token` is a CLOSED catalog
+/// token the caller already validated against the catalog — never free text. Atomic replace, `root:root
+/// 0644` in the `0755` run dir. Idempotent per token (re-requesting refreshes its timestamp), so it
+/// naturally "ages out" as newer requests displace stale ones (§6).
+pub fn record_want(run: &Path, token: &str, at: u64) -> io::Result<PathBuf> {
+    if !valid_token(token) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "invalid want token"));
+    }
+    fs::create_dir_all(run)?;
+    let _ = fs::set_permissions(run, fs::Permissions::from_mode(0o755));
+    let _ = chown(run, Some(0), Some(0));
+    // Read existing (token -> at), drop this token (it will be re-added with the fresh `at`), keep the
+    // WANTS_KEEP most-recent by timestamp, then sort by token for a deterministic projection.
+    let mut entries: Vec<(String, u64)> = Vec::new();
+    if let Ok(body) = fs::read_to_string(wants_map(run)) {
+        for line in body.lines() {
+            let mut it = line.split_whitespace();
+            if let (Some("want"), Some(tok), Some(ts), None) = (it.next(), it.next(), it.next(), it.next()) {
+                if let Ok(t) = ts.parse::<u64>() {
+                    if valid_token(tok) && tok != token {
+                        entries.push((tok.to_string(), t));
+                    }
+                }
+            }
+        }
+    }
+    entries.push((token.to_string(), at));
+    entries.sort_by(|a, b| b.1.cmp(&a.1)); // most-recent first
+    entries.truncate(WANTS_KEEP);
+    entries.sort_by(|a, b| a.0.cmp(&b.0)); // deterministic view
+    let body: String = entries.iter().map(|(t, ts)| format!("want {t} {ts}\n")).collect();
+    atomic_write(run, "wants", &body, 0o644)
 }
 
 // ---- dir listing --------------------------------------------------------------------------------
@@ -909,7 +1020,7 @@ mod tests {
         add_raw(&d, &waiting).unwrap();
         // only `live` has a resolved cache entry.
         write_raw_pins(&d, &[RawPin { triple: live.clone(), pins: vec![Ipv4Addr::new(203, 0, 113, 7)], resolved: 77 }]).unwrap();
-        project_state(&d, &run).unwrap();
+        project_state(&d, &run, &Catalog::default()).unwrap();
         let state = std::fs::read_to_string(state_map(&run)).unwrap();
         assert!(state.contains("raw host=example.com proto=tcp port=443 blessed=1 pins=203.0.113.7 refreshed=77"), "{state}");
         assert!(state.contains("raw host=later.example.org proto=udp port=8883 blessed=1 pins=- refreshed=-"), "{state}");
@@ -1023,7 +1134,7 @@ mod tests {
             resolved: 99,
         }).unwrap();
 
-        let map = project_state(&d, &run).unwrap();
+        let map = project_state(&d, &run, &Catalog::default()).unwrap();
         let body = fs::read_to_string(&map).unwrap();
         let mut lines = body.lines();
         assert_eq!(lines.next().unwrap(), "schema shrek-egress-state/1");
@@ -1066,7 +1177,7 @@ mod tests {
         write_bless(&d, &BlessRecord { profile: "weather".into(), tier: "one-click".into(), blessed: 10 }).unwrap();
         write_fault(&d, "weather", FaultKind::ResolveFail, "resolver unreachable", 10).unwrap();
 
-        let body = fs::read_to_string(project_state(&d, &run).unwrap()).unwrap();
+        let body = fs::read_to_string(project_state(&d, &run, &Catalog::default()).unwrap()).unwrap();
         assert!(
             body.contains("profile weather tier=one-click blessed=1 pins=- refreshed=- fault=resolve-fail"),
             "pending weather line missing in:\n{body}"
@@ -1101,6 +1212,29 @@ mod tests {
         assert_eq!(load_applied(&d, "weather"), Vec::<Ipv4Addr>::new());
         clear_applied(&d, "weather").unwrap();
         assert_eq!(load_applied(&d, "weather"), Vec::<Ipv4Addr>::new());
+    }
+
+    #[test]
+    fn record_want_dedups_bounds_and_is_world_readable() {
+        let run = tmp();
+        let _ = fs::remove_dir_all(&run);
+        // file three requests; re-request the first with a newer timestamp (dedup, latest wins).
+        record_want(&run, "weather", 10).unwrap();
+        record_want(&run, "radar", 11).unwrap();
+        record_want(&run, "weather", 20).unwrap();
+        let body = fs::read_to_string(wants_map(&run)).unwrap();
+        // one line per token (deduped), sorted by token, latest timestamp for weather.
+        assert_eq!(body, "want radar 11\nwant weather 20\n", "{body}");
+        assert_eq!(fs::metadata(wants_map(&run)).unwrap().permissions().mode() & 0o777, 0o644);
+        // bounded: file WANTS_KEEP+5 distinct tokens, only the WANTS_KEEP most-recent survive.
+        for i in 0..(WANTS_KEEP + 5) {
+            record_want(&run, &format!("cap{i}"), 100 + i as u64).unwrap();
+        }
+        let body = fs::read_to_string(wants_map(&run)).unwrap();
+        assert_eq!(body.lines().count(), WANTS_KEEP, "inbox is capped");
+        // an invalid token is refused (never a path/free-text).
+        assert!(record_want(&run, "../escape", 1).is_err());
+        assert!(record_want(&run, "has space", 1).is_err());
     }
 
     #[test]

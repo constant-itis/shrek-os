@@ -17,10 +17,12 @@
 //! "blessed, waiting" and heals on the next reconcile. The functions HERE are the resolve/apply steps
 //! those handlers compose; the tier/identity gates live at the socket boundary (`authorize`).
 
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::path::Path;
 use std::time::Duration;
 
+use shrek_policy::desktop_egress::{admits_socket_bless, resolve_desktop};
 use shrek_policy::egress::Proto;
 
 use crate::apply::{self, ApplyError, NftExec};
@@ -79,17 +81,17 @@ pub fn browser_slice_exists(uid: u32) -> bool {
 
 // ---- the shared reconcile engine (used by both boot reconcile and the confirmed verbs) -----------
 
-/// Re-resolve every blessed RAW destination and reconcile `@raw_pinned` to their UNION (MF-5). Rewrites
-/// the resolved cache so the `/run` state view shows which raw entries are live vs still pending. A
-/// per-entry resolve failure keeps the OTHER entries (that entry simply stays out of the union/cache =
-/// "blessed, waiting"). Element-only + fail-closed inside [`apply::apply_raw`]. Returns (pinned, pending).
-pub fn reconcile_raw(
+/// Re-resolve every blessed RAW destination and REWRITE the resolved cache (`raw-pins`), so the `/run`
+/// state view shows which raw entries are live vs still pending. A per-entry resolve failure keeps the
+/// OTHER entries (that entry simply stays out of the cache = "blessed, waiting"). This does NO nft
+/// mutation — the caller runs [`reconcile_cap`] afterwards to fold these (with the capability pins) into
+/// the one `@cap_pinned` union. Returns (pinned, pending). (ADR-009 §4.5: raw + capabilities share one
+/// set, so resolution and the union-apply are now separate steps rather than a per-set apply here.)
+pub fn resolve_raw(
     store: &Path,
-    exec: &mut dyn NftExec,
     resolver: &mut dyn RawResolver,
     at: u64,
-) -> Result<(usize, usize), ApplyError> {
-    let mut desired: Vec<(Ipv4Addr, Proto, u16)> = Vec::new();
+) -> (usize, usize) {
     let mut cache: Vec<store::RawPin> = Vec::new();
     let mut pending = 0usize;
     for t in store::list_raw(store) {
@@ -102,19 +104,66 @@ pub fn reconcile_raw(
         };
         match resolved {
             Ok(ips) if !ips.is_empty() => {
-                for ip in &ips {
-                    desired.push((*ip, t.proto, t.port));
-                }
                 cache.push(store::RawPin { triple: t, pins: ips, resolved: at });
             }
             _ => pending += 1, // keep the intent; it heals on a later reconcile
         }
     }
-    // Reconcile the live set to the union, THEN persist the cache (so a mid-apply crash never claims a
-    // pin that isn't live).
-    let present = apply::apply_raw(exec, &desired)?;
+    let pinned = cache.len();
     let _ = store::write_raw_pins(store, &cache);
-    Ok((present.len(), pending))
+    (pinned, pending)
+}
+
+/// The desired `@cap_pinned` UNION, computed PURELY from stored state (no network). Two contributors,
+/// merged into one `(ip, proto, port)` tuple set (ADR-009 §4.5):
+///   * CAPABILITIES — every blessed one-click compiled capability (`weather` today). Its stored pins are
+///     mapped to the sealed profile's own `(proto, port)` for the matching host, so the tuple is exactly
+///     what the sealed rule authorizes (weather ⇒ `<ip> . tcp . 443`). (Owner catalog capabilities are
+///     not one-click-blessable over the socket yet — that lands with the panel/ceremony slices — so they
+///     contribute nothing here; a blessed-but-not-pinnable name simply has no stored pins.)
+///   * RAW — every entry in the resolved cache ([`resolve_raw`] populated it), as `<ip> . proto . port`.
+/// Computed as a WHOLE set (MF-5), so removing one grant can never drop another's shared tuple.
+///
+/// `exclude` drops one capability's contribution WITHOUT touching the store — the unbless path uses it to
+/// reconcile the set to "everything but this profile" and tear down its tuples BEFORE the durable record
+/// is removed, so a reconcile failure never leaves "revoked in store, still allowed in kernel". Raw pins
+/// and every other capability are unaffected.
+pub fn desired_cap_union(store: &Path, exclude: Option<&str>) -> Vec<(Ipv4Addr, Proto, u16)> {
+    let mut out: BTreeSet<(Ipv4Addr, Proto, u16)> = BTreeSet::new();
+    // Capability pins: blessed one-click compiled profiles, mapped to their sealed (proto, port).
+    for b in store::list_bless(store) {
+        if !admits_socket_bless(&b.profile) {
+            continue; // only pinnable one-click profiles carry @cap_pinned tuples
+        }
+        if exclude == Some(b.profile.as_str()) {
+            continue; // unbless: this capability's tuples are being torn down
+        }
+        let Some(prof) = resolve_desktop(&b.profile) else {
+            continue;
+        };
+        if let Some(rec) = store::load_pin(store, &b.profile) {
+            for pin in rec.pins {
+                if let Some(rule) = prof.rules.iter().find(|r| r.host == pin.name) {
+                    out.insert((pin.addr, rule.proto, rule.port));
+                }
+            }
+        }
+    }
+    // Raw pins: from the resolved cache.
+    for rp in store::list_raw_pins(store) {
+        for ip in rp.pins {
+            out.insert((ip, rp.triple.proto, rp.triple.port));
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// Reconcile the live `@cap_pinned` set to the stored-state UNION ([`desired_cap_union`]), element-only,
+/// fail-closed inside [`apply::apply_cap`] (add-rollback on any nft error). NO network — resolution
+/// (capability bless / [`resolve_raw`]) is a separate step that populates the store first. Every store
+/// mutation (bless/unbless/raw add/remove/boot reconcile) calls this to converge the one shared set.
+pub fn reconcile_cap(store: &Path, exec: &mut dyn NftExec) -> Result<Vec<(Ipv4Addr, Proto, u16)>, ApplyError> {
+    apply::apply_cap(exec, &desired_cap_union(store, None))
 }
 
 /// If `web-browsing` is blessed AND the browser slice exists AND the rules are not already present,
@@ -209,9 +258,12 @@ mod tests {
         let mut resolver = FakeRaw(answers);
         let mut exec = Exec { live: String::new(), cmds: vec![] };
 
-        let (pinned, pending) = reconcile_raw(&d, &mut exec, &mut resolver, 100).unwrap();
+        let (pinned, pending) = resolve_raw(&d, &mut resolver, 100);
         assert_eq!(pending, 1, "the offline host stays pending");
-        assert_eq!(pinned, 2, "the resolvable name + the literal are in @raw_pinned");
+        assert_eq!(pinned, 2, "the resolvable name + the literal are cached");
+        // fold the cache into the @cap_pinned union: two tuples land as concat elements.
+        let present = reconcile_cap(&d, &mut exec).unwrap();
+        assert_eq!(present.len(), 2, "the resolvable name + the literal are in @cap_pinned");
         // element-only, never a rule/flush.
         assert!(exec.cmds.iter().all(|c| c[0] != "add" || c[1] == "element"));
         assert!(!exec.cmds.iter().any(|c| c.iter().any(|t| t == "rule" || t == "flush")));
@@ -235,15 +287,17 @@ mod tests {
         answers.insert("b.example.com".to_string(), Ok(vec![shared]));
         let mut resolver = FakeRaw(answers);
 
-        // First converge: @raw_pinned = { 5.6.7.8 . tcp . 443 } (union of both).
+        // First converge: @cap_pinned = { 5.6.7.8 . tcp . 443 } (union of both).
         let mut exec = Exec { live: String::new(), cmds: vec![] };
-        reconcile_raw(&d, &mut exec, &mut resolver, 1).unwrap();
+        resolve_raw(&d, &mut resolver, 1);
+        reconcile_cap(&d, &mut exec).unwrap();
 
         // Now remove `a` and reconcile against a LIVE set that already has the shared tuple.
         store::remove_raw(&d, &raw("a.example.com:tcp:443")).unwrap();
+        resolve_raw(&d, &mut resolver, 2);
         let mut exec2 = Exec { live: "elements = { 5.6.7.8 . tcp . 443 }".into(), cmds: vec![] };
-        let (pinned, _) = reconcile_raw(&d, &mut exec2, &mut resolver, 2).unwrap();
-        assert_eq!(pinned, 1, "b still pins the shared tuple");
+        let present = reconcile_cap(&d, &mut exec2).unwrap();
+        assert_eq!(present.len(), 1, "b still pins the shared tuple");
         // The shared element is STILL in the desired union (b needs it), so NO delete is emitted.
         assert!(!exec2.cmds.iter().any(|c| c[0] == "delete"), "shared element must survive a's removal");
     }
@@ -261,9 +315,8 @@ mod tests {
         store::add_raw(&d, &raw("unresolvable.invalid:tcp:443")).unwrap();
         assert_eq!(store::list_raw(&d).len(), 1, "intent persisted before any resolve");
         // and the state view shows it pending (pins=-), never dropped.
-        let mut exec = Exec { live: String::new(), cmds: vec![] };
         let mut resolver = FakeRaw(HashMap::new()); // every host → Err
-        let (_, pending) = reconcile_raw(&d, &mut exec, &mut resolver, 1).unwrap();
+        let (_, pending) = resolve_raw(&d, &mut resolver, 1);
         assert_eq!(pending, 1);
         assert_eq!(store::list_raw(&d).len(), 1, "intent still there after a failed resolve");
     }
