@@ -287,13 +287,28 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   signal introspection). Render proof `desktop-egress-adr009-s4-proof.sh` (load + model-parse of a seed with
   an owner/quarantined cap + a `want` + a raw dest, non-flat paint). Live seat + look owner-verified in the
   dogfood VM (no Play-driving).
-- **S5 — content:** night-mode seeds + default location (done); hide DMS updater/plugin UI (OQ-4). No
-  `media-art` (OQ-2).
+- **S5a — location self-heal (no Rust) — DONE (2026-09-07).** The FL default location +
+  `nightModeUseIPLocation:false` seed (in `default-session.json`) is first-run-only, so a `/home` created
+  before it keeps DankMaterialShell's built-in New York default — weather is wrong out of the box and can't be
+  fixed via the egress-blocked IP auto-locate. The `shrek-desktop` launcher self-heal (which already backfills a
+  blank wallpaper) now also heals the weather location: it reads the canonical values from `default-session.json`
+  and replaces ONLY the untouched `"New York, NY"` default (a user-chosen city is left alone), and normalizes
+  `nightModeUseIPLocation` off (it can never succeed — `ip-api.com` is plaintext HTTP:80, refused). Proof
+  `desktop-fl-location-selfheal-proof.sh` (14 asserts: NY-default heals, user-chosen untouched, missing heals,
+  idempotent, malformed no-crash). Live-verified on the dogfood VM's stale `/home` (weather flipped NY 62°F →
+  Lake Mary FL 84°F on cold-restart; the weather grant auto-re-blessed on boot).
+- **S5b — content (remaining):** hide DMS updater/plugin-marketplace UI (OQ-4). No `media-art` (OQ-2).
 - **S6 — sealed-VM dogfood + reflash + metal:** grant weather in-panel → forecast + location search
   populate; `ip-api.com` drops with weather granted; geocode fallbacks fail fast; owner manifest via real
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 S5a built — FL default-location + `nightModeUseIPLocation:false` self-heal in the `shrek-desktop`
+  launcher (the first-run seed never reached an existing `/home`, which kept DMS's New York default). Reads the
+  canonical values from `default-session.json`; replaces ONLY the untouched `"New York, NY"` default (a
+  user-chosen city is left alone) + normalizes IP-geolocation off (`ip-api.com` is refused plaintext HTTP:80).
+  Zero Rust. Proof `desktop-fl-location-selfheal-proof.sh` (14 asserts); live-verified NY→FL on the dogfood VM's
+  stale `/home`. S5b (hide DMS updater/plugin UI) remains.
 - 2026-09-07 S4 built — standalone `shrek-connectivity` "Network Access" surface (shrek-menu pattern, baked
   overlay QML + Super+Shift+N, themed from `dms-colors.json`); self-contained read model (extended to parse
   `source`/`feature` + `title`/`purpose`/`capfault` + the `want` inbox) + the four §6 sections in plain
