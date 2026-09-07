@@ -321,6 +321,17 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 boot-lag fix (delivery half) — `egressd reconcile` now re-composes `/etc/hosts` from the pins
+  it just re-projected (`supervisor::reconcile` §5), under the hosts lock, using the same catalog it loads
+  once for the state view. The base `shrek-hosts-compose` oneshot is ordered `Before local-fs.target`, i.e.
+  BEFORE egressd (`After local-fs.target`) repopulates the tmpfs `/run` pin map — so at oneshot time the map
+  is empty and `/etc/hosts` carried no deliverable pins, leaving weather dark on a rebooted box until the
+  next bless. The recompose is OFFLINE (already-stored pins, no DoT/clock), so it collapses "boot → weather
+  host resolvable in `/etc/hosts`" to "as soon as egressd reconciles". Zero behavior change to grants/nft.
+  Proof `desktop-egress-adr009-boot-hosts-proof.sh` (3/3): reproduces the empty-`/run` dead-zone, then proves
+  `reconcile` alone lifts the persisted pin — run in a fresh `unshare -rn` netns so the lift is provably
+  offline — and that a live-`/run` poison does not survive the reconcile re-projection into `/etc/hosts`.
+  (The QML-side retry-cadence + boot "connecting…" toast — plan B/C of the #3207 follow-up — are separate.)
 - 2026-09-07 S5b built — hid three permanently-forbidden/dead DMS surfaces (OQ-4). (A) System Updater +
   (B) Plugins-marketplace Settings tabs removed via a vendored patch of `Common/SettingsTabs.qml` in the
   `shrek-desktop` overlay (pure deletion of the two `structure` entries), wired in by launching
