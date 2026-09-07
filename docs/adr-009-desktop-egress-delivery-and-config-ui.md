@@ -297,12 +297,39 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   `desktop-fl-location-selfheal-proof.sh` (14 asserts: NY-default heals, user-chosen untouched, missing heals,
   idempotent, malformed no-crash). Live-verified on the dogfood VM's stale `/home` (weather flipped NY 62°F →
   Lake Mary FL 84°F on cold-restart; the weather grant auto-re-blessed on boot).
-- **S5b — content (remaining):** hide DMS updater/plugin-marketplace UI (OQ-4). No `media-art` (OQ-2).
+- **S5b — hide DMS updater/plugin-marketplace UI + "What's New" popup (no Rust) — DONE (2026-09-07).**
+  Three permanently-forbidden or dead DMS surfaces, suppressed at build/first-run so no live control offers a
+  path the sealed egress refuses: **(A)** the *System Updater* Settings tab and **(B)** the *Plugins*
+  (marketplace) Settings tab are removed by vendoring a patched `Common/SettingsTabs.qml` into the
+  `shrek-desktop` overlay at DMS's own install path (`/usr/share/quickshell/dms/Common/SettingsTabs.qml`) —
+  the ONLY change vs upstream is the deletion of those two `structure` entries (pure element deletions, the
+  rest byte-identical). CRUCIAL WIRING: the packaged `dms` is a `withshell` build that runs its QML
+  **embedded in the binary** (extracted to a runtime dir), so editing the on-disk tree alone is INERT —
+  `sway.config` now launches `dms run -c /usr/share/quickshell/dms` (the documented `-c`/`DMS_SHELL_DIR`
+  override) so dms loads the patched on-disk tree instead; `validateShellDir` only Stats `shell.qml`
+  (read-only, safe on the sealed `/usr`), and `dms ipc` calls inherit the same dir via the state file.
+  **(C)** DMS's *"What's New"* upgrade modal (whose only actions are `Open in Browser`
+  links to `danklinux.com`) gates purely on the existence of `~/.config/DankMaterialShell/.changelog-<ver>`;
+  the launcher now pre-seeds that marker (idempotent, existence-only, mirrors the settings/session seeds) so
+  the modal never fires on a fresh OR a stale `/home`. No `media-art` (OQ-2). Both edits are pinned to the
+  `dms=` package version in `mkosi.conf`; proof `desktop-dms-suppress-proof.sh` (21 asserts: tabs absent,
+  array structure balanced, neighbor tabs retained, overlay header + marker version both track the pin — the
+  drift alarm). Desktop build + dogfood GREEN (103/0); Settings-tab absence + no-popup owner-verified live in
+  the dogfood VM (no Play-driving).
 - **S6 — sealed-VM dogfood + reflash + metal:** grant weather in-panel → forecast + location search
   populate; `ip-api.com` drops with weather granted; geocode fallbacks fail fast; owner manifest via real
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 S5b built — hid three permanently-forbidden/dead DMS surfaces (OQ-4). (A) System Updater +
+  (B) Plugins-marketplace Settings tabs removed via a vendored patch of `Common/SettingsTabs.qml` in the
+  `shrek-desktop` overlay (pure deletion of the two `structure` entries), wired in by launching
+  `dms run -c /usr/share/quickshell/dms` (the packaged `dms` runs its EMBEDDED QML, so the on-disk patch is
+  inert without the `-c`/`DMS_SHELL_DIR` override). (C) the "What's New" upgrade modal pre-suppressed by seeding
+  its `~/.config/DankMaterialShell/.changelog-<ver>` marker in the launcher (existence-only gate; fires on
+  neither fresh nor stale `/home`). Zero Rust. Both pinned to the `dms=` version in `mkosi.conf`; proof
+  `desktop-dms-suppress-proof.sh` (21 asserts incl. a drift alarm). Dogfood 103/0; tab-absence + no-popup
+  owner-verified live.
 - 2026-09-07 S5a built — FL default-location + `nightModeUseIPLocation:false` self-heal in the `shrek-desktop`
   launcher (the first-run seed never reached an existing `/home`, which kept DMS's New York default). Reads the
   canonical values from `default-session.json`; replaces ONLY the untouched `"New York, NY"` default (a
