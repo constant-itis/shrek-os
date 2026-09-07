@@ -247,8 +247,27 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   ADR-007 S4 `desktop-egress-s4-proof.sh` (drives the removed `egressd confirmed-*` CLI) and the S6 dogfood
   probe's `@weather_pinned`/`@raw_pinned` legs are noted for S6-rework; the confirmed-verb behavior is
   covered by `supervisor::tests`.
-- **S3 — ceremony UX:** gatekeeperd `manifest-install/remove` rendering the full card + storage-host
-  warning + the "toggle ≠ live intent" line; the update-time collision quarantine (§4.4 layer 3).
+- **S3 — ceremony UX + update-time quarantine — DONE (2026-09-06).** The gatekeeperd `desktop-egress`
+  family gains `manifest-install`/`manifest-remove` (reusing the shared SAK/VT consent core, `high_authority`
+  = the typed code). The install precheck re-parses the candidate through the ONE sealed grammar (fail-closed
+  before any human is asked), requires the wire name match the manifest name, and runs the PURE §4.4 belt
+  (`deliver hosts` refused; any `is_system_reserved_host` host refused — the daemon re-checks authoritatively
+  at commit, incl. the sealed-catalog collision that needs an fs read). It renders the full root-authored
+  CARD (title / purpose / feature / a `Reaches` row per host, all sanitized at the output boundary) plus two
+  warnings the consent screen prints: the ALWAYS-present **"toggle ≠ live intent"** line (OQ-1 — installing
+  mints a one-click toggle a compromised session could later flip) and, per matching host, the ADR-009 §8
+  **storage-host** nudge (`shrek_policy::egress_capability::is_storage_host`, advisory, never a gate).
+  On a confirmed OK, commit STAGES the exact bytes the human saw to `/run/shrek/egress-manifest-staging`
+  (fail-closed — a stage failure never relays) then relays only the NAME to `egressd ask confirmed-manifest-
+  {install,remove}`. `AuthorityPlan` grew a `warnings` block (embedded in the `DesktopEgress` commit kind, no
+  churn on the bench ceremonies). **Update-time collision quarantine (§4.4 layer 3):** the egressd boot
+  `reconcile` now runs a quarantine scan FIRST — every OWNER capability whose host is now reserved
+  (`catalog::host_reserved_by_system`, the SAME predicate `validate_owner_install` refuses on, so install and
+  update stay one rule) is DISABLED (grant + pin withdrawn so its tuples cannot fold into `@cap_pinned`;
+  legible `FaultKind::Quarantined` parked). The `/run` state projection now surfaces an owner cap's fault
+  (was hardcoded `fault=-` in S2) so the panel shows "needs attention" — never a silent allow. Live seat
+  ceremony stays the S6 gate (like ADR-007 S4). Oracle: `desktop-egress-adr009-s3-proof.sh` 5/5 (clean boot
+  active → a colliding sealed update quarantines the owner cap, legible reason, sealed cap untouched).
 - **S4 — Network Access panel (no Rust):** standalone `shrek-connectivity` overlay baked (shrek-menu
   pattern), Super+Shift+N + menu entry, onboarding widened, watcher + inbox UI. Render proof extends
   `desktop-connectivity-proof.sh`.
@@ -259,6 +278,13 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-06 S3 built — gatekeeperd `manifest-install`/`manifest-remove` console ceremony (root-authored card
+  render + the "toggle ≠ live intent" line + the advisory `is_storage_host` nudge; confirmed bytes staged to
+  `/run/shrek/egress-manifest-staging`, only the name relayed to egressd) + the §4.4 layer-3 update-time
+  collision quarantine in egressd boot `reconcile` (owner cap whose host became reserved is disabled +
+  `quarantined`-faulted; `host_reserved_by_system` shared with `validate_owner_install`; the state projection
+  surfaces owner faults). `AuthorityPlan.warnings` added. Live seat ceremony deferred to S6. Oracles green
+  (adr009-s3-proof 5/5); shrek-policy 89 + gatekeeperd 172 + egressd 83 unit tests green.
 - 2026-09-06 S2 built — egressd catalog loader + `@cap_pinned` generalization (weather off `@weather_pinned`,
   union reconcile) + catalog-backed state view (`source`/`feature`/card text) + sealed-source `/etc/hosts`
   bridge + owner-manifest ceremony verbs (staging in `/run/shrek/egress-manifest-staging`; §4.4 install-
