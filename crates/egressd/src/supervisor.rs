@@ -1112,8 +1112,30 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mu
         }
     };
 
+    // Load the catalog once for BOTH consumers: the state view (card tokens) and the hosts bridge
+    // (sealed-source delivery filter) — mirrors `Supervisor::reproject`, a cheap two-dir read.
+    let catalog = crate::catalog::load_catalog();
     let _ = store::project_pinned(store, run);
-    let _ = store::project_state(store, run, &crate::catalog::load_catalog());
+    let _ = store::project_state(store, run, &catalog);
+
+    // 5. RE-COMPOSE /etc/hosts from the pins just projected to `{run}/egress/pinned`. The base
+    //    `shrek-hosts-compose` oneshot runs `Before local-fs.target` — i.e. BEFORE this daemon (ordered
+    //    `After local-fs.target`) repopulates the tmpfs `/run` pin map — so at that point the map is empty
+    //    and the composed `/etc/hosts` carries NO deliverable pins. Without this call the persisted weather
+    //    pin reaches `/run` but never `/etc/hosts`, so a rebooted box has weather dark until the next bless.
+    //    This lift is OFFLINE (already-stored pins, no DoT/clock), so it shortens "boot → resolvable weather
+    //    host in /etc/hosts" to "as soon as egressd reconciles" instead of gating on a fresh re-bless.
+    //    Under the HOSTS lock (shared with the base oneshot + bind/unbind, distinct from the egress store
+    //    lock) so the projection never interleaves; if the lock cannot be taken we skip rather than compose
+    //    unguarded — same discipline as `reproject`.
+    {
+        let hhome = hosts::hosts_home_dir();
+        let hrun = hosts::hosts_run_dir();
+        if let Ok(_hlock) = hosts::lock_hosts(&hhome) {
+            let _ = hosts::compose_hosts(&hhome, &hrun, &catalog);
+        }
+    }
+
     let summary = format!(
         "reconcile: {cap} cap element(s), {healed} re-resolved, {quarantined} quarantined; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
         if browser { "installed" } else { "pending/na" }
