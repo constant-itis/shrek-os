@@ -1,0 +1,85 @@
+#!/bin/sh
+# shrek-boot-toast — a boot reassurance toast for the egress warm-up window (ADR-009 v2, boot-lag plan C).
+#
+# WHY: the sealed egress delivers weather over a warm-up chain (egressd boot reconcile -> NTP clock-sync
+# for DoT TLS -> DoT resolve -> pin -> the host lands in /etc/hosts). Until the open-meteo host is in
+# /etc/hosts the DMS weather widget shows nothing, so a fresh boot LOOKS broken for up to a couple of
+# minutes ("thought it was broken"). The boot-lag delivery fix (egressd reconcile now recomposes
+# /etc/hosts from persisted pins, OFFLINE) shortens this a lot, but a cold box with no cached pin still
+# has to wait for the clock + DoT. This posts a low-key "connecting…" notification during that gap and
+# clears it the instant weather is deliverable — pure UX, it touches NO policy, NO nft, NO store.
+#
+# WIRING: launched once per session by an `exec` line in sway.config (in-session env, so notify-send
+# reaches the DMS notification server — shrek is the notification host). It only ever shows a toast when
+# weather is BLESSED but not yet delivered — if weather was never granted there is nothing to wait for,
+# and if it is already live the box is not "connecting". Bounded by a timeout so it can never linger.
+#
+# All external touchpoints are overridable so the oracle drives it without a live session (mirrors
+# shrek-connect's SHREK_HOSTS / SHREK_EGRESSD overrides):
+#   SHREK_EGRESS_STATE          egressd's projected state view   (default /run/shrek/egress/state)
+#   SHREK_HOSTS                 the composed /etc/hosts projection (default /run/shrek/hosts)
+#   SHREK_NOTIFY                the notify-send command           (default notify-send)
+#   SHREK_BOOT_TOAST_TIMEOUT    seconds before giving up          (default 180)
+#   SHREK_BOOT_TOAST_POLL       seconds between readiness polls    (default 2)
+#   SHREK_BOOT_TOAST_SKIP_WAIT  =1 to skip the notif-service wait  (oracle: no live bus)
+set -eu
+
+STATE="${SHREK_EGRESS_STATE:-/run/shrek/egress/state}"
+HOSTS="${SHREK_HOSTS:-/run/shrek/hosts}"
+NOTIFY="${SHREK_NOTIFY:-notify-send}"
+TIMEOUT="${SHREK_BOOT_TOAST_TIMEOUT:-180}"
+POLL="${SHREK_BOOT_TOAST_POLL:-2}"
+APP="shrek.connect"
+
+# The open-meteo forecast + geocoding hosts are the weather delivery names; either present in the composed
+# /etc/hosts means name resolution for weather is live (the nft pin independently gates the packet, but a
+# resolvable host is the observable "weather can work now" signal from a shell).
+WEATHER_HOST_RE='open-meteo'
+
+# weather is blessed (a delivery is expected) — `profile weather ... blessed=1` in the state view.
+weather_blessed() { grep -qE '^profile weather .* blessed=1( |$)' "$STATE" 2>/dev/null; }
+# weather is deliverable now — its host is in the composed /etc/hosts.
+weather_live()    { grep -qi "$WEATHER_HOST_RE" "$HOSTS" 2>/dev/null; }
+# the DMS notification server owns the name (systemd's busctl is always present; no dbus-send dependency).
+notif_up() {
+    [ "${SHREK_BOOT_TOAST_SKIP_WAIT:-0}" = "1" ] && return 0
+    busctl --user status org.freedesktop.Notifications >/dev/null 2>&1
+}
+
+# Bounded wait for the notification server + the egress state file to appear (session + egressd both come
+# up around now). Never blocks a session: capped, then we just proceed / bail.
+w=0
+until [ "$w" -ge 30 ]; do
+    if notif_up && [ -e "$STATE" ]; then break; fi
+    w=$((w + 1)); sleep 1
+done
+
+# Nothing to reassure about: weather not blessed (no auto-delivery), or already live.
+weather_blessed || exit 0
+weather_live && exit 0
+
+# Post the connecting toast and capture its id so the resolution replaces it IN PLACE (no toast pile-up).
+ID="$("$NOTIFY" --app-name="$APP" --icon=network-wireless-acquiring --urgency=low --print-id \
+      'Connecting to services…' \
+      'Weather and network are warming up. This can take a moment on the first boot.' 2>/dev/null || true)"
+REPLACE=""
+[ -n "$ID" ] && REPLACE="--replace-id=$ID"
+
+elapsed=0
+while [ "$elapsed" -lt "$TIMEOUT" ]; do
+    if weather_live; then
+        # shellcheck disable=SC2086  # $REPLACE is a single bare token (an integer flag) or empty.
+        "$NOTIFY" --app-name="$APP" --icon=weather-few-clouds --urgency=low --expire-time=4000 $REPLACE \
+          'Services connected' 'Weather is live.' 2>/dev/null || true
+        exit 0
+    fi
+    sleep "$POLL"
+    elapsed=$((elapsed + POLL))
+done
+
+# Timed out — replace the "connecting" toast with a gentle low-urgency note rather than leaving it hanging.
+# shellcheck disable=SC2086
+"$NOTIFY" --app-name="$APP" --icon=network-offline --urgency=low --expire-time=6000 $REPLACE \
+  'Still connecting…' 'Weather is taking longer than usual and will appear once the network is ready.' \
+  2>/dev/null || true
+exit 0
