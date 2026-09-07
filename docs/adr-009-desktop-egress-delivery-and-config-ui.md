@@ -321,6 +321,18 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 boot-lag fix (plan B, DMS retry cadence, no Rust) — vendored patch of DMS's
+  `Services/WeatherService.qml` (loaded via the `dms run -c` on-disk tree, same mechanism as S5b's
+  SettingsTabs.qml): `maxRetryAttempts` 3 → 10, the ONLY change vs upstream. Stock DMS makes 3 fast 30s
+  retries (t=30/60/90) then falls into a 60s→120s→240s exponential backoff — so an egress readiness that
+  lands at ~t=95s isn't picked up until ~t=150s. Raising the count keeps the 30s cadence for ~5 min, so
+  readiness is caught within 30s across the whole warm-up (and further out for slow-NTP boxes); only after
+  5 min of continuous failure does the unchanged persistent backoff take over. `retryDelay` is left at
+  30000 ON PURPOSE (== `minFetchInterval`, so every retry clears fetchWeather's throttle; a shorter delay
+  would be silently dropped), and `handleWeatherSuccess` still resets to the 15-min interval once weather
+  lands — steady-state identical to upstream. Pinned to `dms=1.6.0db1`; proof
+  `desktop-weather-cadence-proof.sh` 19/19 (patched value + stock-absent, the two safety invariants,
+  the `-c` wiring, drift pin, body-anchor integrity). Completes the boot-lag triad with plans A + C below.
 - 2026-09-07 boot-lag fix (plan C, reassurance UX, no Rust) — `shrek-boot-toast`, a low-key "Connecting to
   services…" notification for the egress warm-up window. Launched once per session by an `exec` line in
   `sway.config` (in-session, so notify-send reaches the DMS notification server — shrek is the notification
