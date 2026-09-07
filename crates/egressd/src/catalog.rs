@@ -216,16 +216,29 @@ pub fn validate_owner_install(m: &Manifest, sealed: &Catalog) -> Result<(), Stri
         );
     }
     for r in &m.rules {
-        let reserved = is_system_reserved_host(&r.host)
-            || sealed
-                .entries
-                .iter()
-                .any(|e| e.manifest.rules.iter().any(|hr| hr.host == r.host));
-        if reserved {
+        if host_reserved_by_system(&r.host, sealed) {
             return Err(format!("host `{}` is reserved by sealed/system machinery", r.host));
         }
     }
     Ok(())
+}
+
+/// Is `host` reserved by SEALED or ROOT system machinery? The §4.4 layer-2/layer-3 predicate, shared by
+/// the INSTALL-time refusal ([`validate_owner_install`]) and the UPDATE-time quarantine (supervisor boot
+/// reconcile). Two sources, together covering "reserved by a compiled table OR by a shipped data manifest":
+///   * [`is_system_reserved_host`] — the pure compiled enumeration (agent egress tables, provider-bind
+///     aliases, compiled desktop hosts incl. baseline). Changes only with a binary (A/B image) update.
+///   * every SEALED-CATALOG host — a host named by any sealed on-disk `*.capability`, so a NEW sealed
+///     capability's host (data-only update, not in the compiled table) is covered too. `sealed` is
+///     [`load_sealed_catalog`]'s result.
+/// Keeping install and update on ONE predicate is what makes the invariant hold: a collision that WOULD be
+/// refused at install is exactly the collision quarantined when an update introduces it later.
+pub fn host_reserved_by_system(host: &str, sealed: &Catalog) -> bool {
+    is_system_reserved_host(host)
+        || sealed
+            .entries
+            .iter()
+            .any(|e| e.manifest.rules.iter().any(|hr| hr.host == host))
 }
 
 /// Atomically write an OWNER manifest to `owner_dir` (`root:root 0600` in the `0700` dir; egressd is the

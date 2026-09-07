@@ -433,6 +433,10 @@ pub enum FaultKind {
     ResolveFail,
     /// The element-only nft write failed (the deny-by-default skeleton stays in place, fail-closed).
     ApplyFail,
+    /// ADR-009 §4.4 layer 3 — an OWNER capability whose host became reserved by sealed/system machinery
+    /// after an OS update was DISABLED at boot (grant withdrawn, tuples out of the union) and marked here.
+    /// Never a silent allow: the update-time preflight quarantines the collision + leaves this legible fault.
+    Quarantined,
 }
 
 impl FaultKind {
@@ -441,6 +445,7 @@ impl FaultKind {
             FaultKind::UnknownProfile => "unknown-profile",
             FaultKind::ResolveFail => "resolve-fail",
             FaultKind::ApplyFail => "apply-fail",
+            FaultKind::Quarantined => "quarantined",
         }
     }
     fn from_str(s: &str) -> Option<Self> {
@@ -448,6 +453,7 @@ impl FaultKind {
             "unknown-profile" => Some(FaultKind::UnknownProfile),
             "resolve-fail" => Some(FaultKind::ResolveFail),
             "apply-fail" => Some(FaultKind::ApplyFail),
+            "quarantined" => Some(FaultKind::Quarantined),
             _ => None,
         }
     }
@@ -754,14 +760,18 @@ pub fn project_state(store: &Path, run: &Path, catalog: &Catalog) -> io::Result<
 
     // ADR-009: catalog capabilities that are NOT a compiled profile (owner-installed capabilities). In S2
     // these are display-only — not one-click-blessable over the socket yet (that lands with the panel /
-    // ceremony slices) — so blessed=0/pins=- always; source/feature are the root-authored card tokens.
+    // ceremony slices) — so blessed=0/pins=- always; source/feature are the root-authored card tokens. S3:
+    // a `fault` DOES surface here — the §4.4 layer-3 update-time quarantine parks a `quarantined` fault on
+    // an owner cap whose host became reserved, and the panel must show it as "needs attention" (disabled,
+    // never a silent allow).
     for e in &catalog.entries {
         let name = e.manifest.name.as_str();
         if resolve_desktop(name).is_some() {
             continue; // already emitted by the compiled loop above (weather)
         }
+        let fault_str = load_fault(store, name).map(|f| f.kind.as_str()).unwrap_or("-");
         body.push_str(&format!(
-            "profile {name} tier={} blessed=0 pins=- refreshed=- fault=- source={} feature={}\n",
+            "profile {name} tier={} blessed=0 pins=- refreshed=- fault={fault_str} source={} feature={}\n",
             e.manifest.tier.as_str(),
             src_token(e.source),
             e.manifest.feature
@@ -1184,6 +1194,31 @@ mod tests {
         );
         // Only the CLOSED fault KIND token crosses the boundary — never the free-text reason.
         assert!(!body.contains("resolver unreachable"), "free-text fault reason must not leak into /run/state");
+    }
+
+    #[test]
+    fn state_projection_surfaces_an_owner_quarantine_fault() {
+        // ADR-009 S3 §4.4 layer-3: an owner capability that was quarantined (its host became reserved) must
+        // surface `fault=quarantined` in the panel-facing state — NOT the S2 hardcoded `fault=-`. This test
+        // guards against a future regression that re-hardcodes owner faults out of the projection.
+        use shrek_policy::egress_capability::{build_catalog, parse_manifest};
+        let d = fresh();
+        let run = tmp();
+        let _ = fs::remove_dir_all(&run);
+        let owner = parse_manifest(
+            "schema shrek-egress-capability/1\nname radar\ntitle Radar\npurpose p\nfeature dms:radar\n\
+             tier one-click\ndeliver none\nhost radar.example.test tcp 443\n",
+        )
+        .unwrap();
+        let catalog = build_catalog(Vec::new(), vec![owner]);
+        write_fault(&d, "radar", FaultKind::Quarantined, "host `radar.example.test` became reserved", 42).unwrap();
+        let body = fs::read_to_string(project_state(&d, &run, &catalog).unwrap()).unwrap();
+        assert!(
+            body.contains("profile radar tier=one-click blessed=0 pins=- refreshed=- fault=quarantined source=owner feature=dms:radar"),
+            "quarantined owner cap must surface fault=quarantined in:\n{body}"
+        );
+        // The closed KIND crosses; the free-text reason (host) never leaks into the space-delimited line.
+        assert!(!body.contains("became reserved"), "free-text quarantine reason must not leak into /run/state");
     }
 
     #[test]

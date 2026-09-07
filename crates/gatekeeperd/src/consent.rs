@@ -195,6 +195,11 @@ fn render_screen(plan: &AuthorityPlan, pending: &Pending, code: Option<&str>) ->
         s.push_str("\r\n  !! WARNING: after this, the bench can READ your files\r\n");
         s.push_str("     AND reach the network — data could leave this box.\r\n");
     }
+    // Extra plan-supplied warning lines (SANITIZED like every other rendered value — a warning string is
+    // still untrusted input as far as the output boundary is concerned). Additive; empty for most plans.
+    for w in plan.warnings() {
+        s.push_str(&format!("\r\n  !! {}\r\n", sanitize_value(w)));
+    }
     s.push_str("\r\n--------------------------------------------------------\r\n");
     match code {
         Some(c) => s.push_str(&format!("  To APPROVE, type this code then Enter:  {c}\r\n  Anything else DENIES.\r\n", )),
@@ -903,6 +908,24 @@ mod tests {
         let mut c = MockConsole::happy("y");
         let (_res, _) = run_with(&mut c, &plan, Some(999), true);
         assert!(c.rendered.as_ref().unwrap().contains("WARNING"), "lethal-trifecta warning shown");
+    }
+
+    #[test]
+    fn plan_warnings_are_rendered_sanitized() {
+        // ADR-009 S3: extra plan-supplied warning lines (the storage-host nudge + the toggle line) reach
+        // the screen, and a control char smuggled into one is neutralized at the output boundary.
+        let plan = bench_plane::desktop_egress_plan(
+            crate::desktop_egress::Op::ManifestRemove("radar".into()),
+            "radar".into(),
+            vec![("Capability".into(), "radar".into())],
+            false,
+            vec!["toggle is not proof\x1b[31m a human is here".into()],
+        );
+        let mut c = MockConsole::happy("radar-code");
+        let _ = run_with(&mut c, &plan, Some(999), true);
+        let screen = c.rendered.as_ref().unwrap();
+        assert!(screen.contains("toggle is not proof"), "plan warning line rendered");
+        assert!(!screen.contains("\x1b[31m"), "the escape in the warning was sanitized");
     }
 
     // ---- cooldown escalation (pure curve + the stateful map with a unique uid) ----

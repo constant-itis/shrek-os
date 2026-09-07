@@ -1660,7 +1660,18 @@ impl AuthorityPlan {
             CommitKind::Export { .. } => format!("EXPORT a desktop launcher for bench '{}'", self.bench),
             CommitKind::Promote { workshop, .. } => format!("PROMOTE bench '{}' to the Workshop recipe '{}'", self.bench, workshop),
             CommitKind::Launch { .. } => format!("LAUNCH the Workshop recipe '{}' (re-derive its environment + run)", self.bench),
-            CommitKind::DesktopEgress(op) => crate::desktop_egress::action(op),
+            CommitKind::DesktopEgress { op, .. } => crate::desktop_egress::action(op),
+        }
+    }
+
+    /// Extra ceremony-render warning lines beyond the `trifecta` flag — the consent screen prints each,
+    /// SANITIZED, above the confirm prompt. Only a desktop-egress manifest ceremony carries any today (the
+    /// ADR-009 §8 storage-host nudge + the "toggle ≠ live intent" line); every other plan returns none, so
+    /// the shared renderer treats it as an optional, additive block.
+    pub(crate) fn warnings(&self) -> &[String] {
+        match &self.kind {
+            CommitKind::DesktopEgress { warnings, .. } => warnings,
+            _ => &[],
         }
     }
 }
@@ -1674,17 +1685,20 @@ pub(crate) fn desktop_egress_plan(
     subject: String,
     diff_rows: Vec<(String, String)>,
     trifecta: bool,
+    warnings: Vec<String>,
 ) -> AuthorityPlan {
-    AuthorityPlan { bench: subject, diff_rows, trifecta, kind: CommitKind::DesktopEgress(op) }
+    AuthorityPlan { bench: subject, diff_rows, trifecta, kind: CommitKind::DesktopEgress { op, warnings } }
 }
 
 enum CommitKind {
     Grant { canonical: PathBuf, leaf: String, rw: bool, ident: Ident },
     Network { profiles: Vec<String> },
-    /// ADR-007 S4 — a console-ceremony desktop-egress change (`web-browsing` bless/unbless or a raw
-    /// `host:proto:port` add/remove). Commit relays the op to the egressd daemon over its root-gated
-    /// socket (`egressd ask confirmed-*`; the daemon is the sole nft mutator — ADR-007 S6.1).
-    DesktopEgress(crate::desktop_egress::Op),
+    /// ADR-007 S4 / ADR-009 S3 — a console-ceremony desktop-egress change (`web-browsing` bless/unbless, a
+    /// raw `host:proto:port` add/remove, or an owner-capability manifest install/remove). Commit relays the
+    /// op to the egressd daemon over its root-gated socket (`egressd ask confirmed-*`; the daemon is the
+    /// sole nft mutator — ADR-007 S6.1). `warnings` are extra render lines the precheck attached (e.g. the
+    /// storage-host nudge + the "toggle ≠ live intent" line for a manifest install).
+    DesktopEgress { op: crate::desktop_egress::Op, warnings: Vec<String> },
     Export { key: String, file: String, icon: String, label: String, cmd: Vec<String> },
     /// A validated bench→Workshop recipe. Carries the CONSENTED snapshot (declared package sets + the
     /// grants/exports copied from the source bench at precheck time) so `commit_promote` writes exactly
@@ -2124,7 +2138,7 @@ pub(crate) fn commit_authority(plan: &AuthorityPlan) -> i32 {
         CommitKind::Export { key, file, icon, label, cmd } => commit_export(&plan.bench, key, file, icon, label, cmd),
         CommitKind::Promote { workshop, seed, apt, pip, grants, exports } => commit_promote(&plan.bench, workshop, seed, apt, pip, grants, exports),
         CommitKind::Launch { seed, apt, pip, grants, workload, refresh, offline } => commit_launch(&plan.bench, seed, apt, pip, grants, workload, *refresh, *offline),
-        CommitKind::DesktopEgress(op) => crate::desktop_egress::commit(op),
+        CommitKind::DesktopEgress { op, .. } => crate::desktop_egress::commit(op),
     }
 }
 

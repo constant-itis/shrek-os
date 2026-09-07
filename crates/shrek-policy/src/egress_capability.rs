@@ -599,6 +599,51 @@ fn is_compiled_baseline_host(host: &str) -> bool {
         .any(|r| r.host == host)
 }
 
+/// The world-writable-storage host suffixes (ADR-009 §8 "self-update/plugin hosts as exfil"). A
+/// general-purpose object store / user-content CDN / paste-drop is a place ANYTHING with egress can
+/// stash or fetch arbitrary bytes — so a capability that reaches one is a latent exfil/ingress channel
+/// even when the destination is otherwise "just a host". Suffix-matched so a per-bucket/per-user
+/// subdomain (`mybucket.s3.amazonaws.com`, `x.blob.core.windows.net`) trips the same nerve as the apex.
+const STORAGE_HOST_SUFFIXES: &[&str] = &[
+    // object stores (bucket = arbitrary read/write namespace)
+    "s3.amazonaws.com",
+    "r2.cloudflarestorage.com",
+    "blob.core.windows.net",
+    "storage.googleapis.com",
+    "digitaloceanspaces.com",
+    "backblazeb2.com",
+    "wasabisys.com",
+    // user-content CDNs / raw code hosting (attacker-controlled bytes served under a trusted apex)
+    "raw.githubusercontent.com",
+    "gist.githubusercontent.com",
+    "raw.githack.com",
+    "cdn.discordapp.com",
+    "media.discordapp.net",
+    "files.catbox.moe",
+    // paste / anonymous transfer drops
+    "pastebin.com",
+    "hastebin.com",
+    "ghostbin.com",
+    "paste.ee",
+    "transfer.sh",
+    "0x0.st",
+    "file.io",
+    "anonfiles.com",
+];
+
+/// ADVISORY (never a gate): is `host` a world-writable storage / paste / user-content-CDN destination?
+/// True ⇒ the S3 ceremony renders a "this is a general-purpose upload/download host — anything with
+/// access could use it to move data off this box" warning ON TOP of the normal card. It NEVER refuses
+/// (the human on the un-spoofable console is the boundary; egress stays nft-enforced + ceremony-gated
+/// regardless) and is deliberately a best-effort curated list, not an exhaustive one — a false negative
+/// costs a missing nudge, never a silent grant. `host` matches on exact-apex OR any dotted subdomain of
+/// a [`STORAGE_HOST_SUFFIXES`] entry.
+pub fn is_storage_host(host: &str) -> bool {
+    STORAGE_HOST_SUFFIXES
+        .iter()
+        .any(|s| host == *s || host.ends_with(&format!(".{s}")))
+}
+
 // ---- the first sealed manifest fixture (ADR-009 §4.3) -------------------------------------------
 
 /// The `weather` capability as its FIRST manifest (ADR-009 §4.3) — the sealed-source fixture proving
@@ -938,5 +983,28 @@ mod tests {
     fn tier_and_source_tokens_are_closed() {
         assert_eq!(Tier::OneClick.as_str(), "one-click");
         assert_eq!(Tier::Ceremony.as_str(), "ceremony");
+    }
+
+    #[test]
+    fn storage_host_predicate_is_advisory_suffix_match() {
+        // apex + per-bucket/per-user subdomains of an object store all trip the warning.
+        assert!(is_storage_host("s3.amazonaws.com"));
+        assert!(is_storage_host("my-bucket.s3.amazonaws.com"));
+        assert!(is_storage_host("acct.r2.cloudflarestorage.com"));
+        assert!(is_storage_host("x.blob.core.windows.net"));
+        assert!(is_storage_host("storage.googleapis.com"));
+        // user-content CDNs / raw code hosting + paste drops.
+        assert!(is_storage_host("raw.githubusercontent.com"));
+        assert!(is_storage_host("cdn.discordapp.com"));
+        assert!(is_storage_host("transfer.sh"));
+        assert!(is_storage_host("0x0.st"));
+        // a normal API host is NOT flagged (no false warning on the common case).
+        assert!(!is_storage_host("api.open-meteo.com"));
+        assert!(!is_storage_host("geocoding-api.open-meteo.com"));
+        // suffix match must not be tricked by a lookalike that only CONTAINS the string mid-label
+        // (a real dotted boundary is required — `nots3.amazonaws.com.evil.test` ends with the apex only
+        // if the boundary is a dot, which this hostile name satisfies, so assert the mid-string case).
+        assert!(!is_storage_host("s3.amazonaws.com.evil.test")); // apex is a prefix, not a suffix ⇒ no match
+        assert!(!is_storage_host("evil-transfer.shady.test"));
     }
 }

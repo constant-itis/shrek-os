@@ -1008,8 +1008,56 @@ impl Supervisor {
 /// clicks against the rate limiter). So a weather bless from the sealed onboarding eventually becomes a
 /// live allow on a later boot without the user re-discovering the Settings toggle, and stays a legible
 /// pending until then. Returns a one-line summary for the journal.
+/// ADR-009 §4.4 LAYER 3 — the UPDATE-TIME collision quarantine. Runs at boot (which is where an A/B image
+/// update lands: new sealed binary + new sealed `*.capability` data both go live here). For every OWNER
+/// capability whose host is NOW reserved by sealed/system machinery ([`catalog::host_reserved_by_system`],
+/// the SAME predicate that would have REFUSED it at install), DISABLE it: withdraw any grant + pin so its
+/// tuples cannot fold into the `@cap_pinned` union, and park a legible [`FaultKind::Quarantined`]. Never a
+/// silent allow — the owner sees "needs attention" and the collision cannot become a live root-steerable
+/// pin. Runs BEFORE the union apply so a quarantined cap's tuples are gone from this boot's set. Returns
+/// the count quarantined (for the journal). Idempotent: a still-colliding cap is re-quarantined (grant
+/// already withdrawn ⇒ no-op) and stays faulted; the ONLY exit is the owner removing/reinstalling it.
+fn quarantine_update_collisions(store: &Path, at: u64) -> usize {
+    let sealed = crate::catalog::load_sealed_catalog();
+    let catalog = crate::catalog::load_catalog();
+    quarantine_scan(store, &catalog, &sealed, at)
+}
+
+/// The pure core of [`quarantine_update_collisions`], over an ALREADY-loaded merged `catalog` (source for
+/// the owner entries) + `sealed` catalog (the reserved-host authority). Param-injected so the boot path
+/// uses the on-disk defaults while tests drive hand-built catalogs (mirroring `catalog::load_catalog` vs
+/// `load_catalog_from`). Writes to `store` only.
+fn quarantine_scan(
+    store: &Path,
+    catalog: &shrek_policy::egress_capability::Catalog,
+    sealed: &shrek_policy::egress_capability::Catalog,
+    at: u64,
+) -> usize {
+    let mut n = 0usize;
+    for e in &catalog.entries {
+        if e.source != shrek_policy::egress_capability::Source::Owner {
+            continue; // sealed pins are never quarantined; owner pins are the only §4.4 subjects
+        }
+        let Some(bad) = e.manifest.rules.iter().find(|r| crate::catalog::host_reserved_by_system(&r.host, sealed))
+        else {
+            continue;
+        };
+        let name = &e.manifest.name;
+        let _ = store::remove_bless(store, name); // withdraw grant (idempotent; S2 owner caps are ungranted)
+        let _ = store::remove_pin(store, name); // drop tuples so they cannot fold into the union
+        let reason = format!("host `{}` became reserved by a system update", bad.host);
+        let _ = store::write_fault(store, name, FaultKind::Quarantined, &reason, at);
+        eprintln!("egressd[boot]: QUARANTINE owner capability `{name}`: {reason}");
+        n += 1;
+    }
+    n
+}
+
 pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mut dyn PinResolver, at: u64) -> String {
     let mut healed = 0usize;
+    // 0. UPDATE-TIME collision quarantine (§4.4 layer 3) — BEFORE anything grants/applies, so a colliding
+    //    owner capability is disabled and its tuples are out of the union computed below.
+    let quarantined = quarantine_update_collisions(store, at);
     // 1. SELF-HEAL capability pins (no nft): a blessed one-click profile with NO stored pin — the
     //    intent-first residue of a first-run bless before the clock/network converged — gets a fresh DoT
     //    re-resolve now. NO per-profile apply anymore: the single `@cap_pinned` union apply (step 3)
@@ -1067,7 +1115,7 @@ pub fn reconcile(store: &Path, run: &Path, exec: &mut dyn NftExec, resolver: &mu
     let _ = store::project_pinned(store, run);
     let _ = store::project_state(store, run, &crate::catalog::load_catalog());
     let summary = format!(
-        "reconcile: {cap} cap element(s), {healed} re-resolved; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
+        "reconcile: {cap} cap element(s), {healed} re-resolved, {quarantined} quarantined; raw {raw_ok} pinned/{raw_pending} pending; browser {}",
         if browser { "installed" } else { "pending/na" }
     );
     eprintln!("egressd[boot]: {summary}");
@@ -1566,5 +1614,53 @@ mod tests {
         assert_eq!(body.lines().count(), EVENT_KEEP, "events file is capped");
         let mode = std::fs::metadata(run.join("events")).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o644, "the notification projection is uid-1000 readable");
+    }
+
+    // ---- ADR-009 §4.4 layer-3 update-time collision quarantine ----
+    fn owner_cap(name: &str, host: &str) -> shrek_policy::egress_capability::Manifest {
+        let text = format!(
+            "schema shrek-egress-capability/1\nname {name}\ntitle {name}\npurpose p\nfeature dms:{name}\n\
+             tier one-click\ndeliver none\nhost {host} tcp 443\n"
+        );
+        shrek_policy::egress_capability::parse_manifest(&text).unwrap()
+    }
+
+    #[test]
+    fn quarantine_disables_an_owner_cap_whose_host_became_reserved() {
+        use shrek_policy::egress_capability::build_catalog;
+        let dir = std::env::temp_dir().join(format!("egressd-quar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::ensure_store(&dir).unwrap();
+
+        // Two owner caps: `oldweather` reaches a NOW-reserved sealed host (api.open-meteo.com is a compiled
+        // weather host — the exact §4.4 layer-3 scenario: installed benign, an update made the host sealed);
+        // `radar` reaches a benign host. (In S2/S3 owner caps are display-only — not yet blessable over the
+        // socket — so there is no grant to withdraw here; the remove_bless/remove_pin in the scan are
+        // forward-looking idempotent no-ops that become load-bearing once S4 makes owner caps grantable.)
+        let sealed = build_catalog(Vec::new(), Vec::new()); // reserved-ness here comes from the compiled table
+        let catalog = build_catalog(Vec::new(), vec![owner_cap("oldweather", "api.open-meteo.com"), owner_cap("radar", "radar.example.test")]);
+        let n = quarantine_scan(&dir, &catalog, &sealed, 99);
+
+        assert_eq!(n, 1, "exactly the colliding owner cap is quarantined");
+        // oldweather: a legible Quarantined fault naming the now-reserved host (disabled, never a silent allow).
+        let fault = store::load_fault(&dir, "oldweather").expect("quarantine fault present");
+        assert_eq!(fault.kind, FaultKind::Quarantined);
+        assert!(fault.reason.contains("api.open-meteo.com"));
+        // radar (benign host) is untouched — no fault.
+        assert!(store::load_fault(&dir, "radar").is_none(), "benign owner cap not quarantined");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn quarantine_never_touches_a_sealed_capability() {
+        use shrek_policy::egress_capability::build_catalog;
+        let dir = std::env::temp_dir().join(format!("egressd-quar-sealed-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        store::ensure_store(&dir).unwrap();
+        // A SEALED weather cap reaches its own (reserved-by-itself) hosts — that is normal, never quarantined.
+        let sealed = build_catalog(vec![owner_cap("weather", "api.open-meteo.com")], Vec::new());
+        let catalog = build_catalog(vec![owner_cap("weather", "api.open-meteo.com")], Vec::new());
+        assert_eq!(quarantine_scan(&dir, &catalog, &sealed, 7), 0, "sealed pins are not §4.4 subjects");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
