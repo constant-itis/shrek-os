@@ -321,6 +321,19 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 boot-lag fix (plan C, reassurance UX, no Rust) — `shrek-boot-toast`, a low-key "Connecting to
+  services…" notification for the egress warm-up window. Launched once per session by an `exec` line in
+  `sway.config` (in-session, so notify-send reaches the DMS notification server — shrek is the notification
+  host). It shows a toast ONLY when weather is blessed-but-not-yet-delivered (reads `blessed=1` from
+  `/run/shrek/egress/state`, and "not delivered" = the open-meteo host absent from `/run/shrek/hosts`); it
+  stays silent when weather was never granted (nothing auto-connecting) or is already live. It clears the
+  instant the host lands in `/etc/hosts` — replacing the toast IN PLACE (captured `--print-id` → `--replace-id`)
+  with "Services connected" — or, on a timeout, replaces it with a gentle "Still connecting…" note so it never
+  hangs. Pure UX: touches NO policy, nft, or store. Pairs with the delivery-half fix below (which shortens the
+  gap the toast covers). All touchpoints oracle-overridable (`SHREK_EGRESS_STATE`/`SHREK_HOSTS`/`SHREK_NOTIFY`/
+  `SHREK_BOOT_TOAST_*`); proof `desktop-boot-toast-proof.sh` 5/5 (silent-when-not-blessed, silent-when-live,
+  connecting→replaced-in-place-on-lift, connecting→gentle-note-on-timeout). Live dogfood render owner-verified
+  separately. (Plan B — taming the DMS WeatherService retry cadence via the `-c` tree — remains optional.)
 - 2026-09-07 boot-lag fix (delivery half) — `egressd reconcile` now re-composes `/etc/hosts` from the pins
   it just re-projected (`supervisor::reconcile` §5), under the hosts lock, using the same catalog it loads
   once for the state view. The base `shrek-hosts-compose` oneshot is ordered `Before local-fs.target`, i.e.
