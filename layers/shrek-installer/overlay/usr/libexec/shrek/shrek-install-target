@@ -139,8 +139,15 @@ emit_phase write done
 
 emit_phase layout begin
 echo "extending target GPT and appending installed state partitions"
+# shrek-layers must hold the ENTIRE signed layer-store.raw image (dd'd in below); the store's
+# ext4 already carries its own update headroom (build-layers.sh: STORE_MB = 2x staged + 128M).
+# Size the partition to the store's apparent size (+16M alignment slack) rather than a hardcoded
+# 4G — the desktop store's STORE_MB grew past 4096 MiB, so a fixed 4G silently overflowed and the
+# layout-phase dd failed with ENOSPC (2026-09-05 regression). Partition tracks the store forever now.
+layers_bytes=$(stat -c %s "$layers")
+layers_mib=$(( (layers_bytes + 1048575) / 1048576 + 16 ))
 sgdisk -e "$TARGET_DISK"
-sgdisk -n 7:0:+4G -t 7:8300 -c 7:shrek-layers "$TARGET_DISK"
+sgdisk -n "7:0:+${layers_mib}M" -t 7:8300 -c 7:shrek-layers "$TARGET_DISK"
 sgdisk -n 8:0:0 -t 8:8300 -c 8:shrek-data "$TARGET_DISK"
 partprobe "$TARGET_DISK" 2>/dev/null || true
 blockdev --rereadpt "$TARGET_DISK" 2>/dev/null || true
