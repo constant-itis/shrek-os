@@ -17,5 +17,10 @@
   "wallpaperCyclingTime": "06:00",
   "themeModeAutoEnabled": false,
   "isLightMode": false,
+  "weatherLocation": "Lake Mary, FL",
+  "weatherCoordinates": "28.7589,-81.3178",
+  "latitude": 28.7589,
+  "longitude": -81.3178,
+  "nightModeUseIPLocation": false,
   "configVersion": 3
 }
