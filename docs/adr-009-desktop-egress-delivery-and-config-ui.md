@@ -268,9 +268,25 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   (was hardcoded `fault=-` in S2) so the panel shows "needs attention" — never a silent allow. Live seat
   ceremony stays the S6 gate (like ADR-007 S4). Oracle: `desktop-egress-adr009-s3-proof.sh` 5/5 (clean boot
   active → a colliding sealed update quarantines the owner cap, legible reason, sealed cap untouched).
-- **S4 — Network Access panel (no Rust):** standalone `shrek-connectivity` overlay baked (shrek-menu
-  pattern), Super+Shift+N + menu entry, onboarding widened, watcher + inbox UI. Render proof extends
-  `desktop-connectivity-proof.sh`.
+- **S4 — Network Access panel (no Rust) — DONE (2026-09-07).** Standalone `shrek-connectivity` surface
+  baked at `layers/shrek-desktop/overlay/usr/share/shrek/dms/shrek-connectivity/shell.qml` (the proven
+  shrek-menu pattern — a second `qs` process alongside DMS, Overlay layer, own `IpcHandler`
+  target=`shrek-connectivity`, themed live from DMS's `dms-colors.json`); Super+Shift+N (+ Mod1+Shift+N
+  fallback) in `sway.config`, `exec_always` launch. It is SELF-CONTAINED — a second qs process can't import
+  ui-v2/DMS singletons, so it embeds its own read model (mirroring `ui-v2/services/Egress.qml`, extended to
+  parse `source`/`feature` + the `title`/`purpose`/`capfault` card lines + the `/run/shrek/egress/wants`
+  inbox) and renders the four §6 sections in plain QtQuick: **System baseline** (status-only, revoke=console),
+  **Features** (weather one-click toggle over the egressd socket; web-browsing "Set up at console" ceremony;
+  owner caps as legible cards with an `installed` badge + quarantine reason, **display-only** in S4),
+  **Pending needs** (the closed-token `want` inbox), **Advanced** (the raw `host:proto:port` editor via the
+  console ceremony + the last-activity line). The projection stays sole display truth (no optimistic flip).
+  **DEFERRED to a later slice (own Fable pass, the only Rust):** owner-capability one-click bless
+  (catalog-backed `admits_socket_bless` + resolve + `@cap_pinned` union — owner caps are `deliver none`
+  with no shipped consumer yet), the owner-manifest install/remove launchers (need a `shrek connectivity
+  manifest-install` client verb — pairs with the toggle), and the intent watcher/shim (DMS MPRIS/weather-tab
+  signal introspection). Render proof `desktop-egress-adr009-s4-proof.sh` (load + model-parse of a seed with
+  an owner/quarantined cap + a `want` + a raw dest, non-flat paint). Live seat + look owner-verified in the
+  dogfood VM (no Play-driving).
 - **S5 — content:** night-mode seeds + default location (done); hide DMS updater/plugin UI (OQ-4). No
   `media-art` (OQ-2).
 - **S6 — sealed-VM dogfood + reflash + metal:** grant weather in-panel → forecast + location search
@@ -278,6 +294,12 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-07 S4 built — standalone `shrek-connectivity` "Network Access" surface (shrek-menu pattern, baked
+  overlay QML + Super+Shift+N, themed from `dms-colors.json`); self-contained read model (extended to parse
+  `source`/`feature` + `title`/`purpose`/`capfault` + the `want` inbox) + the four §6 sections in plain
+  QtQuick. Zero Rust. Owner-capability one-click bless, the owner-manifest install/remove launchers, and the
+  intent watcher DEFERRED (they need Rust / a client verb / DMS signal introspection — their own slice with a
+  Fable pass). Render proof `desktop-egress-adr009-s4-proof.sh`; live look owner-verified in the dogfood VM.
 - 2026-09-06 S3 built — gatekeeperd `manifest-install`/`manifest-remove` console ceremony (root-authored card
   render + the "toggle ≠ live intent" line + the advisory `is_storage_host` nudge; confirmed bytes staged to
   `/run/shrek/egress-manifest-staging`, only the name relayed to egressd) + the §4.4 layer-3 update-time
