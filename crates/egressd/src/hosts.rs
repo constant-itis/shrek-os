@@ -22,6 +22,7 @@
 //! whatever bindings are readable — store absence/unreadability can NEVER block localhost (`[R2-MF1]`,
 //! the first-boot ordering guarantee: `tmpfiles` runs after this oneshot on a virgin disk).
 
+use shrek_policy::desktop_egress::is_blessable_desktop_host;
 use shrek_policy::provider_bind::{provider_host, valid_bind_addr, PROVIDER_BINDINGS};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -260,12 +261,51 @@ fn migrate_legacy(home: &Path) -> io::Result<()> {
     atomic_write(&legacy, HOSTS_BASELINE, 0o644)
 }
 
+// ---- ADR-009 egress-pin delivery bridge ---------------------------------------------------------
+
+/// The root-owned egress projection `store::project_pinned` writes (`<name> <ipv4>` per line, one level
+/// under the hosts run dir). ADR-009 lifts a subset of these into the `/etc/hosts` composition.
+fn egress_pinned_file(run: &Path) -> PathBuf {
+    run.join("egress").join("pinned")
+}
+
+/// ADR-009: the blessed user-egress pins to lift into `/etc/hosts` so the uid-1000 DMS Go backend
+/// resolves them via NSS `files` (never the dropped 127.0.0.53 DNS), TLS-name intact. Defensively read
+/// the root-owned `{run}/egress/pinned` (already sealed-host-filtered by the egress side) and keep only
+/// lines whose name is a USER-BLESSED sealed desktop-egress host (defense-in-depth re-validation via
+/// shrek-policy — baseline profiles are deliberately excluded) and whose addr is a strict IPv4 literal.
+/// A missing/hostile/garbage projection ⇒ empty, so compose falls back to baseline + provider bindings
+/// exactly as before (`[R2MF1]`). First occurrence of a name wins, mirroring [`read_bindings`].
+fn read_egress_pins(run: &Path) -> Vec<(String, Ipv4Addr)> {
+    let Some(body) = defensive_read(&egress_pinned_file(run)) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(String, Ipv4Addr)> = Vec::new();
+    for line in body.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(name), Some(addr_s), None) = (it.next(), it.next(), it.next()) else {
+            continue; // not exactly `<name> <ipv4>` ⇒ skip
+        };
+        if !is_blessable_desktop_host(name) {
+            continue; // not a sealed user-blessed profile host ⇒ never lift into name resolution
+        }
+        let Some(addr) = valid_bind_addr(addr_s) else {
+            continue; // not a strict IPv4 literal ⇒ skip
+        };
+        if out.iter().any(|(n, _)| n == name) {
+            continue; // first-wins
+        }
+        out.push((name.to_string(), addr));
+    }
+    out
+}
+
 // ---- compose ------------------------------------------------------------------------------------
 
-/// Compose `/run/shrek/hosts` from the sealed baseline + every readable binding, and install it
-/// atomically (`root:root 0644` in a `0755` run dir). UNCONDITIONAL `[R2MF1]`: migration is best-effort
-/// and can never block this; an empty/absent/hostile store just yields the baseline, so localhost always
-/// resolves. Returns the projection path. Caller holds [`lock_hosts`].
+/// Compose `/run/shrek/hosts` from the sealed baseline + every readable provider binding + the ADR-009
+/// blessed-egress pins, and install it atomically (`root:root 0644` in a `0755` run dir). UNCONDITIONAL
+/// `[R2MF1]`: migration is best-effort and can never block this; an empty/absent/hostile store just yields
+/// the baseline, so localhost always resolves. Returns the projection path. Caller holds [`lock_hosts`].
 pub fn compose_hosts(home: &Path, run: &Path) -> io::Result<PathBuf> {
     // Migration is best-effort and MUST NOT block the projection.
     let _ = migrate_legacy(home);
@@ -276,6 +316,16 @@ pub fn compose_hosts(home: &Path, run: &Path) -> io::Result<PathBuf> {
         if let Some(host) = provider_host(&b.token) {
             body.push_str(&format!("{} {}\n", b.addr, host));
         }
+    }
+
+    // ADR-009 delivery bridge: lift blessed user-egress pins (weather's open-meteo hosts today) into
+    // name resolution. The nft table still INDEPENDENTLY gates the packet — a name here is resolvable
+    // but only reachable if its IP is pinned in the matching `@<profile>_pinned` set, so this removes
+    // the DNS-drop deadlock without granting any egress. Sorted for a deterministic projection.
+    let mut pins = read_egress_pins(run);
+    pins.sort();
+    for (name, addr) in pins {
+        body.push_str(&format!("{addr} {name}\n"));
     }
 
     fs::create_dir_all(run)?;
@@ -353,6 +403,55 @@ mod tests {
         assert!(proj.contains("10.0.0.2 shrek-model-proxy\n"));
         assert!(proj.contains("10.0.0.3 shrek-claude-cli\n"));
         assert!(proj.contains("10.0.0.4 shrek-codex-cli\n"));
+    }
+
+    // ---- ADR-009 egress-pin delivery bridge ----
+
+    /// Seed the root-owned egress projection exactly as `store::project_pinned` writes it.
+    fn seed_egress_pinned(run: &Path, body: &str) {
+        let egdir = run.join("egress");
+        fs::create_dir_all(&egdir).unwrap();
+        fs::write(egdir.join("pinned"), body).unwrap();
+    }
+
+    #[test]
+    fn adr009_lifts_blessed_weather_pins_into_the_projection() {
+        let home = tmp();
+        let run = tmp();
+        seed_egress_pinned(&run, "api.open-meteo.com 5.6.7.8\ngeocoding-api.open-meteo.com 5.6.7.9\n");
+        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        assert!(proj.starts_with(HOSTS_BASELINE), "baseline must lead: {proj}");
+        assert!(proj.contains("5.6.7.8 api.open-meteo.com\n"), "forecast host lifted: {proj}");
+        assert!(proj.contains("5.6.7.9 geocoding-api.open-meteo.com\n"), "geocoding host lifted: {proj}");
+    }
+
+    #[test]
+    fn adr009_never_lifts_an_off_profile_or_baseline_host() {
+        let home = tmp();
+        let run = tmp();
+        // Even though the projection is root-owned, re-validate defensively: a foreign name (poisoned or
+        // legacy) and a BASELINE host (desktop-updates) must NOT enter host-wide name resolution.
+        seed_egress_pinned(
+            &run,
+            "api.open-meteo.com 5.6.7.8\nevil.example.com 6.6.6.6\nshrekos-updates.iambu.dev 9.9.9.9\n",
+        );
+        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        assert!(proj.contains("5.6.7.8 api.open-meteo.com\n"), "sealed weather host lifted: {proj}");
+        assert!(!proj.contains("6.6.6.6"), "off-profile host must NOT be lifted: {proj}");
+        assert!(!proj.contains("evil.example.com"), "off-profile host must NOT be lifted: {proj}");
+        assert!(!proj.contains("shrekos-updates.iambu.dev"), "baseline host must NOT be lifted: {proj}");
+    }
+
+    #[test]
+    fn adr009_absent_pinned_yields_baseline_plus_bindings_only() {
+        let home = tmp();
+        let run = tmp();
+        write_binding(&home, "local", "10.0.0.1").unwrap();
+        // no {run}/egress/pinned exists at all
+        let proj = fs::read_to_string(compose_hosts(&home, &run).unwrap()).unwrap();
+        assert!(proj.starts_with(HOSTS_BASELINE));
+        assert!(proj.contains("10.0.0.1 shrek-model\n"));
+        assert!(!proj.contains("open-meteo"), "no egress pins ⇒ none lifted: {proj}");
     }
 
     #[test]

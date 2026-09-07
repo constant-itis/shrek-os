@@ -748,11 +748,22 @@ impl Supervisor {
     }
 
     /// Refresh BOTH `/run` projections after a store change (curated pinned map + legible state view),
-    /// so the uid-1000 UI never reads a stale panel and the weather widget's `--resolve` map stays in
-    /// step. Best-effort: a projection failure never fails the bless it reports.
+    /// so the uid-1000 UI never reads a stale panel and the pinned map stays in step. Then recompose the
+    /// ADR-009 `/etc/hosts` bridge so the just-changed blessed pins are resolvable by the uid-1000 DMS Go
+    /// backend via NSS `files` (the delivery half of ADR-007 S7). Best-effort: a projection or compose
+    /// failure never fails the bless it reports.
     fn reproject(&self) {
         let _ = store::project_pinned(&self.store, &self.run);
         let _ = store::project_state(&self.store, &self.run);
+        // ADR-009 delivery bridge: recompose /run/shrek/hosts (← /etc/hosts) so it carries the blessed
+        // egress pins we just projected. Under the hosts lock so it never interleaves with a provider
+        // bind/unbind; a distinct lock from the store lock held above, always taken store→hosts, so no
+        // cycle. compose reads the pinned map from the egress `/run` view we just refreshed.
+        let home = hosts::hosts_home_dir();
+        let hosts_run = hosts::hosts_run_dir();
+        if let Ok(_lock) = hosts::lock_hosts(&home) {
+            let _ = hosts::compose_hosts(&home, &hosts_run);
+        }
     }
 
     /// Shared bless / re-pin body. INTENT-FIRST `[Fable S3 fix #4]`: record the durable bless BEFORE

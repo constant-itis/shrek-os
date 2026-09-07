@@ -65,13 +65,19 @@ const DESKTOP_UPDATES: &[EgressRule] = &[
     EgressRule { host: "shrekos-updates.iambu.dev", proto: Proto::Tcp, port: 443 },
 ];
 
-// weather — the one keyless weather API (Q6c: open-meteo, no account, privacy-forward). User-blessed,
-// deny-until-blessed. A NAME (not a literal IP): the supervisor resolves it over sealed-DoT at bless
-// time and on the bounded re-pin, seals the result into `@weather_pinned`, and publishes it to the
-// widget via the `/run/shrek/egress/pinned` map so the widget dials `--resolve api.open-meteo.com:443:
-// <ip>` with TLS hostname verification intact. https/tcp:443, exactly like the agent internet profiles.
+// weather — the keyless open-meteo API pair (Q6c: no account, privacy-forward). User-blessed,
+// deny-until-blessed. Both are NAMES (not literal IPs): the supervisor resolves them over sealed-DoT at
+// bless time and on the bounded re-pin, seals the results into `@weather_pinned`, and publishes them to
+// `/run/shrek/egress/pinned`. Delivery to the DMS Go backend is via the ADR-009 bridge — those pins flow
+// into the ADR-008 `/etc/hosts` composition, so its `getaddrinfo` resolves the names to the pinned IPs
+// through NSS `files` (never the dropped 127.0.0.53 DNS); TLS hostname verification stays intact.
+//   - api.open-meteo.com           — the forecast fetch.
+//   - geocoding-api.open-meteo.com — the location-name search (typing a city → coords). ADR-009: without
+//     it, the weather location picker is dead (the geocode lookup is firewall-blocked).
+// https/tcp:443, exactly like the agent internet profiles.
 const WEATHER: &[EgressRule] = &[
     EgressRule { host: "api.open-meteo.com", proto: Proto::Tcp, port: 443 },
+    EgressRule { host: "geocoding-api.open-meteo.com", proto: Proto::Tcp, port: 443 },
 ];
 
 // web-browsing — the BROAD grant. Deliberately EMPTY of pin rules because a browser reaches arbitrary
@@ -126,6 +132,23 @@ pub fn is_prepinned_profile(name: &str) -> bool {
 /// §3), and it is why a `web-browsing` profile with an empty rule-set is NOT "reaches nothing".
 pub fn is_broad_profile(name: &str) -> bool {
     name == "web-browsing"
+}
+
+/// ADR-009 delivery-bridge predicate: is `host` a sealed rule host of a USER-BLESSED (non-baseline)
+/// desktop-egress profile — i.e. a name that legitimately belongs in the ADR-008 `/etc/hosts`
+/// composition so the uid-1000 DMS Go backend can resolve it via NSS `files` to its pinned IP?
+///
+/// Deliberately EXCLUDES baseline profiles: `desktop-ntp` is sealed literal IPs (no name to resolve) and
+/// `desktop-updates` is resolved by a root service that is not caught by the uid-1000 DNS drop, so neither
+/// needs — nor should silently acquire — a host-wide `/etc/hosts` pin. Today this is exactly the two
+/// open-meteo `weather` hosts; a future one-click pinned profile is admitted automatically. Fail-closed:
+/// an off-profile or baseline host returns `false`, so `compose_hosts` never lifts it into name resolution.
+pub fn is_blessable_desktop_host(host: &str) -> bool {
+    DESKTOP_EGRESS_PROFILES
+        .iter()
+        .filter(|p| !is_baseline_profile(p.name))
+        .flat_map(|p| p.rules.iter())
+        .any(|r| r.host == host)
 }
 
 /// The bless TIER a desktop profile requires (ADR-007 §3, Q3). This is SEALED policy — the supervisor
@@ -255,7 +278,12 @@ pub fn parse_raw_triple(s: &str) -> Result<RawTriple, &'static str> {
 }
 
 /// RFC-1123 hostname (or IPv4 literal) validation for a raw host. See [`parse_raw_triple`] for the rules.
-fn valid_raw_host(h: &str) -> bool {
+///
+/// `pub(crate)` so the ADR-009 capability-manifest loader ([`crate::egress_capability`]) reuses the
+/// EXACT same host grammar for its `host <name> <proto> <port>` lines — one definition, one set of
+/// argv/line-injection defenses, no reinvention (ADR-009 §4.3: "host lines reuse the sealed raw-host
+/// grammar verbatim").
+pub(crate) fn valid_raw_host(h: &str) -> bool {
     if h.is_empty() || h.len() > 253 || h.starts_with('-') {
         return false;
     }
@@ -285,7 +313,7 @@ mod tests {
     #[test]
     fn resolve_known_desktop_profiles() {
         assert_eq!(resolve_desktop("desktop-ntp").unwrap().rules.len(), 2);
-        assert_eq!(resolve_desktop("weather").unwrap().rules.len(), 1);
+        assert_eq!(resolve_desktop("weather").unwrap().rules.len(), 2); // ADR-009: forecast + geocoding
         assert_eq!(resolve_desktop("desktop-updates").unwrap().rules.len(), 1);
         assert!(resolve_desktop("web-browsing").unwrap().is_empty());
     }
@@ -340,18 +368,22 @@ mod tests {
     }
 
     #[test]
-    fn weather_is_one_https_name_dot_resolved() {
+    fn weather_is_two_https_names_dot_resolved() {
         let w = resolve_desktop("weather").unwrap();
-        assert_eq!(w.rules.len(), 1);
+        assert_eq!(w.rules.len(), 2); // ADR-009: forecast + geocoding (location-name search)
         assert!(w.allows("api.open-meteo.com", Proto::Tcp, 443));
-        // A NAME, not a literal IP: the supervisor DoT-resolves it (NOT pre-pinned), after the clock
-        // is good. So it must NOT parse as an IPv4 literal, and is neither baseline nor broad.
-        assert!(w.rules[0].host.parse::<Ipv4Addr>().is_err(), "weather host must be a NAME, not a literal IP");
+        assert!(w.allows("geocoding-api.open-meteo.com", Proto::Tcp, 443));
+        // Both are NAMES, not literal IPs: the supervisor DoT-resolves them (NOT pre-pinned), after the
+        // clock is good. So each must NOT parse as an IPv4 literal, and weather is neither baseline nor broad.
+        for r in w.rules {
+            assert!(r.host.parse::<Ipv4Addr>().is_err(), "weather host must be a NAME, not a literal IP: {:?}", r.host);
+        }
         assert!(!is_prepinned_profile("weather"));
         assert!(!is_baseline_profile("weather"));
         assert!(!is_broad_profile("weather"));
         // Deny-by-default: no plaintext :80, no wildcard/suffix, no other host.
         assert!(!w.allows("api.open-meteo.com", Proto::Tcp, 80));
+        assert!(!w.allows("geocoding-api.open-meteo.com", Proto::Tcp, 80));
         assert!(!w.allows("open-meteo.com", Proto::Tcp, 443));
         assert!(!w.allows("api.open-meteo.co", Proto::Tcp, 443));
     }

@@ -19,6 +19,13 @@
 //!   * [`provenance`] — `Evidence → TrustBand` (B1, slice-7): the band is DERIVED from an
 //!                  integrity-checked measurement of the code object, not asserted by the caller. The
 //!                  pure lattice lives here; gatekeeperd does the measuring.
+//!   * [`egress_capability`] — the DATA-DRIVEN desktop-egress capability layer (ADR-009 v2, S1): the
+//!                  flat-manifest grammar + parser, the one-click `tcp:443` tier invariant (what makes
+//!                  a plaintext host structurally unclickable), the merged sealed+owner catalog
+//!                  (sealed-always-wins), and the §4.4 isolation predicates (`is_sealed_deliverable_host`,
+//!                  `is_system_reserved_host`). Pure grammar+catalog logic; egressd (S2) loads the two
+//!                  on-disk dirs and feeds parsed manifests in. Sibling of [`desktop_egress`], which
+//!                  keeps the COMPILED baseline/broad profiles (ADR-009 §4.1).
 //!   * [`provider_bind`] — the sealed CLOSED SET of model-provider hook-up tokens (ADR-008, S1): the
 //!                  `token → sealed-name` map behind the egressd `bind` verb + the strict-IPv4
 //!                  bind-address grammar. Makes "uid 1000 may name only the 4 model brokers" true by
@@ -39,6 +46,7 @@
 
 pub mod desktop_egress;
 pub mod egress;
+pub mod egress_capability;
 pub mod provenance;
 pub mod provider_bind;
 pub mod swamp;
