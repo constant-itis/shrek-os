@@ -50,7 +50,17 @@
 /layers/shrek-desktop/overlay/usr/lib/x86_64-linux-gnu/
 /layers/shrek-desktop/overlay/usr/lib/qt6/
 /layers/shrek-desktop/overlay/usr/share/qt6/
-/layers/shrek-desktop/overlay/usr/share/quickshell/
+# NOTE: `/*` (contents), not `/` (the dir) — so the S5b DMS-override below can be re-included (git
+# forbids re-including under a dir excluded by a trailing-slash pattern).
+/layers/shrek-desktop/overlay/usr/share/quickshell/*
+# ...EXCEPT the S5b DMS-override (ADR-009 v2 OQ-4): a vendored patch of DMS's packaged
+# Common/SettingsTabs.qml that MUST sit at DMS's real load path to replace the apt copy. It is
+# hand-authored SOURCE, not a build product — track exactly this one file, nothing else in the tree.
+!/layers/shrek-desktop/overlay/usr/share/quickshell/dms/
+/layers/shrek-desktop/overlay/usr/share/quickshell/dms/*
+!/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/
+/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/*
+!/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/SettingsTabs.qml
 /layers/shrek-desktop/overlay/usr/share/applications/
 /layers/shrek-desktop/overlay/usr/share/icons/
 

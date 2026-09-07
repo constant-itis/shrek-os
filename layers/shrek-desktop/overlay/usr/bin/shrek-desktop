@@ -47,6 +47,20 @@ if [ ! -e "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json"
   cp /usr/share/shrek/dms/default-session.json "${XDG_STATE_HOME:-$HOME/.local/state}/DankMaterialShell/session.json" 2>/dev/null || true
 fi
 
+# Suppress DMS's "What's New" changelog popup (ADR-009 v2 OQ-4). DMS's ChangelogService gates the
+# upgrade popup purely on the existence of ~/.config/DankMaterialShell/.changelog-<currentVersion>
+# (hardcoded "1.6" in DMS v1.6.0). Fresh users never see it (first-launch silently touches the marker),
+# but a persistent /home that predates a DMS version reads as an "upgrade" and pops the modal — which
+# would offer an "Open in Browser" link to danklinux.com that the sealed egress refuses anyway. Pre-seed
+# the marker so the popup stays closed on both fresh and existing homes. Idempotent (existence-only gate);
+# a marker the user already has is left untouched. ⚠ DRIFT: the "1.6" suffix tracks the dms package pin
+# in layers/shrek-desktop/mkosi.conf — bump both together (scripts/desktop-dms-suppress-proof.sh asserts it).
+_shrek_changelog_marker="${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell/.changelog-1.6"
+if [ ! -e "$_shrek_changelog_marker" ]; then
+  mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/DankMaterialShell" 2>/dev/null || true
+  : > "$_shrek_changelog_marker" 2>/dev/null || true
+fi
+
 # S5 dynamic theming — make foot follow the palette. (1) Seed the user matugen config first-run so
 # `dms matugen queue` (runUserMatugenTemplates=true) regenerates ~/.local/state/shrek/foot-colors.ini
 # from the wallpaper on every theme change. (2) Seed an INITIAL foot-colors.ini so foot.ini's
