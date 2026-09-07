@@ -1,6 +1,13 @@
 #!/bin/sh
 # Shrek OS — ADR-007 S6b: the sealed-VM desktop-egress dogfood probe (guest side).
 #
+# S6-REWORK (ADR-009 v2 S2, 2026-09-06): the @weather_pinned / @raw_pinned nft sets this probe queries were
+# RETIRED + generalized into ONE concat set @cap_pinned (ipv4 . proto . port) — weather pins as
+# `<ip> . tcp . 443` tuples now, not bare ipv4. The map-eq / repin / sak-raw legs below (nft_set_elems
+# weather_pinned, `nft list set ... raw_pinned`) must be reworked to parse @cap_pinned tuples WHEN S6 runs
+# live in the VM. Until then those legs fail loud (empty set) by design. S2's @cap_pinned enforcement is
+# proven headless in scripts/desktop-egress-s2-proof.sh + scripts/desktop-egress-adr009-s2-proof.sh.
+#
 # This is the in-guest ORACLE + CUE EMITTER for the desktop-egress plane (crates/egressd + the gatekeeperd
 # DESKTOP-EGRESS ceremony). It proves the handful of properties that netns/host-oracles (S2e/S5) CANNOT:
 #   * the LIVE browser-cgroup matcher — a real process in shrekbrowser.slice ACCEPTs to the DNS stub while

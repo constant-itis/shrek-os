@@ -15,6 +15,12 @@
 #
 # S6 gates scored below (each a `SHREK-DOGFOOD S6 <check>=<value>` line the tally greps):
 #   ntp                      NTP synced off the SEALED literal IPs from a FORWARD-skewed RTC, name-free (MF-4)
+# S6-REWORK (ADR-009 v2 S2, 2026-09-06): the @weather_pinned / @raw_pinned nft sets below were RETIRED and
+# GENERALIZED into ONE concat set @cap_pinned (ipv4 . proto . port) — weather now pins as `<ip> . tcp . 443`
+# tuples, not bare ipv4. The map-eq / repin / sak-raw legs here (and in dogfood-egress-probe) still query
+# the old set names and compare bare IPs; they must be reworked for @cap_pinned WHEN S6 runs live in the VM
+# (the tuple-parse + set-equality logic can only be validated against a booted image). S2's @cap_pinned
+# enforcement is proven headless in desktop-egress-s2-proof.sh + desktop-egress-adr009-s2-proof.sh.
 #   map-eq                   the /run pin map == the live @weather_pinned nft set (§11.6 #1)
 #   weather-reach            uid-1000 reaches pinned open-meteo via --resolve, TLS verifies the sealed name (#2)
 #   unblessed-drop           an unblessed dest from uid 1000 DROPs (#2)

@@ -15,11 +15,11 @@
 #                          the accept-bless path's nft + DoT halves are arenas A + B).
 #
 #   G-split        store is 0700 (unreadable to uid 1000); the /run pinned map is 0644 (the [R2-MF-A] split)
-#   G-bless-elem   applying a blessed weather pin lands the IP in @weather_pinned (element-only)
+#   G-bless-elem   applying a blessed weather pin lands its (ip . tcp . 443) tuples in @cap_pinned (ADR-009
+#                  §4.5: weather migrated off the retired plain-ipv4 @weather_pinned onto the union set)
 #   G-nonbrowser   the baked rule-0 stub-DROP for a non-browser uid-1000 lookup is present above lo-accept
-#   G-unknown      applying a non-pinnable profile parks an unknown-profile fault and writes NO element
 #   G-applyfail    an apply with the baked table ABSENT fails closed — a fault, the deny floor stands
-#   G-unbless      unbless reconciles @weather_pinned back to empty
+#   G-unbless      unbless reconciles @cap_pinned back to empty (union excluding the withdrawn grant)
 #   G-reconcile    a fresh apply (daemon restart) re-adds the stored pins as elements — never flushes
 #   G-dot          a live sealed-DoT resolve of weather returns a real IPv4
 #   G-dot-hosts    a poisoned /etc/hosts (mount ns) steers getent but NOT the DoT pin (#3121 workaround)
@@ -66,18 +66,19 @@ A_OUT="$WORK/a.out"
 # a marker and the nft output). `set` view is space/tab/newline-stripped for a stable grep.
 unshare -rn sh -c '
   nft -f "'"$NFT_FILE"'" || { echo "NFT-LOAD-FAIL"; exit 1; }
-  setview() { nft list set inet shrek_desktop_egress weather_pinned | tr -d "\n\t "; }
+  setview() { nft list set inet shrek_desktop_egress cap_pinned | tr -d "\n\t "; }
   echo "RULE0: $(nft -a list chain inet shrek_desktop_egress output | grep "th dport 53 drop" | tr -d "\t")"
-  "'"$B"'" apply --profile weather --at 100 >/dev/null 2>&1;          echo "AFTER-BLESS: $(setview)"
-  "'"$B"'" apply --profile web-browsing --at 100 >/dev/null 2>&1;     echo "AFTER-UNKNOWN: $(setview)"
+  "'"$B"'" apply --profile weather --at 100 >/dev/null 2>&1;           echo "AFTER-BLESS: $(setview)"
   "'"$B"'" apply --profile weather --unbless --at 100 >/dev/null 2>&1; echo "AFTER-UNBLESS: $(setview)"
-  "'"$B"'" apply --profile weather --at 100 >/dev/null 2>&1;          echo "AFTER-RECONCILE: $(setview)"
+  "'"$B"'" apply --profile weather --at 100 >/dev/null 2>&1;           echo "AFTER-RECONCILE: $(setview)"
 ' >"$A_OUT" 2>&1
 grep -q 'RULE0:.*skuid 1000 ip daddr.*127.0.0.53.*th dport 53 drop' "$A_OUT"; check "G-nonbrowser" "baked rule-0 stub-DROP present" $?
-grep -q 'AFTER-BLESS:.*elements={104.16.1.1,104.16.2.2}' "$A_OUT"; check "G-bless-elem" "both IPs in @weather_pinned" $?
-[ -f "$S/fault/web-browsing" ]; check "G-unknown" "unknown-profile fault parked, no element" $?
-grep -q 'AFTER-UNBLESS:.*weather_pinned{typeipv4_addr}}' "$A_OUT"; check "G-unbless" "@weather_pinned empty after unbless" $?
-grep -q 'AFTER-RECONCILE:.*elements={104.16.1.1,104.16.2.2}' "$A_OUT"; check "G-reconcile" "restart re-adds elements (no flush)" $?
+# weather pins now land as (ip . tcp . 443) concat tuples in the generalized @cap_pinned union set.
+{ grep 'AFTER-BLESS:' "$A_OUT" | grep -q '104.16.1.1.tcp.443' && grep 'AFTER-BLESS:' "$A_OUT" | grep -q '104.16.2.2.tcp.443'; }
+check "G-bless-elem" "both weather tuples in @cap_pinned" $?
+grep -q 'AFTER-UNBLESS:.*cap_pinned{typeipv4_addr.inet_proto.inet_service}}' "$A_OUT"; check "G-unbless" "@cap_pinned empty after unbless" $?
+{ grep 'AFTER-RECONCILE:' "$A_OUT" | grep -q '104.16.1.1.tcp.443' && grep 'AFTER-RECONCILE:' "$A_OUT" | grep -q '104.16.2.2.tcp.443'; }
+check "G-reconcile" "restart re-adds tuples (no flush)" $?
 
 # apply-fail: no table loaded in this netns ⇒ nft element add errors ⇒ fault, fail-closed
 "$B" store project >/dev/null

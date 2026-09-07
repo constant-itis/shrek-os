@@ -9,9 +9,9 @@
 #
 #   G-nonroot     uid-1000 cannot invoke confirmed-* (geteuid gate) — refused, NOTHING written
 #   G-badraw      a malformed raw triple is refused by the grammar — no store write, no element
-#   G-raw-add     confirmed-add-raw (literal host) lands (ip . proto . port) in @raw_pinned, element-only
+#   G-raw-add     confirmed-add-raw (literal host) lands (ip . proto . port) in @cap_pinned, element-only
 #   G-raw-multi   a second confirmed-add-raw adds its tuple; both live; intent is the flat TSV file
-#   G-raw-remove  confirmed-remove-raw drops ONLY its tuple; the other survives; @raw_pinned reconciled
+#   G-raw-remove  confirmed-remove-raw drops ONLY its tuple; the other survives; @cap_pinned reconciled
 #   G-raw-survive a fresh `egressd reconcile` (reboot) re-adds the stored raw tuples — never flushes
 #   G-wb-bless    confirmed-bless web-browsing persists tier=ceremony; state shows blessed=1; pending
 #                 (no browser rule — the slice is absent in the oracle; browser-up installs it at launch)
@@ -40,13 +40,13 @@ echo "=== boundary (non-root host) ==="
 rc=$?; [ "$rc" -eq 2 ] && [ ! -s "$S/raw" ]; check "G-nonroot" "uid-1000 confirmed-* refused (rc=$rc), no raw written" $?
 
 # ── enforcement arena: a netns (userns maps us to root ⇒ geteuid==0) with the baked table loaded ─────
-echo "=== A. confirmed-* engine + @raw_pinned enforcement (netns as root) ==="
+echo "=== A. confirmed-* engine + @cap_pinned enforcement (netns as root) ==="
 A_OUT="$WORK/a.out"
 unshare -rn sh -c '
   # NO `set -e`: several steps below intentionally FAIL (bad triple, tier refusal) and we capture their rc.
   B="'"$B"'"; NFT_FILE="'"$NFT_FILE"'"; S="'"$S"'"; R="'"$R"'"
   export SHREK_EGRESS_STORE="$S" SHREK_EGRESS_RUN="$R"
-  rawview() { nft list set inet shrek_desktop_egress raw_pinned | tr -d "\n\t "; }
+  rawview() { nft list set inet shrek_desktop_egress cap_pinned | tr -d "\n\t "; }
   chainview() { nft -a list chain inet shrek_desktop_egress output | tr -d "\t"; }
 
   nft -f "$NFT_FILE" || { echo "NFT-LOAD-FAIL"; exit 1; }
