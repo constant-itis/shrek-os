@@ -228,11 +228,25 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   catalog type in `shrek-policy`; catalog-backed `bless_tier`/`admits_socket_bless`/`is_blessable_desktop_host`
   with the **sealed-source** restriction; the §4.4 install-refuse host set. Tests: malformed ⇒ absent;
   :80 one-click refused; sealed-shadows-owner; owner-source never lifted to hosts; baseline/broad stay compiled.
-- **S2 — egressd + nft (Rust; one image bake):** catalog loader (two dirs); `@cap_pinned` + baked rule;
-  `weather` migrated off `@weather_pinned`; union reconcile; state gains `purpose/feature/source`; hosts
-  bridge catalog-backed + sealed-source only; `confirmed-manifest-{install,remove}` root-peer verbs + `want
-  <token>` inbox verb. Oracle: sealed grant end-to-end; hostile manifest inert; owner install via relay;
-  removal withdraws tuples + hosts lines; owner pin never appears in `/etc/hosts`.
+- **S2 — egressd + nft (Rust; one image bake) — DONE (2026-09-06).** Catalog loader (two dirs,
+  `egressd::catalog`, fail-closed per file); the generalized `@cap_pinned` concat set + one baked rule
+  (baked in `desktop-egress.nft`), `@weather_pinned` retired, `weather` migrated onto it; the union
+  reconcile (`confirmed::desired_cap_union`/`reconcile_cap` — weather's pins fold in with raw as
+  `<ip>.proto.port` tuples, MF-5 whole-set recompute); the state view gains `source`/`feature` + the
+  `title`/`purpose`/`capfault` card lines; the hosts bridge is catalog-backed + sealed-source only
+  (`is_sealed_deliverable_host`, §4.4); `confirmed-manifest-{install,remove}` root-peer verbs (staged
+  candidate in `/run/shrek/egress-manifest-staging`, egressd is the sole writer of the live owner dir, the
+  §4.4 install-refuses enforced) + the `want <catalog-token>` inbox verb. **One image bake** = the
+  `desktop-egress.nft` set + the sealed `weather.capability` (baked here, not S5 — the catalog-backed hosts
+  bridge needs it or weather delivery regresses). Oracle: `desktop-egress-s2-proof.sh` 16/16 (real nft,
+  `@cap_pinned`) + `desktop-egress-adr009-s2-proof.sh` 8/8 (catalog, delivery, owner-host isolation,
+  install-via-relay, §4.4 refusal, want-inbox, remove). **Scoped for S2 (carries to the panel/ceremony
+  slices):** an *installed owner capability* is display-only — not yet one-click-blessable over the socket
+  (catalog-backed `admits_socket_bless` + catalog-validated pin storage land with the S4 panel toggle);
+  the vestigial `.applied` marker is retired (the union reconciles against live nft truth). The stale
+  ADR-007 S4 `desktop-egress-s4-proof.sh` (drives the removed `egressd confirmed-*` CLI) and the S6 dogfood
+  probe's `@weather_pinned`/`@raw_pinned` legs are noted for S6-rework; the confirmed-verb behavior is
+  covered by `supervisor::tests`.
 - **S3 — ceremony UX:** gatekeeperd `manifest-install/remove` rendering the full card + storage-host
   warning + the "toggle ≠ live intent" line; the update-time collision quarantine (§4.4 layer 3).
 - **S4 — Network Access panel (no Rust):** standalone `shrek-connectivity` overlay baked (shrek-menu
@@ -245,6 +259,12 @@ is the sealed-source restriction (§4.4) and the `@cap_pinned` retarget.
   SAK ceremony → pins → revoke; owner pin absent from `/etc/hosts`; daemon-death fail-closed over `@cap_pinned`.
 
 ## 10. Changelog
+- 2026-09-06 S2 built — egressd catalog loader + `@cap_pinned` generalization (weather off `@weather_pinned`,
+  union reconcile) + catalog-backed state view (`source`/`feature`/card text) + sealed-source `/etc/hosts`
+  bridge + owner-manifest ceremony verbs (staging in `/run/shrek/egress-manifest-staging`; §4.4 install-
+  refuses) + `want` inbox. `weather.capability` baked into the sealed dir (one image bake, with the nft set).
+  Owner-capability one-click bless deferred to the panel slice; `.applied` marker retired. Oracles green
+  (s2-proof 16/16 real-nft, adr009-s2-proof 8/8); shrek-policy 88 + egressd 80 unit tests green.
 - 2026-09-06 v2 — ACCEPTED. Fable adversarial pass folded; owner ruled OQ-1..5. A+ (manifests-as-data +
   request inbox); `@cap_pinned` generalization; owner-pin↔root-resolution structural isolation (§4.4);
   Network Access standalone panel; the two normative banners (destination≠click, toggle≠live-intent).
