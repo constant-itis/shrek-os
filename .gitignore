@@ -61,6 +61,11 @@
 !/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/
 /layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/*
 !/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Common/SettingsTabs.qml
+# ...and the boot-lag plan-B override: a vendored patch of DMS's Services/WeatherService.qml
+# (maxRetryAttempts 3 -> 10) at the same real load path. Same posture — track exactly this one file.
+!/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Services/
+/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Services/*
+!/layers/shrek-desktop/overlay/usr/share/quickshell/dms/Services/WeatherService.qml
 /layers/shrek-desktop/overlay/usr/share/applications/
 /layers/shrek-desktop/overlay/usr/share/icons/
 
