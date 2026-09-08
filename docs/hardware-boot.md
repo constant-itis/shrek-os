@@ -174,11 +174,33 @@ sudo scripts/make-and-flash-usb.sh /dev/sdX   # assembles the image, flashes, ve
 
 Booting it (Apple: hold Option -> EFI Boot -> rEFInd -> "Shrek OS Installer") lands in a
 **user-driven live session**, not an auto-erase: `shrek-live-welcome` presents a chooser —
-**GParted**, a **terminal**, or **Install Shrek OS** — and `Super+Return` opens a terminal,
-`Super+W` reopens the chooser. The chooser + GParted are verified to render under the live
-sway/pixman session (`scripts/install0-live-boot-proof.sh` asserts the session is reached; a
-GPU-less VM screendump only shows window outlines for GTK clients, so GTK render is verified in
-a headless-sway + `grim` container — real hardware has a GPU and paints normally).
+**Try Shrek Desktop (live)**, **GParted**, a **terminal**, or **Install Shrek OS** — and
+`Super+Return` opens a terminal, `Super+W` reopens the chooser. The chooser + GParted are verified
+to render under the live sway/pixman session (`scripts/install0-live-boot-proof.sh` asserts the
+session is reached; a GPU-less VM screendump only shows window outlines for GTK clients, so GTK
+render is verified in a headless-sway + `grim` container — real hardware has a GPU and paints
+normally).
+
+### Try Shrek Desktop (live)
+
+"Try Shrek Desktop (live)" boots the *real* themed DMS desktop from the stick with **nothing
+installed** — boot, use the desktop, decide, then install. Everything it needs is already on the
+medium (the installer store merges the desktop sysext: the `dms` binary, `/usr/share/quickshell/dms`,
+and the desktop `sway.config`), and `/home` is ephemeral (the LIVE_INSTALLER `home.mount` mask plus
+`shrek-desktop`'s XDG->`/run` redirect), so the whole session is throwaway.
+
+Mechanism (why it's a `swaymsg reload`, not a relaunch): `sway-live.config` ends with
+`include $XDG_RUNTIME_DIR/shrek-live.d/*.config` — an **empty glob on a normal boot**. The chooser's
+"Try Shrek Desktop" action symlinks `sway-try-desktop.config` into that dir and runs `swaymsg reload`;
+reload re-globs the include and the fragment pulls in the full desktop config (keybinds + surfaces +
+wallpaper). sway re-runs `exec_always` on reload but **not** plain `exec`, so the fragment launches DMS
+itself via a guarded `exec_always` (the desktop config's own `exec dms` is inert on reload). On entry a
+one-shot `shrek-try-desktop-hello` posts a real DMS notification ("nothing is installed; `Super+I` to
+install, `Super+W` for options") so the trial explains itself; from the live desktop `Super+I` opens the
+graphical installer and `Super+W` reopens the chooser. The reload-swap mechanism is proven headless
+(DMS-independent) by `scripts/install0-trydesktop-proof.sh`, and the sealed image is verified to carry
+`dms`/`notify-send` + the fragment at the referenced paths; DMS actually rendering is confirmed by an
+owner metal boot (same gating as the Quickshell installer).
 
 ## 7. rEFInd on the installed disk (Apple only)
 
