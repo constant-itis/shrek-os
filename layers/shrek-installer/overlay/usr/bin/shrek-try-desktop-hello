@@ -1,0 +1,42 @@
+#!/bin/sh
+# One-shot welcome toast for the "Try Shrek Desktop (live)" session (#3110).
+#
+# Fired by sway-try-desktop.config via exec_always (so it runs on the reload that enters live-desktop
+# mode; a plain `exec` would NOT — sway only re-runs exec_always on reload). Guarded run-once so a later
+# `$mod+Shift+c` reload doesn't re-toast. Posts a REAL DMS notification: DMS is the
+# org.freedesktop.Notifications host, so this is the same notification plane the shell uses — we just wait
+# for that server to come up (DMS is launched by the same reload) before firing.
+#
+# The klog markers double as GPU-independent liveness evidence for the pre-flash VM smoke
+# (scripts/install0-trydesktop-vm-smoke.sh): "starting" proves the fragment's exec_always fired in the
+# real sealed image; "notified" proves DMS's D-Bus notification server actually came up (DMS is alive),
+# without depending on a screenshot the GPU-less VM can't render reliably.
+set -u
+
+rt="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+flag="$rt/shrek-try-desktop-hello.done"
+[ -e "$flag" ] && exit 0
+: > "$flag" 2>/dev/null || true
+
+# Serial-visible marker (same escalation shrek-live-welcome uses: NOPASSWD sudo, else best-effort kmsg).
+klog() {
+    { sudo -n sh -c "printf '%s\n' \"shrek-live: $*\" > /dev/kmsg" 2>/dev/null \
+        || printf '%s\n' "shrek-live: $*" > /dev/kmsg 2>/dev/null; } || true
+}
+klog "try-desktop hello: starting"
+
+# DMS needs a moment after launch to own org.freedesktop.Notifications; notify-send errors until then,
+# so retry (~20s) rather than firing into the void.
+i=0
+while [ "$i" -lt 20 ]; do
+    if notify-send -u normal -t 15000 -a "Shrek OS" \
+        "Trying Shrek OS — live" \
+        "Nothing is installed — a reboot wipes everything.
+Super+I to install  ·  Super+W for options" 2>/dev/null; then
+        klog "try-desktop hello: notified"
+        exit 0
+    fi
+    i=$((i + 1)); sleep 1
+done
+klog "try-desktop hello: notify server never appeared"
+exit 0

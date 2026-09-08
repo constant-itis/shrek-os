@@ -38,14 +38,30 @@ run_root() {
 
 term() { command -v foot >/dev/null 2>&1 && foot || xterm 2>/dev/null || true; }
 
+# Try Shrek Desktop (live) (#3110): switch this minimal chooser session into the FULL DMS desktop
+# without installing. The desktop sysext is already merged on the live medium and /home is ephemeral,
+# so it's a throwaway session — boot the stick, use the real desktop, decide, then install. Mechanism:
+# drop the try-desktop fragment where sway-live.config globs it and `swaymsg reload` — reload re-reads the
+# include and the full desktop config (keybinds + surfaces + DMS via exec_always) comes up in place.
+try_desktop() {
+    mkdir -p "$rt/shrek-live.d" 2>/dev/null || true
+    ln -sf /usr/share/shrek/installer/sway-try-desktop.config "$rt/shrek-live.d/10-try-desktop.config"
+    klog "try-desktop: switching to full Shrek desktop"
+    swaymsg reload >/dev/null 2>&1 || true
+    # Stop the chooser loop: reload does NOT re-run sway-live.config's `exec shrek-live-welcome`, so once
+    # we exit the desktop stays up. ($mod+w rebinds back to this chooser if the user wants it again.)
+    exit 0
+}
+
 do_action() {
     case "$1" in
-        gparted)  run_root gparted ;;
-        terminal) term ;;
+        gparted)    run_root gparted ;;
+        terminal)   term ;;
+        trydesktop) try_desktop ;;
         # must-fix #4: the Quickshell graphical installer is the only install path. It runs unprivileged
         # (compositor/Qt out of the privileged path) and escalates per-action via sudo -n.
-        install)  shrek-install-ui ;;
-        *)        return 1 ;;
+        install)    shrek-install-ui ;;
+        *)          return 1 ;;
     esac
 }
 
@@ -61,9 +77,10 @@ while :; do
         --text="Live medium. Explore or partition first, then install when you're ready.\n\n(Super+Return = terminal, Super+W = this menu.)" \
         --column="" --column="Action" --column="What it does" \
         --print-column=2 \
-        TRUE  gparted  "Open GParted — inspect / resize / partition disks by hand" \
-        FALSE terminal "Open a terminal (gparted, parted, gdisk, lsblk all available)" \
-        FALSE install  "Install Shrek OS  (ERASES an entire disk)" \
+        TRUE  trydesktop "Try Shrek Desktop (live) — boot the real desktop, nothing is installed" \
+        FALSE gparted    "Open GParted — inspect / resize / partition disks by hand" \
+        FALSE terminal   "Open a terminal (gparted, parted, gdisk, lsblk all available)" \
+        FALSE install    "Install Shrek OS  (ERASES an entire disk)" \
         2>/dev/null)" || choice=""
     # Never exit: a transient zenity failure or a Cancel just reloops (Super+W also reopens it).
     if [ -n "$choice" ]; then do_action "$choice" || true; else sleep 2; fi
