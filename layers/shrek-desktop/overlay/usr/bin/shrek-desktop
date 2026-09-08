@@ -141,6 +141,20 @@ if [ -e /usr/share/shrek/installer/live-mode ]; then
   export DMS_DISABLE_MATUGEN="${DMS_DISABLE_MATUGEN:-1}"
 fi
 
+# Keyboard layout override (shrek-keyboard). The profile.d adapter already exported XKB_DEFAULT_LAYOUT
+# from the PROVISIONED default (/etc/vconsole.conf XKBLAYOUT). A post-install user choice — written by
+# `shrek-keyboard` to a uid-1000 file under $HOME (sealed /etc is unwritable) — WINS over that default so
+# the layout persists across reboot. Parsed WITHOUT sourcing (never eval a config); same closed charset as
+# shrek-keyboard (lowercase alnum + , _ - so an xkb list like `us,de` is allowed). Empty/garbage ⇒ ignored,
+# leaving whatever the provisioning adapter set. sway.config sets no xkb override, so the env is authoritative.
+_shrek_kbf="${XDG_CONFIG_HOME:-$HOME/.config}/shrek/keyboard-layout"
+if [ -r "$_shrek_kbf" ]; then
+  _shrek_kbl="$(head -n1 "$_shrek_kbf" 2>/dev/null || true)"
+  case "$_shrek_kbl" in ''|*[!a-z0-9,_-]*) : ;; *) export XKB_DEFAULT_LAYOUT="$_shrek_kbl" ;; esac
+  unset _shrek_kbl
+fi
+unset _shrek_kbf
+
 sway_config=/usr/share/shrek/desktop/sway.config
 if [ -r /usr/share/shrek/installer/sway-live.config ]; then
   sway_config=/usr/share/shrek/installer/sway-live.config

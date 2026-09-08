@@ -1,0 +1,84 @@
+#!/bin/sh
+# shrek-keyboard — view or change the keyboard layout on the running sway session, post-install.
+#
+# WHY: DMS's own Keyboard settings tab is `niriOnly` — it writes niri's keyboard config, which sway
+# ignores, so it is (correctly) hidden on shrek's sway compositor. That left no post-install way to change
+# layout short of the raw `swaymsg input type:keyboard xkb_layout <x>` incantation. This is the shrek-owned,
+# sway-native control for it.
+#
+# The INSTALLED default comes from the provisioning plane (first-boot wizard keymap -> /etc/vconsole.conf
+# XKBLAYOUT -> exported as XKB_DEFAULT_LAYOUT by the desktop launcher). /etc is sealed + root-owned, so a
+# uid-1000 change can't live there; instead this writes a uid-1000 OVERRIDE under $HOME that:
+#   (1) the desktop launcher (shrek-desktop) reads on session start and prefers over the provisioned
+#       default, so the choice PERSISTS across reboot, and
+#   (2) is applied to the CURRENT session immediately via `swaymsg input`, so no relogin is needed.
+# Nothing here touches the sealed /etc or the provisioning store — the provisioned default remains the
+# fallback (use `--reset` to drop the override and go back to it).
+#
+#   shrek-keyboard                 show the stored + live layout
+#   shrek-keyboard <layout[,...]>  set the layout (xkb names, e.g. `us`, `de`, `us,de`) live + persistent
+#   shrek-keyboard --reset         drop the override; revert to the provisioned default (live + persistent)
+#
+# Env overrides (oracle): SHREK_KB_STORE (override file), SHREK_SWAYMSG (swaymsg cmd), SHREK_VCONSOLE.
+set -eu
+
+STORE="${SHREK_KB_STORE:-${XDG_CONFIG_HOME:-$HOME/.config}/shrek/keyboard-layout}"
+SWAYMSG="${SHREK_SWAYMSG:-swaymsg}"
+VCONSOLE="${SHREK_VCONSOLE:-/etc/vconsole.conf}"
+
+# An xkb layout token or comma-list: lowercase alnum plus , _ - (a layout list like `us,de`). No variants
+# with parentheses here — keep the closed, injection-proof charset; a variant is a follow-up.
+valid() { case "$1" in ''|*[!a-z0-9,_-]*) return 1 ;; *) return 0 ;; esac; }
+
+# The provisioned default: XKBLAYOUT from /etc/vconsole.conf, parsed WITHOUT sourcing (never eval config).
+provisioned_default() {
+    v=""
+    if [ -r "$VCONSOLE" ]; then
+        v="$(grep -E '^XKBLAYOUT=' "$VCONSOLE" 2>/dev/null | tail -n1)"
+        v="${v#XKBLAYOUT=}"; v="${v%\"}"; v="${v#\"}"; v="${v%\'}"; v="${v#\'}"
+    fi
+    [ -n "$v" ] && echo "$v" || echo "us"
+}
+
+# The stored choice: the override file if present, else the provisioned default.
+stored_layout() {
+    if [ -r "$STORE" ]; then
+        s="$(head -n1 "$STORE" 2>/dev/null || true)"
+        [ -n "$s" ] && { echo "$s"; return; }
+    fi
+    provisioned_default
+}
+
+apply_live() { "$SWAYMSG" input type:keyboard xkb_layout "$1" >/dev/null 2>&1 || true; }
+
+case "${1:-}" in
+    -h|--help)
+        sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+        exit 0 ;;
+    ''|--show|show)
+        echo "stored layout:      $(stored_layout)"
+        echo "provisioned default: $(provisioned_default)$( [ -r "$STORE" ] && echo '  (overridden)' )"
+        # best-effort live readout (sway IPC), never fails the command if swaymsg is absent
+        live="$("$SWAYMSG" -t get_inputs 2>/dev/null | grep -oE '"xkb_active_layout_name": "[^"]*"' | head -1 | sed 's/.*: "//; s/"$//' || true)"
+        [ -n "$live" ] && echo "live (this session): $live"
+        exit 0 ;;
+    --reset|reset)
+        rm -f "$STORE" 2>/dev/null || true
+        def="$(provisioned_default)"
+        apply_live "$def"
+        echo "shrek-keyboard: override cleared; reverted to the provisioned default '$def'"
+        exit 0 ;;
+    -*)
+        echo "shrek-keyboard: unknown option '$1' (try --help)" >&2
+        exit 2 ;;
+    *)
+        layout="$1"
+        valid "$layout" || { echo "shrek-keyboard: invalid layout '$layout' — use xkb names, e.g. us, de, 'us,de'" >&2; exit 2; }
+        # persist (uid-1000 owned; the launcher reads it on next boot, before the provisioned default)
+        mkdir -p "$(dirname "$STORE")" 2>/dev/null || true
+        printf '%s\n' "$layout" > "$STORE"
+        # apply to the running session now (no relogin)
+        apply_live "$layout"
+        echo "shrek-keyboard: layout set to '$layout' (applied now + persists across reboot)"
+        exit 0 ;;
+esac
