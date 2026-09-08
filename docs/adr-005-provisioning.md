@@ -223,6 +223,19 @@ leave the VT on baked `us`. So:
   XKB_DEFAULT_LAYOUT="$XKBLAYOUT"` → `exec shrek-desktop`. `sway`/`libxkbcommon` reads the
   env at context creation; the shipped `sway.config` has no `xkb_layout`/`input` override,
   so the env is authoritative.
+- **Post-install override** (`shrek-keyboard` + `shrek-desktop`): the adapter above delivers the
+  *provisioned* default, set once at install. To CHANGE the layout on a running box — the gap DMS
+  can't fill on sway, since its Keyboard settings tab is `niriOnly` (it writes niri config sway
+  ignores) — `shrek-keyboard <layout>` writes a **uid-1000 override** at
+  `${XDG_CONFIG_HOME:-$HOME/.config}/shrek/keyboard-layout` (sealed `/etc` is unwritable to the
+  desktop user) and live-applies it via `swaymsg input type:keyboard xkb_layout <layout>`. On the
+  next session the `shrek-desktop` launcher reads that file (same grep/param-expand, never `source`;
+  same closed `[a-z0-9,_-]` charset that admits an xkb list like `us,de`) and exports
+  `XKB_DEFAULT_LAYOUT` from it, **winning over** the provisioned default — so the choice persists.
+  `shrek-keyboard --reset` drops the override and reverts to the provisioned default. Nothing here
+  touches `/etc` or the provisioning store; the provisioned value remains the fallback. Proof:
+  `scripts/desktop-keyboard-layout-proof.sh` (9/9). A GUI surface for it (shrek-menu / a settings
+  panel) is a deferred follow-up — the mechanism is the CLI + the launcher override.
 
 The exact `ckbcomp` flag set for model/variant edge layouts is validated by the applier's
 proof (§11), but the **invocation shape above is fixed by this ADR** — the VT layout is
